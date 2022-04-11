@@ -1,0 +1,2 @@
+這行是控制 report裡面的檔名
+screenshot = "./testpic/"+ name + "_"+ self.file_create_time + '.png',

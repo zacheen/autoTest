@@ -1,0 +1,39 @@
+沒有副檔名的是資料夾
+XXX 代表各遊戲名稱 (CQ9_demo為範例code，裡面包含注解)
+OOOO 代表程式命名與檔案相同即可
+
+C:\Thomas_test\models\research\  (沒辨識不需要一樣)
+	- object_detection 
+		- game_pic
+			- XXX_pic : 各遊戲使用 compare_sim 時會從此資料夾尋找要比對的圖片
+				- OOOO.PNG (compare_sim 要辨識東西的名字)
+				- OOOO_pic.txt (compare_sim 要在哪個位置找上面的東西 OOOO要跟.PNG的名稱相同)
+				- OOOO_region.txt (compare_sim 如果在上面位置找不到的話 在這個區域裡面找 OOOO要跟.PNG的名稱相同)
+				- OOOO(要截圖東西的名字)
+					- pos.txt : 各遊戲使用 cut_pic_data 會從這裡讀取要截取的座標
+		- testreport : 裡面放產出的testreport(HTML)和文字檔  此資料夾看完可以整個直接刪除
+			- 日期資料夾 每跑一次主程式會多一個資料夾
+				- cmd_output.txt : 主程式(XXX_Main.py)的輸出 (準確來說應該是 Tool_Main.print_to_output 才會輸出到這裡)
+				- error.txt : 主程式(XXX_Main.py)的錯誤輸出
+				- pipe_output.txt : thread的輸出 (準確來說應該是  Tool_Main.glo_var.pipe_output_f.write 才會輸出到這裡)
+			- testpic : 
+				- OOOO_OOOO.png : testreport(HTML) 會讀這裡面的圖片當每個state的代表圖片 (compare_sim截的)
+				- OOOO_OOOO_detail.png : 這是 compare_sim 截下來用來精準比對(第一次比對)的圖片
+		- user_change : 
+			- game_pic
+				- XXX_pic : cut_pic_data 截的圖片也會存在這裡，且會後續的圖片被覆寫掉，辨識時會從這個資料夾讀取圖片辨識
+			- catch_back_error.txt : 抓取後台(XXX_catch_back.py)時的錯誤輸出
+			- chromedriver.exe : selenium 使用的 driver (每次chrome更新，需要再載新的chromedriver替換)
+			- OOOO_input.txt : XXX_Main.py呼叫初始化時會讀取這裡面的資料進行一些預設值的設定 (因為code會打包 因此個人資料會放在這裡面 才不會共用)
+				如果要新增要去 Tool_Main 找到 "# input (讀取設定檔)" 進行修改
+		- cal_money.py : 算分邏輯的 Tool_main
+		- XXX_cal_money.py : 裡面寫的是各個遊戲的算分邏輯，通常會拿後台的資料進行運算，比較齊全(通常會 import cal_money)
+		- Card.py : 裡面有一個 Class Card 用於儲存card的型態(可用 == > <直接比牌大小)，與一個function可以把str轉Card list
+		- Ma_jang.py : 同 Card 功能 但是麻將的
+		- catch_back.py  : 可以想成爬取後台的 Tool_main (原本在台灣使用的)
+		- XXX_catch_back.py : 裡面寫的是各個遊戲要如何爬後台、要爬什麼資料(通常會 import catch_back)
+		- compare_server.py : 轉換成資料(通常在catch_back中使用) 或 進行資料比較(通常在do_compare中使用)
+		- HTMLTestRun.py  : 用來把測試用例輸出成 HTML report (通常不會需要修改 只是會被import)
+		- judge_XXX.py : 拿來辨識是什麼牌型(目前可以辨識牛牛 炸金花) Example在judge_cow.py 
+		- Tool_Main.py : 裡面有各個遊戲的Main可能會用到的function，加速寫Main的時間
+Main!	- XXX_Main.py : 裡面寫的是各個遊戲的Main(通常會 import Tool_Main)

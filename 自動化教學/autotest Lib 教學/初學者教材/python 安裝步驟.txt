@@ -1,0 +1,25 @@
+這裡有安裝教學
+	https://ithelp.ithome.com.tw/articles/10200384
+
+以下的設定要統一 避免不同環境出問題
+	anaconda
+		https://www.anaconda.com/products/individual#Downloads
+		安裝時會遇到Advance Option
+			選擇要不要用PATH 勾選<要> (預設是不要)
+			
+	在 cmd 打 conda --version
+		如果有跳出版本代表安裝成功
+
+	在 cmd 繼續打以下指令	
+	python 降版	
+		conda install python=3.7
+	安裝軟體
+		conda install -c anaconda protobuf
+		pip install pillow Cython matplotlib pandas opencv-python
+		pip install pyautogui selenium
+		
+	安裝VScode	#勾選要加到環境變數(path)
+		套件
+			文中的python是必要安裝的
+			其他看個人習慣
+			先不要安裝 pylance (目前不太好用)

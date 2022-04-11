@@ -1,0 +1,80 @@
+anaconda
+	https://www.anaconda.com/products/individual#Downloads
+	安裝時會遇到Advance Option
+		選擇要不要用PATH 勾選<要> (預設是不要)
+		
+在 cmd 打 conda --version
+	如果有跳出版本代表安裝成功
+
+在 cmd 繼續打以下指令	
+python 降版	
+	conda install python=3.7
+安裝軟體
+	conda install -c anaconda protobuf
+	pip install pillow Cython matplotlib pandas opencv-python
+	
+	pip install pyautogui selenium
+	
+	pip install tensorflow-gpu==1.15.0
+	conda install cudatoolkit=10.0 cudnn=7.6.5
+	
+貼上我的整個檔案
+	修改 環境變數
+		C:\Thomas_test\models
+		C:\Thomas_test\models\research
+		C:\Thomas_test\models\research\slim
+        
+        D:\dont_move\git_save\autoTest\models\research\slim
+	
+安裝VScode	#勾環境變數(path)
+========================================
+#訓練開始(每一次要做訓練的時候都要執行的事情)
+※訓練之前要注意需刪除的檔案:
+上次的train+test+csv (images資料夾)
+
+#C:\Thomas_test\models\research\object_detection\inference_graph 裡面刪光光
+#C:\Thomas_test\models\research\object_detection\training(但不刪除設定檔+label:faster_rcnn_inception_v2_pets.config及labelmap.pbtxt)
+
+在 C:\Thomas_test\models\research 底下執行
+	protoc --python_out=. .\object_detection\protos\anchor_generator.proto .\object_detection\protos\argmax_matcher.proto .\object_detection\protos\bipartite_matcher.proto .\object_detection\protos\box_coder.proto .\object_detection\protos\box_predictor.proto .\object_detection\protos\eval.proto .\object_detection\protos\faster_rcnn.proto .\object_detection\protos\faster_rcnn_box_coder.proto .\object_detection\protos\grid_anchor_generator.proto .\object_detection\protos\hyperparams.proto .\object_detection\protos\image_resizer.proto .\object_detection\protos\input_reader.proto .\object_detection\protos\losses.proto .\object_detection\protos\matcher.proto .\object_detection\protos\mean_stddev_box_coder.proto .\object_detection\protos\model.proto .\object_detection\protos\optimizer.proto .\object_detection\protos\pipeline.proto .\object_detection\protos\post_processing.proto .\object_detection\protos\preprocessor.proto .\object_detection\protos\region_similarity_calculator.proto .\object_detection\protos\square_box_coder.proto .\object_detection\protos\ssd.proto .\object_detection\protos\ssd_anchor_generator.proto .\object_detection\protos\string_int_label_map.proto .\object_detection\protos\train.proto .\object_detection\protos\keypoint_box_coder.proto .\object_detection\protos\multiscale_anchor_generator.proto .\object_detection\protos\graph_rewriter.proto
+	若是以上執行成功，你會在 \object_detection\protos的資料夾看到 許多XXX_pb2.py的檔案在裡面
+	
+	python setup.py build #執行一次
+	python setup.py install #再執行這個
+		
+		
+#開始使用已經截圖完成的檔案(放在C:\python\object_detection\images裡面的兩個資料夾，train會放所有要訓練的檔案，包含png+xml(標玩label)，test資料夾僅需放一組data即可(無視功能)
+#先切換目錄:cd C:\Thomas_test\models\research\object_detection
+#執行:python xml_to_csv.py
+#Successfully converted xml to csv.→成功跳出的提示
+#可以到C:\Thomas_test\models\research\object_detection\images查看是否有csv檔生成
+
+設定class對應出來的值(generate_tfrecord.py)※設定值的地方(也就是定義"num_1"為1的地方)
+設定完成後執行
+python generate_tfrecord.py --csv_input=images\train_labels.csv --image_dir=images\train --output_path=train.record
+python generate_tfrecord.py --csv_input=images\test_labels.csv --image_dir=images\test --output_path=test.record 
+
+
+到train內將labelmap.pbtxt更新class及對應的值
+到faster_rcnn_inception_v2_pets.config裡面第9行填寫class值(labelmap.pbtxt有幾組就填多少)
+到faster_rcnn_inception_v2_pets.config裡面第105行定義路徑為:C:/Thomas_test/models/research/object_detection/ (自己電腦內的路徑，後面不要動到，只修改到object_detction))
+
+正常情況下，設定完test檔案數量及路徑後，後續僅需修改class的數量即可
+train.py移動已經設定完成，因此直接到object_detection目錄執行
+python train.py --logtostderr --train_dir=training/ --pipeline_config_path=training/faster_rcnn_inception_v2_pets.config
+
+訓練完後
+提取想要的訓練model
+python export_inference_graph.py --input_type image_tensor --pipeline_config_path training/faster_rcnn_inception_v2_pets.config --trained_checkpoint_prefix training/model.ckpt-XXXX --output_directory inference_graph
+將XXXX換成你剛剛記住的號碼，這個例子是6579，成功後會將整個推論結果記錄到\object_detection\inference_graph目錄
+EX: python export_inference_graph.py --input_type image_tensor --pipeline_config_path training/faster_rcnn_inception_v2_pets.config --trained_checkpoint_prefix training/model.ckpt-70000 --output_directory inference_graph
+
+
+查看結果
+複製 inference_graph 到 C:\Thomas_test\models\research\object_detection\training_model 裡面
+改名成 inference_graph_for_AAA_BBB
+AAA : 辨識項目 (也就是 identify_for_import.py 裡 identify_XXX() 第一個參數(參數名稱:iden_thing)填的值 )
+BBB : 遊戲名稱
+
+執行identify_for_import.py檔案
+再去軟體內查看標籤結果 (user_change/game_pic裡面)

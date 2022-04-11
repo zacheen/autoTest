@@ -1,0 +1,43 @@
+可先從這個教材下手 敘述淺顯易懂 https://ithelp.ithome.com.tw/users/20104287/ironman/1882
+	從變數開始看 [Day - 03] - Python 基礎語法教學 Part 1 < https://ithelp.ithome.com.tw/articles/10200505  >
+	看到 [Day - 05] - Python 基礎語法教學 Part 3 < https://ithelp.ithome.com.tw/articles/10201641 >
+	
+這裡有更進階的敘述
+https://medium.com/ccclub/tagged/python-%E6%95%99%E5%AD%B8
+	從這裡開始看 Python 初學第一講 — 變數與基本運算
+		https://medium.com/ccclub/ccclub-python-for-beginners-tutorial-71f55bccb693
+	
+	Python 初學第六講 — 串列的更多操作 
+		裡面的 enumerate 也是可以先跳過 有其他易讀性更高的方法可以取代
+		
+	先看到 Python 初學第七講 — 函式 即可
+		https://medium.com/ccclub/ccclub-python-for-beginners-tutorial-244862d98c18
+	
+看完可以開始做 0_basic.py 1_for.py 練習題
+確保自己已經學會
+裡面也有我曾經踩過的坑 我的痛
+
+function 比較複雜 所以這裡有另外的教材
+	https://www.learncodewithmike.com/2019/12/python-function.html
+	https://june.monster/python-101-function/
+看完後可以開始做 B_XXX.py 練習題
+
+需要自學的library
+	time
+		sleep
+	datetime
+		strftime
+		時間運算方法
+	random
+		產生隨機數字
+	pyautogui
+		滑鼠操控
+	檔案處理(通常使用open 是內建的不用import)
+		讀寫文字檔
+		
+	我是建議各組會互相討論的人
+	各自看不同library的教材
+	各自學會的東西不一樣
+	有問題說不定另一位夥伴會
+	再互相教彼此 可以學到比較多東西
+

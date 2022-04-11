@@ -1,0 +1,56 @@
+沒有副檔名的是資料夾
+XXX 代表各遊戲名稱 (CQ9_demo為範例code，裡面包含注解)
+OOOO 代表程式命名與檔案相同即可
+
+C:\Thomas_test\models\research\ (有辨識所以路境要相同) (要被加到環境變數) 
+	- slim (要被加到環境變數)
+	- setup.py
+		這兩個指令會用到 python setup.py build #執行一次 ， python setup.py install #再執行一次
+	- object_detection (要被加到環境變數)
+		- game_pic
+			- XXX_pic : 各遊戲使用 compare_sim 時會從此資料夾尋找要比對的圖片
+				- OOOO.PNG (compare_sim 要辨識東西的名字)
+				- OOOO_pic.txt (compare_sim 要在哪個位置找上面的東西 OOOO要跟.PNG的名稱相同)
+				- OOOO_region.txt (compare_sim 如果在上面位置找不到的話 在這個區域裡面找 OOOO要跟.PNG的名稱相同)
+				- OOOO(要截圖東西的名字)
+					- pos.txt : 各遊戲使用 cut_pic_data 會從這裡讀取要截取的座標
+		- images : 裡面放要用來training的圖片與label
+		- inference_graph : training 完後下指令後會 export 到這裡 (export之前要是空的)
+		- testreport : 裡面放產出的testreport(HTML)和文字檔  此資料夾看完可以整個直接刪除
+			- 日期資料夾 每跑一次主程式會多一個資料夾
+				- cmd_output.txt : 主程式(XXX_Main.py)的輸出 (準確來說應該是 Tool_Main.print_to_output 才會輸出到這裡)
+				- error.txt : 主程式(XXX_Main.py)的錯誤輸出
+				- pipe_output.txt : thread的輸出 (準確來說應該是  Tool_Main.glo_var.pipe_output_f.write 才會輸出到這裡)
+			- testpic : 
+				- OOOO_OOOO.png : testreport(HTML) 會讀這裡面的圖片當每個state的代表圖片 (compare_sim截的)
+				- OOOO_OOOO_detail.png : 這是 compare_sim 截下來用來精準比對(第一次比對)的圖片
+		- training : training 時的紀錄會記錄在這裡
+			- ALL_XXX_inference_graph : 全遊戲通用的model
+			- OOO_XXX_inference_graph : 各遊戲自己的model
+		- training_model : 裡面放的是 training 好的 model
+		- user_change : 
+			- game_pic
+				- XXX_pic : cut_pic_data 截的圖片也會存在這裡，且會後續的圖片被覆寫掉，辨識時會從這個資料夾讀取圖片辨識
+			- catch_back_error.txt : 抓取後台(XXX_catch_back.py)時的錯誤輸出
+			- chromedriver.exe : selenium 使用的 driver (每次chrome更新，需要再載新的chromedriver替換)
+			- id_count.txt : 壓測使用的(FKNN_selenium使用的)
+			- XXX_input.txt : XXX_Main.py呼叫初始化時會讀取這裡面的資料進行一些預設值的設定 (因為code會打包 因此個人資料會放在這裡面 才不會共用)
+				如果要新增要去 Tool_Main 找到 "# input (讀取設定檔)" 進行修改
+			- the_card_same_point.txt
+		- 結構 : 如果不小心把 inference_graph 或 training 資料夾刪除 可以從這裡面複製出來
+		- cal_money.py : 算分邏輯的 Tool_main
+		- XXX_cal_money.py : 裡面寫的是各個遊戲的算分邏輯，通常會拿後台的資料進行運算，比較齊全(通常會 import cal_money)
+		- Card.py : 裡面有一個 Class Card 用於儲存card的型態(可用 == > <直接比牌大小)，與一個function可以把str轉Card list
+		- Ma_jang.py : 同 Card 功能 但是麻將的
+		- catch_back.py  : 可以想成爬取後台的 Tool_main
+		- XXX_catch_back.py : 裡面寫的是各個遊戲要如何爬後台、要爬什麼資料(通常會 import catch_back)
+		- compare_server.py : 轉換成資料(通常在catch_back中使用) 或 進行資料比較(通常在do_compare中使用)
+		- Data.py : 裡面放著 辨識出來的數字轉資料用的list(name_list) 和 辨識出來的數字轉label用的list(class_list)(identify_for_import.py 的writ_xml如果=True 就會需要用到)
+		- generate_tfrecord.py : training的時候會用到 通常改 class_text_to_int 這個function而已
+		- HTMLTestRun.py  : 用來把測試用例輸出成 HTML report (通常不會需要修改 只是會被import)
+		- identify_for_import.py : 用model辨識的function 通常只會用到 identify_OOO 底下3個function
+		- judge_XXX.py : 拿來辨識是什麼牌型(目前可以辨識牛牛 炸金花) Example在judge_cow.py 
+		- Tool_Main.py : 裡面有各個遊戲的Main可能會用到的function，加速寫Main的時間
+Main!	- XXX_Main.py : 裡面寫的是各個遊戲的Main(通常會 import Tool_Main)
+		- train.py : training的時候會用到
+		- xml_to_csv.py : training的時候會用到

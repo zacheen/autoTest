@@ -1,0 +1,22 @@
+執行遊戲
+(打開標題列)
+
+state
+(開始模組化) (我不會看到3段只差一點點的程式碼)
+這裡就要合 unittest HTMLTestRun
+
+變數 class 化
+(read_pos timeout pyautogui 同時寫到文檔)
+
+後台爬資料比對(可以先比對 搶庄倍數)
+(如果後台當掉處理(難))
+
+後台爬全部的資料比對(可以先比對 搶庄倍數)
+我可以先給 training 之後的 function 只要會用就好
+
+開始寫邏輯
+
+
+try
+
+catch

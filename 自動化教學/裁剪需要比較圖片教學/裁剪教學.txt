@@ -1,0 +1,13 @@
+先開啟 get_capture_position.exe
+再截圖(記得要開全螢幕)
+存檔到相應位置，黨名為 XXX.PNG
+再從 get_capture_position 找出截圖位置
+(圖片大小會跟位置大小一樣)
+存檔到 XXX.txt
+這樣就可以在程式中使用了
+
+
+get_capture_position.exe
+那四個數字代表意義
+	第1 2個 點下去的位置
+	第3 4個 滑鼠滑動的範圍

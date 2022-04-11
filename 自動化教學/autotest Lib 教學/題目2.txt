@@ -1,0 +1,14 @@
+state 
+1. 每組動作分一個 state (8hr)
+	搶庄，下注...
+2. 在 HTMLTestRunner 裡面輸出每個階段的名子與所做的動作 (16hr)
+	如何使用 請參考教學
+	https://www.itread01.com/content/1542048123.html
+	https://codertw.com/%E7%A8%8B%E5%BC%8F%E8%AA%9E%E8%A8%80/440252/
+		-- 輸出還是要照印 且要寫到文檔 (寫成 func) (10hr)
+	此階段report截圖位置讀不到是正常的
+3. -- 寫function (我不會看到3段只差一點點的程式碼)
+
+import pyautogui - 點擊
+import unittest 
+import HTMLTestRun

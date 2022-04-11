@@ -1,0 +1,15 @@
+chromedriver.exe 自行下載 放在 models\research\object_detection\user_change 底下
+    https://chromedriver.chromium.org/downloads
+    
+按照 TF安裝步驟.txt 安裝相關library
+
+視窗解析度設定為 1920*1080
+
+遊戲預設是全螢幕
+
+主螢幕為遊戲視窗且放在左邊
+
+檔案路徑不能有中文
+
+cd 到 \models\research\object_detection
+執行相應要測試的遊戲

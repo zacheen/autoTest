@@ -1,0 +1,18 @@
+流程是否正常進行
+
+是否進入state
+	找畫面是否有此東西(初階版)  ( 6 + 4hr )
+		在進入此state後截圖給 HTMLTestRun 使用
+		import pyautogui
+		- 可以想(或是找)是否有其他方法，來辨識state
+			import cv2
+		
+	timeout(自己實作) (6hr)
+		經過一段時間，如果沒有找到指定的圖，會報錯
+		unittest : 報錯的方法
+		計時(import time, import datetime 都可以)
+
+標準 - 
+	縮小網頁應該會出現錯誤
+	局數與後台一致(善用timeout報錯去找哪裡有問題)
+	可以印出並留住所有想得到資訊 (測試報告，output的txt檔(每執行一次 Main 開新檔案))
