@@ -8,6 +8,12 @@ class Minesweeper:
         self.root = root
         self.root.title("Minesweeper 掃雷")
         self.root.configure(bg='#f0f0f0')
+        self.root.geometry("600x650")
+        self.root.minsize(400, 450)
+        
+        # Configure root grid weights for expansion
+        self.root.grid_rowconfigure(2, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
         
         # Game parameters
         self.difficulties = {
@@ -53,11 +59,18 @@ class Minesweeper:
         
     def create_menu(self):
         menu_frame = tk.Frame(self.root, bg='#f0f0f0')
-        menu_frame.pack(pady=5)
+        menu_frame.grid(row=0, column=0, sticky='ew', pady=5)
+        
+        # Configure menu frame to expand horizontally
+        menu_frame.grid_columnconfigure(0, weight=1)
+        
+        # Create inner frame for centering buttons
+        button_container = tk.Frame(menu_frame, bg='#f0f0f0')
+        button_container.grid(row=0, column=0)
         
         # New game button
         new_game_btn = tk.Button(
-            menu_frame, 
+            button_container, 
             text="New Game 新遊戲", 
             command=self.setup_game,
             bg='#4CAF50',
@@ -71,7 +84,7 @@ class Minesweeper:
         # Difficulty buttons
         for difficulty in self.difficulties.keys():
             btn = tk.Button(
-                menu_frame,
+                button_container,
                 text=difficulty,
                 command=lambda d=difficulty: self.change_difficulty(d),
                 bg='#2196F3' if difficulty == self.current_difficulty else '#e0e0e0',
@@ -84,10 +97,17 @@ class Minesweeper:
             
     def create_info_panel(self):
         info_frame = tk.Frame(self.root, bg='#f0f0f0')
-        info_frame.pack(pady=10)
+        info_frame.grid(row=1, column=0, sticky='ew', pady=10)
+        
+        # Configure for centering
+        info_frame.grid_columnconfigure(0, weight=1)
+        
+        # Create inner container for centering
+        info_container = tk.Frame(info_frame, bg='#f0f0f0')
+        info_container.grid(row=0, column=0)
         
         # Mine counter
-        mine_frame = tk.Frame(info_frame, bg='#333', padx=10, pady=5)
+        mine_frame = tk.Frame(info_container, bg='#333', padx=10, pady=5)
         mine_frame.pack(side=tk.LEFT, padx=20)
         
         tk.Label(mine_frame, text="Mines 地雷:", bg='#333', fg='white', font=('Arial', 12)).pack(side=tk.LEFT)
@@ -96,7 +116,7 @@ class Minesweeper:
         self.mine_label.pack(side=tk.LEFT, padx=5)
         
         # Timer
-        timer_frame = tk.Frame(info_frame, bg='#333', padx=10, pady=5)
+        timer_frame = tk.Frame(info_container, bg='#333', padx=10, pady=5)
         timer_frame.pack(side=tk.LEFT, padx=20)
         
         tk.Label(timer_frame, text="Time 時間:", bg='#333', fg='white', font=('Arial', 12)).pack(side=tk.LEFT)
@@ -105,9 +125,16 @@ class Minesweeper:
         self.timer_label.pack(side=tk.LEFT, padx=5)
         
     def create_board(self):
-        # Create frame for the game board
-        board_frame = tk.Frame(self.root, bg='#d0d0d0', relief=tk.SUNKEN, bd=3)
-        board_frame.pack(padx=10, pady=10)
+        # Create main container frame that will expand
+        self.main_board_frame = tk.Frame(self.root, bg='#f0f0f0')
+        self.main_board_frame.grid(row=2, column=0, sticky='nsew', padx=10, pady=(0, 10))
+        
+        # Configure the main board frame to expand
+        self.main_board_frame.grid_rowconfigure(0, weight=1)
+        self.main_board_frame.grid_columnconfigure(0, weight=1)
+        
+        # Create frame for the game board with border
+        self.board_frame = tk.Frame(self.main_board_frame, bg='#d0d0d0', relief=tk.SUNKEN, bd=3)
         
         # Create buttons grid
         self.buttons = []
@@ -115,20 +142,84 @@ class Minesweeper:
             row = []
             for j in range(self.cols):
                 btn = tk.Button(
-                    board_frame,
-                    width=2,
+                    self.board_frame,
+                    width=3,
                     height=1,
                     font=('Arial', 10, 'bold'),
                     bg='#e0e0e0',
                     relief=tk.RAISED,
-                    bd=2
+                    bd=2,
+                    padx=0,
+                    pady=0
                 )
-                btn.grid(row=i, column=j, padx=1, pady=1)
+                btn.grid(row=i, column=j, padx=1, pady=1, sticky='nsew')
                 btn.bind('<Button-1>', lambda e, r=i, c=j: self.on_left_click(r, c))
                 btn.bind('<Button-3>', lambda e, r=i, c=j: self.on_right_click(r, c))
+                
+                # Configure grid weights for each cell
+                self.board_frame.grid_rowconfigure(i, weight=1)
+                self.board_frame.grid_columnconfigure(j, weight=1)
+                
                 row.append(btn)
             self.buttons.append(row)
-            
+        
+        # Place the board frame and bind resize
+        self.update_board_size()
+        self.main_board_frame.bind('<Configure>', lambda e: self.update_board_size())
+        
+    def update_board_size(self):
+        """Update the board size to maintain square cells and center it"""
+        # Allow GUI to update
+        self.main_board_frame.update_idletasks()
+        
+        # Get available space
+        available_width = self.main_board_frame.winfo_width()
+        available_height = self.main_board_frame.winfo_height()
+        
+        if available_width <= 1 or available_height <= 1:
+            # Schedule another update if dimensions not ready
+            self.root.after(10, self.update_board_size)
+            return
+        
+        # Calculate cell size to maintain square cells
+        # Account for borders, padding between cells, and frame border
+        padding_width = (self.cols + 1) * 2 + 10  # padding between cells + border
+        padding_height = (self.rows + 1) * 2 + 10
+        
+        max_cell_width = (available_width - padding_width) / self.cols
+        max_cell_height = (available_height - padding_height) / self.rows
+        
+        # Use the smaller dimension to maintain square cells
+        cell_size = min(max_cell_width, max_cell_height)
+        cell_size = max(20, min(cell_size, 45))  # Limit between 20 and 45 pixels
+        
+        # Calculate actual board dimensions
+        board_width = int(cell_size * self.cols + padding_width)
+        board_height = int(cell_size * self.rows + padding_height)
+        
+        # Update button sizes
+        button_width = max(2, int(cell_size / 8))
+        button_height = max(1, int(cell_size / 16))
+        font_size = max(8, min(14, int(cell_size * 0.4)))
+        
+        for i in range(self.rows):
+            for j in range(self.cols):
+                self.buttons[i][j].config(
+                    width=button_width,
+                    height=button_height,
+                    font=('Arial', font_size, 'bold')
+                )
+        
+        # Center the board frame
+        # First, place it without centering to get actual size
+        self.board_frame.place_forget()
+        self.board_frame.place(
+            x=(available_width - board_width) // 2,
+            y=(available_height - board_height) // 2,
+            width=board_width,
+            height=board_height
+        )
+        
     def change_difficulty(self, difficulty):
         self.current_difficulty = difficulty
         self.setup_game()
