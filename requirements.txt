@@ -1,0 +1,8 @@
+protobuf
+pillow
+Cython
+matplotlib
+pandas
+opencv-python
+pyautogui
+selenium
