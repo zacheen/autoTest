@@ -3,14 +3,14 @@ import pyautogui
 import cv2
 import numpy as np
 import sys
-#安裝PY3時，會預設環境變數路徑，但自己定義的工具不會放在裡面，因此透過這個方式，將執行檔當前路徑加入至環境變數，使電腦可以獲取路徑，不會找不到檔案
-sys.path.append(".")
+# #安裝PY3時，會預設環境變數路徑，但自己定義的工具不會放在裡面，因此透過這個方式，將執行檔當前路徑加入至環境變數，使電腦可以獲取路徑，不會找不到檔案
+# sys.path.append(".")
 
 import os
 ##@
 #TS使用到的LOG層級，3為有錯誤才印出 (細節待確認)
 # 這個要放在 import tensorflow 之前，因為 import tensorflow 就會印出警示訊息了
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+# os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import io
 import glob
 import warnings
@@ -22,11 +22,11 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.common.action_chains import ActionChains
 
-#這三隻為自行定義之工具
+
 import HTMLTestRun
-import identify_for_import
-import Data
-import Card
+# import identify_for_import
+# import Data
+# import Card
 
 # ----------------------------------------------------------
 # Tool main 有可能使用者會想要設定的
