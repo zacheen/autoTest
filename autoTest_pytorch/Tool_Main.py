@@ -24,14 +24,15 @@ from selenium.webdriver.common.action_chains import ActionChains
 
 
 import HTMLTestRun
-# import identify_for_import
+import identify_for_import
 # import Data
 # import Card
 
 # ----------------------------------------------------------
-# Tool main 有可能使用者會想要設定的
-# 固定不用 final
-# 0 : 用螢幕位置 1 : 用selenium 點擊
+# Tool main settings
+# use_sel : 
+    # 0 - using mouse to click (pyautogui) : position is screen position
+    # 1 - using selenium to click : position is web page position
 use_sel = 0
 # ----------------------------------------------------------
 
@@ -39,35 +40,32 @@ Game_envi = None
 #當用途為辨識的時候，只能設定為1，若目的為多開視窗進行點擊或進行遊戲產生賽果時，可以設定為2(預期可以開多個視窗)
 ##@
 strech_size = 1
-#儲存檔名用時間格式
+# the time stamp format for test report file name
 ISOTIMEFORMAT = '%Y_%m_%d_%H_%M_%S'
-#印出LOG用時間格式(有冒號無法定義為檔名) 
 format_for_db_time = '%Y-%m-%d %H:%M' 
-# 目前廢棄使用 因為pyautogui只能控制主螢幕
+# screen_num is abandoned, since pyautogui can only click on the main screen
 screen_num = 1
 # screen_num = 0   (-1920 ~ 0)    # 待測試
 # screen_num = 1   (0 ~ 1920)
 # screen_num = 2   (1920 ~ 3840)    # 待測試
 
-#檢查各資料夾是否存在
-# 檢查testreport資料夾是否存在
+# checking each folder exist or not, if not, create it
 if os.path.isdir("./testreport") == False : 
     os.mkdir("./testreport")
     os.mkdir("./testreport/testpic")
 elif os.path.isdir("./testreport/testpic") == False : 
     os.mkdir("./testreport/testpic")
+print("check/make folder scuessfully")
 
 # 確認過這個一定要放外面，且每次都一定要讀取(但可以不用使用)
-#設定一個全域變數
+# 設定一個全域變數
 glo_var = None #儲存在記憶體內 (俗稱創造一個碗)
 # 每個遊戲都要用的參數
 class Glo_var():
-    #__init__為py定義的初始化方式，括號內為呼叫此func時可帶入的變數值
-    #self定義為創建屬於自己的變數值，不會與其他變數互相干擾
-    #in_game_name→遊戲名稱，於FKNN_MAIN內定義
-    #player_num→該遊戲的最高遊戲人數
+    # in_game_name→遊戲名稱，於FKNN_MAIN內定義
+    # player_num→該遊戲的最高遊戲人數
     # round_count用於計算遊戲當下的回合數
-    #func後括號內所帶的內容都稱之參數
+    # func後括號內所帶的內容都稱之參數
 
     def __init__(self, in_game_name, player_num, round_count, suit_order = None, list_len = 3) : 
         # 只需要初始化一次的東西
