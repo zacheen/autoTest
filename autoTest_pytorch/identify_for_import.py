@@ -32,6 +32,7 @@ sys.path.append("..")
 
 # glob 是用來找資料夾路徑的
 import glob
+from pathlib import Path
 
 import datetime
 ISOTIMEFORMAT = '%Y_%m_%d_%H_%M_%S' 
@@ -86,16 +87,18 @@ def initial(iden_thing, round_count = None) :
     # 取得執行時的目錄
     CWD_PATH = os.getcwd()
     # 取得 user_change 資料夾路徑
-    user_abs_loc = CWD_PATH + "\\user_change\\"
+    base_dir = Path(__file__).resolve().parent
+    parent_dir = base_dir.parent
+    user_change_path = list(parent_dir.rglob("user_change"))[0]
     # 做出要被辨識圖片的路徑
-    absolute_dst = user_abs_loc + "game_pic\\" + game_name+ "_pic\\" + iden_thing+"\\"
+    absolute_dst = user_change_path / "game_pic" / f"{game_name} + _pic" / "iden_thing"
 
     # 做出規律(符合這個規律底下的檔案才會被辨識)
     global targetPattern
     if round_count == None:
-        targetPattern = absolute_dst + "*" + file_name_end
+        targetPattern = (absolute_dst / "*").with_suffix(file_name_end)
     else:
-        targetPattern = absolute_dst + "*_" + str(round_count) + file_name_end
+        targetPattern = (absolute_dst + f"*_{round_count}").with_suffix(file_name_end)
     # -----------------------------------------------------------------------------------------------
 
     # -----------------------------------------------------------------------------------------------
