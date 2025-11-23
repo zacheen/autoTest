@@ -51,12 +51,13 @@ screen_num = 1
 # screen_num = 2   (1920 ~ 3840)    # 待測試
 
 # checking each folder exist or not, if not, create it
-if os.path.isdir("./testreport") == False : 
-    os.mkdir("./testreport")
-    os.mkdir("./testreport/testpic")
-elif os.path.isdir("./testreport/testpic") == False : 
-    os.mkdir("./testreport/testpic")
-print("check/make folder scuessfully")
+testreport_path = Path("./testreport")
+testpic_path = testreport_path / "testpic"
+if not testreport_path.exists():
+    testreport_path.mkdir()
+if not testpic_path.exists():
+    testpic_path.mkdir()
+print("check/make folder successfully")
 
 # 確認過這個一定要放外面，且每次都一定要讀取(但可以不用使用)
 # 設定一個全域變數
@@ -72,20 +73,22 @@ class Glo_var():
         # 只需要初始化一次的東西
         # (不會隨著切換遊戲改變的東西)
         self.game_driver = None #定義遊戲中會使用到的Driver變數(EX:chrome→webdriver)，還有一個後台用的driver
-        self.user_abs_loc = os.getcwd() + "\\" + "user_change\\" #定義可透過使用者改變的參數資料夾位置
+        
+        base_dir = Path(__file__).resolve().parent
+        parent_dir = base_dir.parent
+        self.user_change_path = list(parent_dir.rglob("user_change"))[0]
 
         self.read_input() # 讀取設定檔
         
         # 創建檔案(不變)
-        
-
         now_time = datetime.datetime.now().strftime(ISOTIMEFORMAT)
-        txt_location = os.getcwd() + "\\testreport\\" + now_time
-        if os.path.isdir(txt_location) == False : 
-            os.mkdir(txt_location)
-        self.pipe_output_f = open(txt_location+"\\"+'pipe_output'+'.txt', "w", encoding='UTF-8') #開啟寫入TXT的寫頭，此為thread分支，用以記錄裁圖→辨識→後台→比對，用來輸出想要印出的內容
-        self.cmd_output_f = open(txt_location+"\\"+'cmd_output'+'.txt', "w", encoding='UTF-8') #開啟寫入TXT的寫頭，此為主線Main使用，用來輸出想要印出的內容
-        self.error_f = open(txt_location+"\\"+'error'+'.txt', "w", encoding='UTF-8') #開啟寫入TXT的寫頭，此為紀錄有定義過error內容
+        txt_location_path = testreport_path / now_time
+        if not txt_location_path.exists():
+            txt_location_path.mkdir()
+            
+        self.pipe_output_f = open(txt_location_path / 'pipe_output.txt', "w", encoding='UTF-8') #開啟寫入TXT的寫頭，此為thread分支，用以記錄裁圖→辨識→後台→比對，用來輸出想要印出的內容
+        self.cmd_output_f = open(txt_location_path / 'cmd_output.txt', "w", encoding='UTF-8') #開啟寫入TXT的寫頭，此為主線Main使用，用來輸出想要印出的內容
+        self.error_f = open(txt_location_path / 'error.txt', "w", encoding='UTF-8') #開啟寫入TXT的寫頭，此為紀錄有定義過error內容
         self.file_create_time = "lobby" #使用於檔名紀錄時間，並確保該變數會是當前使用的值，此時間為開局時間(等同於teserport創建時間→html)
         
         # input (讀取設定檔)(不變) --------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -117,80 +120,82 @@ class Glo_var():
 
             except Exception : 
                 print("json fail so using local file")
-                with open(self.user_abs_loc + 'url.json', encoding='UTF-8') as f:
+                url_json_path = self.user_change_path / 'url.json'
+                with open(url_json_path, encoding='UTF-8') as f:
                     self.DaiLi_data = json.load(f)
         else:
             if Game_envi == "My_Minesweeper":
-                read_input_f = open(self.user_abs_loc + "Minesweeper_input.txt", "r", encoding='UTF-8') #讀取使用者資料進行登入
+                input_file_path = self.user_change_path / "Minesweeper_input.txt"
             else :
                 print("Game_envi error (No this envi)")
-            self.game_account = str(read_input_f.readline().split(" -:")[1]).strip() #split(" -:") 透過此方式將資料進行分割，strip() 用以移除字符，開頭或結尾的空格與換行，確保該資料無預期外的字串
-            print("遊戲帳號 : " + self.game_account)
-            self.game_password = str(read_input_f.readline().split(" -:")[1]).strip()
-            print("遊戲密碼 : " + self.game_password)
-            self.game_agent_ID = str(read_input_f.readline().split(" -:")[1]).strip()
-            print("遊戲代理ID : " + self.game_agent_ID)
-            self.game_money = str(read_input_f.readline().split(" -:")[1]).strip()
-            print("遊戲分數 : " + self.game_money)
-            self.game_envir = str(read_input_f.readline().split(" -:")[1]).strip()
-            print("遊戲環境 : " + self.game_envir)
-            # 後台
-            self.server_account = str(read_input_f.readline().split(" -:")[1]).strip()
-            print("後台帳號 : " + self.server_account)
-            self.server_password = str(read_input_f.readline().split(" -:")[1]).strip()
-            print("後台密碼 : " + self.server_password)
-            
-            type_input = ""
-            #此處為開關，若將input打開，使用者可以自行輸入(也就是把下面一行註解關閉)，若想要使用讀取檔案方式(user_change)，則預設為type_input = ""即可
-            #type_input = input("請問輸入是否要從設定檔中讀取? (N/n:不要 其他:要) : ")
-            if type_input.strip() == "n" or type_input.strip() == "N" : 
-                game_account_in = input("請輸入<<遊戲帳號>> 若為空白則從文字檔中讀取 :")
-                if game_account_in.strip() != "":
-                    self.game_account = game_account_in
-                game_password_in = input("請輸入<<遊戲密碼>> 若為空白則從文字檔中讀取 :")
-                if game_password_in.strip() != "":
-                    self.game_password = game_password_in
-                game_agent_ID_in = input("請輸入<<遊戲代理ID>> 若為空白則從文字檔中讀取 :")
-                if game_agent_ID_in.strip() != "":
-                    self.game_agent_ID = game_agent_ID_in
-                game_money_in = input("請輸入<<加分分數>> 若為空白則從文字檔中讀取 :")
-                if game_money_in.strip() != "":
-                    self.game_money = game_money_in
-                game_envir_in = input("請輸入<<遊戲環境>> 若為空白則從文字檔中讀取 :")
-                if game_envir_in.strip() != "":
-                    self.game_envir = game_envir_in
+                return
                 
-                server_account_in = input("請輸入<<後台帳號>> 若為空白則從文字檔中讀取 :")
-                if server_account_in.strip() != "":
-                    self.server_account = server_account_in
-                server_password_in = input("請輸入<<後台密碼>> 若為空白則從文字檔中讀取 :")
-                if server_password_in.strip() != "":
-                    self.server_password = server_password_in
+            with open(input_file_path, "r", encoding='UTF-8') as read_input_f: #讀取使用者資料進行登入
+                self.game_account = str(read_input_f.readline().split(" -:")[1]).strip() #split(" -:") 透過此方式將資料進行分割，strip() 用以移除字符，開頭或結尾的空格與換行，確保該資料無預期外的字串
+                print("遊戲帳號 : " + self.game_account)
+                self.game_password = str(read_input_f.readline().split(" -:")[1]).strip()
+                print("遊戲密碼 : " + self.game_password)
+                self.game_agent_ID = str(read_input_f.readline().split(" -:")[1]).strip()
+                print("遊戲代理ID : " + self.game_agent_ID)
+                self.game_money = str(read_input_f.readline().split(" -:")[1]).strip()
+                print("遊戲分數 : " + self.game_money)
+                self.game_envir = str(read_input_f.readline().split(" -:")[1]).strip()
+                print("遊戲環境 : " + self.game_envir)
+                # 後台
+                self.server_account = str(read_input_f.readline().split(" -:")[1]).strip()
+                print("後台帳號 : " + self.server_account)
+                self.server_password = str(read_input_f.readline().split(" -:")[1]).strip()
+                print("後台密碼 : " + self.server_password)
+                
+                type_input = ""
+                #此處為開關，若將input打開，使用者可以自行輸入(也就是把下面一行註解關閉)，若想要使用讀取檔案方式(user_change)，則預設為type_input = ""即可
+                #type_input = input("請問輸入是否要從設定檔中讀取? (N/n:不要 其他:要) : ")
+                if type_input.strip() == "n" or type_input.strip() == "N" : 
+                    game_account_in = input("請輸入<<遊戲帳號>> 若為空白則從文字檔中讀取 :")
+                    if game_account_in.strip() != "":
+                        self.game_account = game_account_in
+                    game_password_in = input("請輸入<<遊戲密碼>> 若為空白則從文字檔中讀取 :")
+                    if game_password_in.strip() != "":
+                        self.game_password = game_password_in
+                    game_agent_ID_in = input("請輸入<<遊戲代理ID>> 若為空白則從文字檔中讀取 :")
+                    if game_agent_ID_in.strip() != "":
+                        self.game_agent_ID = game_agent_ID_in
+                    game_money_in = input("請輸入<<加分分數>> 若為空白則從文字檔中讀取 :")
+                    if game_money_in.strip() != "":
+                        self.game_money = game_money_in
+                    game_envir_in = input("請輸入<<遊戲環境>> 若為空白則從文字檔中讀取 :")
+                    if game_envir_in.strip() != "":
+                        self.game_envir = game_envir_in
+                    
+                    server_account_in = input("請輸入<<後台帳號>> 若為空白則從文字檔中讀取 :")
+                    if server_account_in.strip() != "":
+                        self.server_account = server_account_in
+                    server_password_in = input("請輸入<<後台密碼>> 若為空白則從文字檔中讀取 :")
+                    if server_password_in.strip() != "":
+                        self.server_password = server_password_in
+                        
     def change_by_game(self, in_game_name, player_num, round_count, suit_order = None, list_len = 3):
         # 遊玩過程中不會改變 但會隨著不同遊戲改變
         
         # 給 辨識的py 傳遞預設值
         identify_for_import.game_name = in_game_name
 
-        # file location(不變)
-        self.now_path = os.getcwd() + "\\" #os.getcwd() 獲取當前路徑，後面加入\ →用以定義路徑資料
-        self.pic_path = "game_pic\\" + in_game_name + "_pic\\" #做出 "遊戲名稱_pic"
-        self.file_absolute_pos = self.now_path + self.pic_path #定義圖片位置或座標位置的資料夾位置
-        
-        self.user_abs_pic = self.user_abs_loc + self.pic_path
-
         # 檢查 user_change 底下是否有 此專案的資料夾
-        if os.path.isdir(self.user_abs_loc + "game_pic") == False : 
-            os.mkdir(self.user_abs_loc + "game_pic")
+        user_game_pic_parent = self.user_change_path / "game_pic"
+        if not user_game_pic_parent.exists():
+            user_game_pic_parent.mkdir()
 
-        if os.path.isdir(self.user_abs_pic[:-1]) == False : 
-            os.mkdir(self.user_abs_pic[:-1])
+        # 使用 pathlib 處理路徑
+        self.game_pic_path = self.user_change_path / "game_pic" / f"{in_game_name}_pic"
+        if not self.game_pic_path.exists():
+            self.game_pic_path.mkdir()
 
-        self.cut_pic_path = self.file_absolute_pos + r"""training_data""" + "\\" ##@ TS打算進行辨識的訓練資料，待確認 #cut_pic_data cover=False 圖片放置地點
+        self.cut_pic_path = str(self.game_pic_path / "training_data") + "\\" ##@ TS打算進行辨識的訓練資料，待確認 #cut_pic_data cover=False 圖片放置地點
 
         # 檢查 storage 底下是否有 此專案的資料夾
-        if os.path.isdir(self.cut_pic_path[:-1]) == False :  #判斷有沒有定義的資料夾
-            os.mkdir(self.cut_pic_path[:-1]) #如果沒有就自動生成
+        training_data_path = self.game_pic_path / "training_data"
+        if not training_data_path.exists():  #判斷有沒有定義的資料夾
+            training_data_path.mkdir() #如果沒有就自動生成
 
         # 參數(使用者設定) (xxx_Main 裡面設定)
         # player_num_in, player_num 這個遊戲通常有幾個玩家(應該要截幾張圖)
@@ -245,7 +250,7 @@ class Glo_var():
 # 打開遊戲網頁到平台登入頁面
 def open_game_web() :
     global glo_var
-    webdriver_path = glo_var.user_abs_loc+'chromedriver.exe'
+    webdriver_path = Path(glo_var.user_change_path) / 'chromedriver.exe'
     options = Options()
     # options.headless = True #Headless Browser是没有沒有圖形介面(GUI)的web瀏覽視窗
     options.add_argument("--window-size=1960,1080")
@@ -256,8 +261,8 @@ def open_game_web() :
     prefs["credentials_enable_service"] = False
     prefs["profile.password_manager_enabled"] = False
     options.add_experimental_option("prefs", prefs)
-    # 設定瀏覽器設定值為不出現此溜覽器正透過自動化視窗控制
-    glo_var.game_driver = webdriver.Chrome(executable_path=webdriver_path, options=options) #透過設定值開啟瀏覽器
+    # 設定瀏覽器設定值為不出現此瀏覽器正透過自動化視窗控制
+    glo_var.game_driver = webdriver.Chrome(executable_path=str(webdriver_path), options=options) #透過設定值開啟瀏覽器
     glo_var.game_driver.maximize_window() #全螢幕
 
     # 記得這邊一定要用 pyautogui.click
@@ -532,7 +537,8 @@ def compare_sim(file_place, className, confidence = 0.9, precise = False, before
     global glo_var #導入全域變數
 
     if file_place == "" : #用於遊戲流程進行中，若有想要把過程中發生的狀態進行截圖，可透過此func進行(compare_sim("", className))，此方法目的僅為在該狀態中沒有要進行結圖比對或辨識，僅儲存圖片
-        pyautogui.screenshot('./testreport/testpic/'+className+ "_"+ glo_var.file_create_time+'.png')
+        screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
+        pyautogui.screenshot(str(screenshot_path))
         #'./testreport/testpic/→當前目錄與指定資料夾
         #+className+ "_"+ glo_var.file_create_time+'.png'→定義截圖檔名
         return None #結束點
@@ -542,33 +548,36 @@ def compare_sim(file_place, className, confidence = 0.9, precise = False, before
 
     if default_dest :
         #有小工具
-        pos_file = glo_var.file_absolute_pos + file_place + ".txt" # FKNN_pic內的座標位置檔案，是自己先創建確認好的，為比對位置標準
-        pic_file = glo_var.file_absolute_pos + file_place + ".PNG" # FKNN_pic內的圖片檔案(EX:搶一倍，繼續遊戲)，是自己先創建確認好的，可以拿來判斷狀態，也可以拿來進行點擊
-        region_file = glo_var.file_absolute_pos + file_place + "_region.txt"
+        # 使用 pathlib 處理路徑
+        pos_file = glo_var.game_pic_path / f"{file_place}.txt" # FKNN_pic內的座標位置檔案，是自己先創建確認好的，為比對位置標準
+        pic_file = glo_var.game_pic_path / f"{file_place}.PNG" # FKNN_pic內的圖片檔案(EX:湊一倍，繼續遊戲)，是自己先創建確認好的，可以拿來判斷狀態，也可以拿來進行點擊
+        region_file = glo_var.game_pic_path / f"{file_place}_region.txt"
         # 當pos_file比對失敗時，可透過定義一個範圍，重新再找一次(若沒有此檔案，預設為找全部畫面，但避免找到類似的發生誤導，因此可限定區域)，此參數也是由使用者決定是否提供
         # 如果是要找共同的圖片 就把位置改成lobby 圖都放在這底下
         if lobby :
-            pos_file = pos_file.replace(glo_var.game_name, "lobby")
-            pic_file = pic_file.replace(glo_var.game_name, "lobby")
-            region_file = region_file.replace(glo_var.game_name, "lobby")
+            lobby_path = glo_var.game_pic_path.parent / "lobby_pic"
+            pos_file = lobby_path / f"{file_place}.txt"
+            pic_file = lobby_path / f"{file_place}.PNG"
+            region_file = lobby_path / f"{file_place}_region.txt"
         
 
     # 開啟以前圖片
-    img = cv2.imread(pic_file) #讀取原始標準圖
+    img = cv2.imread(str(pic_file)) #讀取原始標準圖
 
-    save_loc = './testreport/testpic/'+ glo_var.file_create_time + "_" + file_place +'_detail.png' #實際測試過程在指定區域的截圖照片(被比對的圖要儲存的位置)
+    save_loc = testpic_path / f'{glo_var.file_create_time}_{file_place}_detail.png' #實際測試過程在指定區域的截圖照片(被比對的圖要儲存的位置)
 
     if before == True: #在下一個狀態要進行動作之前先進行截圖(else:在做完動作後再進行截圖)→兩者差異為可能因為時間差間接影響實際截圖出來的結果，可透過實際執行進行驗證
-        pyautogui.screenshot('./testreport/testpic/'+className+ "_"+ glo_var.file_create_time+'.png')
+        screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
+        pyautogui.screenshot(str(screenshot_path))
 
     with open(pos_file, "r") as read_dst_f : 
         position = read_pos(read_dst_f) #根據提供的座標(pos_file)
         # 不管怎樣都要換成現在比的東西的位置 (因為有些東西可能是判斷不一樣 反而要在這個位置做動作)
         glo_var.mid_pos = [position[0]+(position[2]/2),position[1]+(position[3]/2)] # 計算圖片中心點
 
-        pyautogui.screenshot(save_loc, region=position) #讀取要截圖的座標位置(region)，並儲存在指定的資料夾路徑內(save_loc)
+        pyautogui.screenshot(str(save_loc), region=position) #讀取要截圖的座標位置(region)，並儲存在指定的資料夾路徑內(save_loc)
         
-        img_cut = cv2.imread(save_loc) #將上一動截圖的檔案讀取出來
+        img_cut = cv2.imread(str(save_loc)) #將上一動截圖的檔案讀取出來
 
         # 比較相似度
         # sim = cv2.compareHist(img_cut, img, 0)
@@ -576,7 +585,8 @@ def compare_sim(file_place, className, confidence = 0.9, precise = False, before
         print("比較"+file_place+" , sim : "+str(sim))
 
         if before == False: #else:在做完動作後再進行截圖
-            pyautogui.screenshot('./testreport/testpic/'+className+ "_"+ glo_var.file_create_time+'.png')
+            screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
+            pyautogui.screenshot(str(screenshot_path))
 
         # print(sim)
         # try :
@@ -600,17 +610,18 @@ def compare_sim(file_place, className, confidence = 0.9, precise = False, before
         #如果比對找不到 就從畫面找
         # locateCenterOnScreen 原理是用 cv2.matchTemplate
         region = None #將region創造出來
-        if os.path.isfile(region_file) : # 確認region_file檔案是否存在(代表是否要用region)
+        if region_file.exists() : # 確認region_file檔案是否存在(代表是否要用region)
             with open(region_file, "r") as region_dst_f : 
                 region = read_pos(region_dst_f)
 
         if region == None :
-            pic_position = pyautogui.locateCenterOnScreen(pic_file, grayscale=False, confidence = 0.93) #透過全畫面找尋是否有pic_file這個檔案圖片
+            pic_position = pyautogui.locateCenterOnScreen(str(pic_file), grayscale=False, confidence = 0.93) #透過全畫面尋找是否有pic_file這個檔案圖片
         else :
-            pic_position = pyautogui.locateCenterOnScreen(pic_file, grayscale=False, confidence = 0.93, region = region) #透過定義過的region找尋是否有pic_file這個檔案圖片
+            pic_position = pyautogui.locateCenterOnScreen(str(pic_file), grayscale=False, confidence = 0.93, region = region) #透過定義過的region尋找是否有pic_file這個檔案圖片
 
         if before == False : #若第二次判斷沒有return，則會進行此截圖，複寫第二次的結果
-            pyautogui.screenshot('./testreport/testpic/'+className+ "_"+ glo_var.file_create_time+'.png')
+            screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
+            pyautogui.screenshot(str(screenshot_path))
 
         if pic_position != None :
             print("< " + file_place + " > cannot find at particular position") #意味著如果透過上一動的方式可以找到座標，那就是畫面中有能找到這個座標位置
@@ -722,18 +733,22 @@ def cut_pic_data(location, num, round_count, cover = True, cut_new = False, pic_
     # location 格式 fin_card_num\\
     global glo_var
     # print("BBBB glo_var.file_absolute_pos : ",glo_var.file_absolute_pos)
-    end_file_dst = glo_var.file_absolute_pos + location
-    print("end_file_dst : "+end_file_dst + ".txt")
+    end_file_path = glo_var.game_pic_path / location
+    print("end_file_dst : " + str(end_file_path) + ".txt")
 
-    with open(end_file_dst + ".txt", "r") as read_dst_f :
+    with open(str(end_file_path) + ".txt", "r") as read_dst_f :
         for x in range(num):
             position = read_pos(read_dst_f)
-            if os.path.isdir(glo_var.user_abs_pic + location) == False :  #判斷有沒有定義的資料夾
-                os.mkdir(glo_var.user_abs_pic + location) #如果沒有就自動生成
+            
+            # 使用 pathlib 檢查和創建資料夾
+            user_pic_location = glo_var.game_pic_path / location
+            if not user_pic_location.exists():  #判斷有沒有定義的資料夾
+                user_pic_location.mkdir() #如果沒有就自動生成
+                
             if pic_count == None :
-                pyautogui.screenshot(glo_var.user_abs_pic + location + str(x+11)+"_"+str(round_count)+".PNG", region=position) #透過已定義的座標位置進行截圖
+                pyautogui.screenshot(str(user_pic_location / f"{x+11}_{round_count}.PNG"), region=position) #透過已定義的座標位置進行截圖
             else :
-                pyautogui.screenshot(glo_var.user_abs_pic + location + str(x+11)+"_"+str(round_count)+"_"+str(pic_count)+".PNG", region=position) #透過已定義的座標位置進行截圖
+                pyautogui.screenshot(str(user_pic_location / f"{x+11}_{round_count}_{pic_count}.PNG"), region=position) #透過已定義的座標位置進行截圖
             # 用來切特定位置 不一樣的圖
             # 有 _r 跟 _b 目前好像只能用在牌上?? 所以先注解掉
             # if cut_new == True :
@@ -747,13 +762,16 @@ def cut_pic_data(location, num, round_count, cover = True, cut_new = False, pic_
             
             if cover == False : 
                 theTime = datetime.datetime.now().strftime(ISOTIMEFORMAT)
-                if os.path.isdir(glo_var.cut_pic_path + location) == False :  #判斷有沒有定義的資料夾
-                    os.mkdir(glo_var.cut_pic_path + location) #如果沒有就自動生成
+                
+                # 訓練資料路徑
+                training_location = Path(glo_var.cut_pic_path) / location
+                if not training_location.exists():  #判斷有沒有定義的資料夾
+                    training_location.mkdir() #如果沒有就自動生成
                 
                 if pic_count == None :
-                    pyautogui.screenshot(glo_var.cut_pic_path + location + "//" + str(x)+"_"+theTime+".PNG", region=position) #截圖(檔名多了時間)
+                    pyautogui.screenshot(str(training_location / f"{x}_{theTime}.PNG"), region=position) #截圖(檔名多了時間)
                 else :
-                    pyautogui.screenshot(glo_var.cut_pic_path + location + "//" + str(pic_count)+"_"+str(x)+"_"+theTime+".PNG", region=position) #透過已定義的座標位置進行截圖
+                    pyautogui.screenshot(str(training_location / f"{pic_count}_{x}_{theTime}.PNG"), region=position) #透過已定義的座標位置進行截圖
 
 # 把 cut_pic_data 截好的圖片 辨識後 放入 glo_var.client_data 中
 # 這個 funciton 只能用<每個玩家>都<只有一個>的<數字>資料
