@@ -1,6 +1,6 @@
 import unittest
 import os
-import threading
+from threading import Thread
 import datetime
 import random
 import sys
@@ -11,20 +11,21 @@ import pyautogui
 import HTMLTestRun
 import Tool_Main
 # from Card import Card
-
 from Gf_Except import Game_fail_Exception
 
-class Minesweeper_Begin_thread (threading.Thread):
+from Minesweeper import Minesweeper
+class Minesweeper_Begin_thread (Thread):
     def __init__(self) :
-        threading.Thread.__init__(self)
+        Thread.__init__(self)
 
     def run(self) :    
-        Tool_Main.cut_pic_data("player_money_bef", Tool_Main.glo_var.player_num, Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len, cover=False)
+        pass
+        # Tool_Main.cut_pic_data("player_money_bef", Tool_Main.glo_var.player_num, Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len, cover=False)
 
 # 初始化 遊戲結束要執行的 Thread
-class Minesweeper_End_thread (threading.Thread):
+class Minesweeper_End_thread (Thread):
     def __init__(self):
-        threading.Thread.__init__(self)
+        Thread.__init__(self)
 
     def run(self):
         finish_time = datetime.datetime.now()
@@ -102,12 +103,12 @@ class Game_test_case(unittest.TestCase) :
         Tool_Main.glo_var.s_record_time()
 
         while True :
-            if Tool_Main.cal_time_out(200,sys._getframe().f_code.co_name) or Tool_Main.glo_var.fail_playing :
+            if Tool_Main.cal_time_out(10,sys._getframe().f_code.co_name) or Tool_Main.glo_var.fail_playing :
                 Tool_Main.glo_var.fail_playing = True
                 self.assertTrue(False,"time_out")
                 break
             
-            if Tool_Main.compare_sim("roomLV6",sys._getframe().f_code.co_name) > 0.97 :
+            if Tool_Main.compare_sim("level_beginner",sys._getframe().f_code.co_name) > 0.97 :
             # if Tool_Main.compare_sim("roomLV1",sys._getframe().f_code.co_name) > 0.97 :
                 Tool_Main.click_mid("點擊房間")
                 break
@@ -195,8 +196,7 @@ if __name__=="__main__" :
     round_count = round_count-1
     print("Tool_Main.glo_var : ",Tool_Main.glo_var)
     if Game_envi == "Minesweeper_local_py" :
-        from Minesweeper import Minesweeper
-        Minesweeper.main()
+        Minesweeper.thread_start()
     else :
         print("打開遊戲網頁")
         Tool_Main.open_game_web()
