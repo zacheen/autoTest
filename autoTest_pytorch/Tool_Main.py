@@ -534,7 +534,7 @@ def cancel_first_time() : #
 # confidence > 0.9  且 precise = False ==   如果在精準的位置"用很嚴格的標準"(confidence)找不到，還可以用全螢幕找找看
 # confidence <= 0.9 且 precise = True  ==   如果在精準的位置"用不嚴格的標準"找不到，也不要在全螢幕找了
 def compare_sim(file_place, className, confidence = 0.9, precise = False, before = False, lobby = False) : 
-    global glo_var #導入全域變數
+    global glo_var
 
     if file_place == "" : #用於遊戲流程進行中，若有想要把過程中發生的狀態進行截圖，可透過此func進行(compare_sim("", className))，此方法目的僅為在該狀態中沒有要進行結圖比對或辨識，僅儲存圖片
         screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
@@ -550,14 +550,14 @@ def compare_sim(file_place, className, confidence = 0.9, precise = False, before
         #有小工具
         # 使用 pathlib 處理路徑
         pos_file = glo_var.game_pic_path / f"{file_place}.txt" # FKNN_pic內的座標位置檔案，是自己先創建確認好的，為比對位置標準
-        pic_file = glo_var.game_pic_path / f"{file_place}.PNG" # FKNN_pic內的圖片檔案(EX:湊一倍，繼續遊戲)，是自己先創建確認好的，可以拿來判斷狀態，也可以拿來進行點擊
+        pic_file = glo_var.game_pic_path / f"{file_place}.png" # FKNN_pic內的圖片檔案(EX:湊一倍，繼續遊戲)，是自己先創建確認好的，可以拿來判斷狀態，也可以拿來進行點擊
         region_file = glo_var.game_pic_path / f"{file_place}_region.txt"
         # 當pos_file比對失敗時，可透過定義一個範圍，重新再找一次(若沒有此檔案，預設為找全部畫面，但避免找到類似的發生誤導，因此可限定區域)，此參數也是由使用者決定是否提供
         # 如果是要找共同的圖片 就把位置改成lobby 圖都放在這底下
         if lobby :
             lobby_path = glo_var.game_pic_path.parent / "lobby_pic"
             pos_file = lobby_path / f"{file_place}.txt"
-            pic_file = lobby_path / f"{file_place}.PNG"
+            pic_file = lobby_path / f"{file_place}.png"
             region_file = lobby_path / f"{file_place}_region.txt"
         
 
@@ -614,22 +614,26 @@ def compare_sim(file_place, className, confidence = 0.9, precise = False, before
             with open(region_file, "r") as region_dst_f : 
                 region = read_pos(region_dst_f)
 
-        if region == None :
-            pic_position = pyautogui.locateCenterOnScreen(str(pic_file), grayscale=False, confidence = 0.93) #透過全畫面尋找是否有pic_file這個檔案圖片
-        else :
-            pic_position = pyautogui.locateCenterOnScreen(str(pic_file), grayscale=False, confidence = 0.93, region = region) #透過定義過的region尋找是否有pic_file這個檔案圖片
+        try:
+            if region == None :
+                pic_position = pyautogui.locateCenterOnScreen(str(pic_file), grayscale=False, confidence = 0.93) #透過全畫面尋找是否有pic_file這個檔案圖片
+            else :
+                pic_position = pyautogui.locateCenterOnScreen(str(pic_file), grayscale=False, confidence = 0.93, region = region) #透過定義過的region尋找是否有pic_file這個檔案圖片
 
-        if before == False : #若第二次判斷沒有return，則會進行此截圖，複寫第二次的結果
-            screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
-            pyautogui.screenshot(str(screenshot_path))
+            if before == False : #若第二次判斷沒有return，則會進行此截圖，複寫第二次的結果
+                screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
+                pyautogui.screenshot(str(screenshot_path))
 
-        if pic_position != None :
-            print("< " + file_place + " > cannot find at particular position") #意味著如果透過上一動的方式可以找到座標，那就是畫面中有能找到這個座標位置
-            # 這裡如果找到東西 也會更新位置 但是是找到東西的位置
-            glo_var.mid_pos = pic_position
-            # write_mid_pos(mid_pos_file,glo_var.mid_pos)
-            # 0.9 這是我自己定義的
-            return 0.9 #因此回傳0.9，但表示圖片有位移，透過0.9表示
+            if pic_position != None :
+                print("< " + file_place + " > cannot find at particular position, but find in screen") #意味著如果透過上一動的方式可以找到座標，那就是畫面中有能找到這個座標位置
+                # 這裡如果找到東西 也會更新位置 但是是找到東西的位置
+                glo_var.mid_pos = pic_position
+                # write_mid_pos(mid_pos_file,glo_var.mid_pos)
+                # 0.9 這是我自己定義的
+                return 0.9 #因此回傳0.9，但表示圖片有位移，透過0.9表示
+        except pyautogui.ImageNotFoundException :
+            # cannot find this picture even in the whole screen
+            pass
 
     return 0 #如果手動設定的confidence與預設的0.91及最後的位移判斷()0.9)都失效了，就意味著找不到，回傳0
 
@@ -638,13 +642,13 @@ def compare_sim(file_place, className, confidence = 0.9, precise = False, before
 # def compare_sim_groupe(file_place,x,read_dst_f, return_sim = False) :
 #     global mid_pos
 
-#     pic_file = file_absolute_pos + file_place + "\\" + str(x) + ".PNG"
+#     pic_file = file_absolute_pos + file_place + "\\" + str(x) + ".png"
 
 #     position = read_pos(read_dst_f)
 #     # print(position)
-#     window_capture(file_absolute_pos + "pass.PNG", region=position)
+#     window_capture(file_absolute_pos + "pass.png", region=position)
     
-#     img_cut = cv2.imread(file_absolute_pos + "pass.PNG")
+#     img_cut = cv2.imread(file_absolute_pos + "pass.png")
 #     img_cut = cv2.calcHist([img_cut], [0], None, [256], [0, 256])
 #     img_cut = cv2.normalize(img_cut, img_cut, 0, 1, cv2.NORM_MINMAX, -1)
     
@@ -671,9 +675,9 @@ def compare_sim(file_place, className, confidence = 0.9, precise = False, before
 #         # print("file_place : "+str(file_place))
 #         pic_file = file_place
 
-#         window_capture(glo_var.file_absolute_pos + "pass.PNG", region=position)
+#         window_capture(glo_var.file_absolute_pos + "pass.png", region=position)
         
-#         img_cut = cv2.imread(glo_var.file_absolute_pos + "pass.PNG")
+#         img_cut = cv2.imread(glo_var.file_absolute_pos + "pass.png")
 #         img_cut = cv2.calcHist([img_cut], [0], None, [256], [0, 256])
 #         img_cut = cv2.normalize(img_cut, img_cut, 0, 1, cv2.NORM_MINMAX, -1)
         
@@ -694,7 +698,7 @@ def compare_sim(file_place, className, confidence = 0.9, precise = False, before
 #     max_num = -1
 
 #     if num == None : 
-#         targetPattern = file_place+ "_*.PNG"
+#         targetPattern = file_place+ "_*.png"
 #         all_file = glob.glob(targetPattern)
 #         for this_png in all_file :
 #             pass_sim = just_compare_sim(position, this_png)
@@ -705,7 +709,7 @@ def compare_sim(file_place, className, confidence = 0.9, precise = False, before
 
 #     else :
 #         for x in range(num+1):
-#             pass_sim = just_compare_sim(position, file_place + "_" + str(x)+ ".PNG")
+#             pass_sim = just_compare_sim(position, file_place + "_" + str(x)+ ".png")
 #             # print(str(x)+" 的 sim : "+str(pass_sim))
 #             if pass_sim > max_sim :
 #                 max_sim = pass_sim
@@ -746,9 +750,9 @@ def cut_pic_data(location, num, round_count, cover = True, cut_new = False, pic_
                 user_pic_location.mkdir() #如果沒有就自動生成
                 
             if pic_count == None :
-                pyautogui.screenshot(str(user_pic_location / f"{x+11}_{round_count}.PNG"), region=position) #透過已定義的座標位置進行截圖
+                pyautogui.screenshot(str(user_pic_location / f"{x+11}_{round_count}.png"), region=position) #透過已定義的座標位置進行截圖
             else :
-                pyautogui.screenshot(str(user_pic_location / f"{x+11}_{round_count}_{pic_count}.PNG"), region=position) #透過已定義的座標位置進行截圖
+                pyautogui.screenshot(str(user_pic_location / f"{x+11}_{round_count}_{pic_count}.png"), region=position) #透過已定義的座標位置進行截圖
             # 用來切特定位置 不一樣的圖
             # 有 _r 跟 _b 目前好像只能用在牌上?? 所以先注解掉
             # if cut_new == True :
@@ -758,7 +762,7 @@ def cut_pic_data(location, num, round_count, cover = True, cut_new = False, pic_
             #     if sim < 0.99 and sim2 < 0.99: 
             #         #儲存
             #         theTime = datetime.datetime.now().strftime(ISOTIMEFORMAT) 
-            #         pyautogui.screenshot(glo_var.user_abs_loc + location + str(x)+"_"+theTime+".PNG", region=position)
+            #         pyautogui.screenshot(glo_var.user_abs_loc + location + str(x)+"_"+theTime+".png", region=position)
             
             if cover == False : 
                 theTime = datetime.datetime.now().strftime(ISOTIMEFORMAT)
@@ -769,9 +773,9 @@ def cut_pic_data(location, num, round_count, cover = True, cut_new = False, pic_
                     training_location.mkdir() #如果沒有就自動生成
                 
                 if pic_count == None :
-                    pyautogui.screenshot(str(training_location / f"{x}_{theTime}.PNG"), region=position) #截圖(檔名多了時間)
+                    pyautogui.screenshot(str(training_location / f"{x}_{theTime}.png"), region=position) #截圖(檔名多了時間)
                 else :
-                    pyautogui.screenshot(str(training_location / f"{pic_count}_{x}_{theTime}.PNG"), region=position) #透過已定義的座標位置進行截圖
+                    pyautogui.screenshot(str(training_location / f"{pic_count}_{x}_{theTime}.png"), region=position) #透過已定義的座標位置進行截圖
 
 # 把 cut_pic_data 截好的圖片 辨識後 放入 glo_var.client_data 中
 # 這個 funciton 只能用<每個玩家>都<只有一個>的<數字>資料
@@ -862,7 +866,7 @@ def cal_time_out(limit, state = "") :
     # 距離紀錄時間多遠
     now_time = datetime.datetime.now()
     delta_time = (now_time - glo_var.record_time).seconds
-    # print(delta_time)
+    print(delta_time)
     if delta_time >= limit :
         print_to_output(str(state) + " has past " + str(delta_time)+ " sec")
         return True
