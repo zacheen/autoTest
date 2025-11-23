@@ -8,7 +8,6 @@ class Minesweeper:
         self.root = root
         self.root.title("Minesweeper 掃雷")
         self.root.configure(bg='#f0f0f0')
-        self.root.geometry("600x650")
         self.root.minsize(400, 450)
         
         # Configure root grid weights for expansion
@@ -368,7 +367,14 @@ class Minesweeper:
 def main():
     root = tk.Tk()
     game = Minesweeper(root)
+    root.state('zoomed')
     root.mainloop()
 
+def thread_start():
+    from threading import Thread
+    Thread(
+        main()
+    ).start()
+
 if __name__ == "__main__":
-    main()
+    thread_start()
