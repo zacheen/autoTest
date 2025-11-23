@@ -26,7 +26,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 
 import HTMLTestRun
 import identify_for_import
-# import Data
+import Data
 # import Card
 
 # ----------------------------------------------------------
@@ -208,8 +208,8 @@ class Glo_var():
             print("提醒!!!"+in_game_name+"在Data.py中尚未有資料")
             self.class_to_str_list = {}
         
-        # 決定花色順序 
-        Card.change_suit_order(suit_order)
+        # 決定花色順序
+        # Card.change_suit_order(suit_order)
         self.reset_var(round_count)
 
     # 把程式中改變的參數 設定為預設值
