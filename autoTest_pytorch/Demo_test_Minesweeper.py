@@ -171,10 +171,10 @@ class Game_test_case(unittest.TestCase) :
     # 進入遊戲之後 用例增加區↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
 
 
-Game_envi = "CQ9"
+Game_envi = "My_Minesweeper"
 Tool_Main.Game_envi = Game_envi
 
-game_name = "KPSZNN"
+game_name = "Minesweeper"
 player_num = 4
 # 初始化全部遊戲都會用到的參數
 

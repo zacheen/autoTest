@@ -7,6 +7,7 @@ import sys
 # sys.path.append(".")
 
 import os
+from pathlib import Path
 ##@
 #TS使用到的LOG層級，3為有錯誤才印出 (細節待確認)
 # 這個要放在 import tensorflow 之前，因為 import tensorflow 就會印出警示訊息了
@@ -119,8 +120,8 @@ class Glo_var():
                 with open(self.user_abs_loc + 'url.json', encoding='UTF-8') as f:
                     self.DaiLi_data = json.load(f)
         else:
-            if Game_envi == "CQ9":
-                read_input_f = open(self.user_abs_loc + "CQ9_input.txt", "r", encoding='UTF-8') #讀取使用者資料進行登入
+            if Game_envi == "My_Minesweeper":
+                read_input_f = open(self.user_abs_loc + "Minesweeper_input.txt", "r", encoding='UTF-8') #讀取使用者資料進行登入
             else :
                 print("Game_envi error (No this envi)")
             self.game_account = str(read_input_f.readline().split(" -:")[1]).strip() #split(" -:") 透過此方式將資料進行分割，strip() 用以移除字符，開頭或結尾的空格與換行，確保該資料無預期外的字串
