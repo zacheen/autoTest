@@ -105,7 +105,7 @@ class Glo_var():
 
     def read_input(self) :
         # input (讀取設定檔)(不變) --------------------------------------------------------------------------------------------------------------------------------------------------------
-        print("Game_envi :",Game_envi)
+        print("Game_envi :", Game_envi)
         self.is_url = False
         if type(Game_envi)==type("") and len(Game_envi) >= 3 and Game_envi[0:3] == "url" :
             self.is_url = True
@@ -124,7 +124,7 @@ class Glo_var():
                 with open(url_json_path, encoding='UTF-8') as f:
                     self.DaiLi_data = json.load(f)
         else:
-            if Game_envi == "My_Minesweeper":
+            if Game_envi == "Minesweeper_local_py":
                 input_file_path = self.user_change_path / "Minesweeper_input.txt"
             else :
                 print("Game_envi error (No this envi)")

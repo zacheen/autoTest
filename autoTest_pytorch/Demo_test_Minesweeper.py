@@ -171,7 +171,7 @@ class Game_test_case(unittest.TestCase) :
     # 進入遊戲之後 用例增加區↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
 
 
-Game_envi = "My_Minesweeper"
+Game_envi = "Minesweeper_local_py"
 Tool_Main.Game_envi = Game_envi
 
 game_name = "Minesweeper"
@@ -194,10 +194,14 @@ if __name__=="__main__" :
     game_only_var = Game_only_var()
     round_count = round_count-1
     print("Tool_Main.glo_var : ",Tool_Main.glo_var)
-    print("打開遊戲網頁")
-    Tool_Main.open_game_web()
-    print("登入遊戲平台")
-    Tool_Main.login_plat()
+    if Game_envi == "Minesweeper_local_py" :
+        from Minesweeper import Minesweeper
+        Minesweeper.main()
+    else :
+        print("打開遊戲網頁")
+        Tool_Main.open_game_web()
+        print("登入遊戲平台")
+        Tool_Main.login_plat()
 
 
     # 這裡是無窮while迴圈 要讓他可以一直執行
