@@ -8,7 +8,6 @@ class Minesweeper:
         self.root = root
         self.root.title("Minesweeper 掃雷")
         self.root.configure(bg='#f0f0f0')
-        self.root.minsize(400, 450)
         
         # Configure root grid weights for expansion
         self.root.grid_rowconfigure(2, weight=1)
@@ -16,9 +15,9 @@ class Minesweeper:
         
         # Game parameters
         self.difficulties = {
-            'Beginner': {'rows': 9, 'cols': 9, 'mines': 10},
-            'Intermediate': {'rows': 16, 'cols': 16, 'mines': 40},
-            'Expert': {'rows': 16, 'cols': 30, 'mines': 99}
+            'Beginner': {'rows': 9, 'cols': 9, 'mines': 10, 'min_width': 400, 'min_height': 450},
+            'Intermediate': {'rows': 16, 'cols': 16, 'mines': 40, 'min_width': 600, 'min_height': 650},
+            'Expert': {'rows': 16, 'cols': 30, 'mines': 99, 'min_width': 1000, 'min_height': 650}
         }
         
         self.current_difficulty = 'Beginner'
@@ -34,6 +33,25 @@ class Minesweeper:
         self.rows = params['rows']
         self.cols = params['cols']
         self.mines_count = params['mines']
+        
+        # Set minimum window size based on difficulty
+        min_width = params.get('min_width', 400)
+        min_height = params.get('min_height', 450)
+        self.root.minsize(min_width, min_height)
+        
+        # Set initial window size based on screen size (60% of screen)
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        # print(screen_width, screen_height) # Kept for debugging if needed
+        
+        window_width = min(int(screen_width * 0.6), max(min_width, 800))
+        window_height = min(int(screen_height * 0.6), max(min_height, 700))
+        
+        # Center the window on screen
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
         
         # Game state
         self.mines = set()
@@ -142,8 +160,6 @@ class Minesweeper:
             for j in range(self.cols):
                 btn = tk.Button(
                     self.board_frame,
-                    width=3,
-                    height=1,
                     font=('Arial', 10, 'bold'),
                     bg='#e0e0e0',
                     relief=tk.RAISED,
@@ -155,7 +171,7 @@ class Minesweeper:
                 btn.bind('<Button-1>', lambda e, r=i, c=j: self.on_left_click(r, c))
                 btn.bind('<Button-3>', lambda e, r=i, c=j: self.on_right_click(r, c))
                 
-                # Configure grid weights for each cell
+                # Configure grid weights for each cell to ensure uniform expansion
                 self.board_frame.grid_rowconfigure(i, weight=1)
                 self.board_frame.grid_columnconfigure(j, weight=1)
                 
@@ -181,36 +197,50 @@ class Minesweeper:
             return
         
         # Calculate cell size to maintain square cells
-        # Account for borders, padding between cells, and frame border
-        padding_width = (self.cols + 1) * 2 + 10  # padding between cells + border
-        padding_height = (self.rows + 1) * 2 + 10
+        # Account for border of board_frame (bd=3) and padx/pady of buttons (1)
+        # Total padding/border: (self.cols + 1) * 2 (pady/padx) + 2 * bd (3) + small allowance (e.g., 2)
+        # Using a fixed minimal allowance for border/padding calculation: 
+        padding_base = 5 # Allowance for frame border (bd=3) and small miscalculation
+        padding_width = self.cols * 2 + padding_base  # Total padding/gap space
+        padding_height = self.rows * 2 + padding_base 
         
         max_cell_width = (available_width - padding_width) / self.cols
         max_cell_height = (available_height - padding_height) / self.rows
         
         # Use the smaller dimension to maintain square cells
         cell_size = min(max_cell_width, max_cell_height)
-        cell_size = max(20, min(cell_size, 45))  # Limit between 20 and 45 pixels
         
-        # Calculate actual board dimensions
+        # Set maximum cell size based on screen dimensions for better experience
+        screen_width = self.root.winfo_screenwidth()
+        if screen_width <= 1366:  # Small screens (768p, 1366x768)
+            max_cell_size = 35
+        elif screen_width <= 1920:  # HD screens (1080p)
+            max_cell_size = 45
+        elif screen_width <= 2560:  # 2K screens
+            max_cell_size = 55
+        else:  # 4K and above
+            max_cell_size = 70
+            
+        cell_size = max(20, min(cell_size, max_cell_size))
+        
+        # Calculate actual board dimensions based on chosen cell_size
+        # The total width is (cell_size * cols) + padding_width (which includes button padx/pady and frame border)
         board_width = int(cell_size * self.cols + padding_width)
         board_height = int(cell_size * self.rows + padding_height)
         
-        # Update button sizes
-        button_width = max(2, int(cell_size / 8))
-        button_height = max(1, int(cell_size / 16))
-        font_size = max(8, min(14, int(cell_size * 0.4)))
+        # Calculate font size to fit the cell (adjusting the factor based on desired look)
+        font_size = max(8, min(20, int(cell_size * 0.5))) 
         
+        # Update button font sizes
         for i in range(self.rows):
             for j in range(self.cols):
                 self.buttons[i][j].config(
-                    width=button_width,
-                    height=button_height,
                     font=('Arial', font_size, 'bold')
                 )
         
-        # Center the board frame
-        # First, place it without centering to get actual size
+        # Center the board frame using place
+        # The board frame's width/height are set by the explicit board_width/height calculated
+        # The buttons inside are set by the grid weights and sticky='nsew' to fill this space
         self.board_frame.place_forget()
         self.board_frame.place(
             x=(available_width - board_width) // 2,
@@ -366,15 +396,13 @@ class Minesweeper:
 
 def main():
     root = tk.Tk()
-    game = Minesweeper(root)
     root.state('zoomed')
+    game = Minesweeper(root)
     root.mainloop()
 
 def thread_start():
     from threading import Thread
-    Thread(
-        main()
-    ).start()
+    Thread(target=main).start()
 
 if __name__ == "__main__":
     thread_start()
