@@ -1,0 +1,9 @@
+遊戲帳號 -: DEMO Minesweeper wont use
+遊戲密碼 -: DEMO Minesweeper wont use
+遊戲代理ID -: DEMO Minesweeper wont use
+遊戲分數 -: DEMO Minesweeper wont use
+遊戲環境 -: DEMO Minesweeper wont use
+後台帳號 -: DEMO Minesweeper wont use
+後台密碼 -: DEMO Minesweeper wont use
+// This section is used to configure the information required before launching the game,
+// such as the account and password settings.
