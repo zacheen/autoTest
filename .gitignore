@@ -5,10 +5,12 @@ models/research/object_detection/TOOL/labelImg-master/labelImg.exe
 
 # log
 models/research/object_detection/testreport/*
+testreport/*
 models/research/object_detection/user_change/game_pic
 
 # 需要一直更新的東西
 models/research/object_detection/user_change/chromedriver.exe
+user_change/chromedriver.exe
 
 # 之前的紀錄
 工作紀錄/*
@@ -16,6 +18,7 @@ models/research/object_detection/old_template/*
 
 # trainging data
 models/research/object_detection/game_pic/*/*
+game_pic/*/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
