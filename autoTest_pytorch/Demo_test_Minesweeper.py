@@ -126,7 +126,7 @@ class Game_test_case(unittest.TestCase) :
         # 單純截圖指令(會放在 html report中)
         Tool_Main.compare_sim("", sys._getframe().f_code.co_name)
 
-    def test_grab_none(self):
+    def test_click_middle(self):
         Tool_Main.glo_var.s_record_time()
 
         while True :
@@ -135,12 +135,51 @@ class Game_test_case(unittest.TestCase) :
                 self.assertTrue(False,"time_out")
                 break
             
-            if Tool_Main.compare_sim("grab3",sys._getframe().f_code.co_name) > 0.97 :
+            if Tool_Main.compare_sim("init_grid",sys._getframe().f_code.co_name) > 0.97 :
             # if Tool_Main.compare_sim("grab_none",sys._getframe().f_code.co_name) > 0.97 :
-                KPSZNN_Begin_thread().start()
-                time.sleep(2)
-                Tool_Main.click_mid("點擊不搶庄")
+                Minesweeper_Begin_thread().start()
+                time.sleep(1)
+                # prepare for test_RL
+                Tool_Main.cut_pic_data("whole_screen", Tool_Main.glo_var.player_num, Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len, cover=True, comp=True)
+                Tool_Main.click_mid("點擊正中間的 grid")
                 break
+
+    def test_RL(self):
+        Tool_Main.glo_var.s_record_time()
+        time_out_cnt = 0
+        while True :
+            # there is no time out here, since 
+            if Tool_Main.cal_time_out(5,sys._getframe().f_code.co_name) or Tool_Main.glo_var.fail_playing :
+                if time_out_cnt == 10000 :
+                    Tool_Main.glo_var.fail_playing = True
+                    self.assertTrue(False,"time_out")
+                    break
+                # select another position to click ??
+                # RL neg score
+
+            if Tool_Main.compare_sim(f"whole_screen_comp_{0+11}_{Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len}",sys._getframe().f_code.co_name, precise = True) < 0.97 : 
+                # something changed
+                
+                # another screen shot
+                Tool_Main.cut_pic_data("whole_screen", Tool_Main.glo_var.player_num, Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len, cover=True, comp=True)
+                # reset timer??
+                
+                time.sleep(3) # let UI run
+                lost_or_win = False
+                # detect lose UI
+                if Tool_Main.compare_sim("lose",sys._getframe().f_code.co_name, precise = True) > 0.9 :
+                    # big neg score
+                    break
+
+                # detect win UI
+                if Tool_Main.compare_sim("win",sys._getframe().f_code.co_name, precise = True) > 0.9 : 
+                    # big pos score
+                    break
+
+                # pos score
+                # select another position to click ??
+                    
+                
 
     # 等待遊戲結束
     def test_wait_result(self):
@@ -154,8 +193,8 @@ class Game_test_case(unittest.TestCase) :
                 self.assertTrue(False,"time_out")
                 break
 
-            if Tool_Main.compare_sim("continue",sys._getframe().f_code.co_name, precise = True) > 0.97 : 
-                KPSZNN_End_thread().start()
+            if Tool_Main.compare_sim("confirm",sys._getframe().f_code.co_name, precise = False) >= 0.9 : 
+                # KPSZNN_End_thread().start()
                 # CQ9 沒有後台 所以不用等
                 # total_wait_time = 100
                 # print("等待資料寫入資料庫且辨識完("+ str(total_wait_time)+"秒)")
@@ -163,12 +202,24 @@ class Game_test_case(unittest.TestCase) :
                 #     if x % 10 == 1 :
                 #         print("等待剩餘時間 : " + str(total_wait_time-x))
                 #     time.sleep(1)
-
-                Tool_Main.click_mid("繼續遊戲")
+                # KPSZNN_End_thread().start() # I need to lock here (after screen shot then I can click)
+                Tool_Main.click_mid("關閉確認")
                 Tool_Main.glo_var.end_time[Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len] = str(datetime.datetime.now().strftime(Tool_Main.format_for_db_time))
                 Tool_Main.print_to_output("此局結束時間 : " + Tool_Main.glo_var.end_time[Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len])
                 break
 
+    def test_new_game(self):
+        Tool_Main.glo_var.s_record_time()
+        while True :
+            # 這裡會設 200 是因為我可能會需要切頁面做什麼事情 這個時候可以做
+            if Tool_Main.cal_time_out(60,sys._getframe().f_code.co_name) or Tool_Main.glo_var.fail_playing :
+                Tool_Main.glo_var.fail_playing = True
+                self.assertTrue(False,"time_out")
+                break
+
+            if Tool_Main.compare_sim("new_game",sys._getframe().f_code.co_name, precise = False) >= 0.97 : 
+                Tool_Main.click_mid("新遊戲")
+                break
     # 進入遊戲之後 用例增加區↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
 
 
@@ -176,7 +227,7 @@ Game_envi = "Minesweeper_local_py"
 Tool_Main.Game_envi = Game_envi
 
 game_name = "Minesweeper"
-player_num = 4
+player_num = 1
 # 初始化全部遊戲都會用到的參數
 
 next_wait_time = 60
@@ -197,6 +248,7 @@ if __name__=="__main__" :
     print("Tool_Main.glo_var : ",Tool_Main.glo_var)
     if Game_envi == "Minesweeper_local_py" :
         Minesweeper.thread_start()
+        print("open the game successfully")
     else :
         print("打開遊戲網頁")
         Tool_Main.open_game_web()
@@ -258,8 +310,10 @@ if __name__=="__main__" :
             during_gameing=unittest.TestSuite() 
             # 組合要做的步驟
             during_gameing.addTest(Game_test_case("test_state_prepare"))
-            during_gameing.addTest(Game_test_case("test_grab_none"))
+            during_gameing.addTest(Game_test_case("test_click_middle"))
+            during_gameing.addTest(Game_test_case("test_RL"))
             during_gameing.addTest(Game_test_case("test_wait_result"))
+            during_gameing.addTest(Game_test_case("test_new_game"))
             #獲取當前時間，這樣便於下面的使用
             Tool_Main.glo_var.file_create_time = time.strftime("%Y-%m-%d-%H_%M_%S",time.localtime(time.time()))
 

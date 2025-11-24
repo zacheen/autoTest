@@ -54,7 +54,7 @@ class Minesweeper:
         self.create_board()
         
         # Update timer
-        self.update_timer()
+        # self.update_timer()
         
     def create_menu(self):
         menu_frame = tk.Frame(self.root, bg='#f0f0f0')
@@ -372,9 +372,7 @@ def main():
 
 def thread_start():
     from threading import Thread
-    Thread(
-        main()
-    ).start()
+    Thread( target=main ).start()
 
 if __name__ == "__main__":
     thread_start()

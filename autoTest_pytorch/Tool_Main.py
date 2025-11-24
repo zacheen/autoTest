@@ -733,7 +733,7 @@ def print_to_output(stri) :
 # cover False : 會在檔名後面加上時間 (通常用來截要用來training的圖片) True : 表示已經不需要加入訓練資料中，因此當下截圖比對完成後就不另外儲存
 # cut_new 目前廢棄使用
 # pic_count 如果同一個位置要截很多張圖片 但又不想被覆蓋就加上數字(其實也可以是文字)
-def cut_pic_data(location, num, round_count, cover = True, cut_new = False, pic_count = None):
+def cut_pic_data(location, num, round_count, cover = True, cut_new = False, pic_count = None, write_region = False, comp = False):
     # location 格式 fin_card_num\\
     global glo_var
     # print("BBBB glo_var.file_absolute_pos : ",glo_var.file_absolute_pos)
@@ -749,6 +749,11 @@ def cut_pic_data(location, num, round_count, cover = True, cut_new = False, pic_
             if not user_pic_location.exists():  #判斷有沒有定義的資料夾
                 user_pic_location.mkdir() #如果沒有就自動生成
                 
+            if comp :
+                comp_pic_pos = user_pic_location.with_name(user_pic_location.stem + f"_comp_{x+11}_{round_count}")
+                pyautogui.screenshot(str(comp_pic_pos.with_suffix(".png")), region=position) #透過已定義的座標位置進行截圖
+                with open(str(comp_pic_pos.with_suffix(".txt")), "w") as fw :
+                    fw.write(str(position)[1:-1]) 
             if pic_count == None :
                 pyautogui.screenshot(str(user_pic_location / f"{x+11}_{round_count}.png"), region=position) #透過已定義的座標位置進行截圖
             else :
@@ -866,7 +871,7 @@ def cal_time_out(limit, state = "") :
     # 距離紀錄時間多遠
     now_time = datetime.datetime.now()
     delta_time = (now_time - glo_var.record_time).seconds
-    print(delta_time)
+    # print(delta_time)
     if delta_time >= limit :
         print_to_output(str(state) + " has past " + str(delta_time)+ " sec")
         return True
