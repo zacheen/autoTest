@@ -3,6 +3,8 @@ import pyautogui
 import cv2
 import numpy as np
 import sys
+import requests
+import json
 # #安裝PY3時，會預設環境變數路徑，但自己定義的工具不會放在裡面，因此透過這個方式，將執行檔當前路徑加入至環境變數，使電腦可以獲取路徑，不會找不到檔案
 # sys.path.append(".")
 
@@ -110,7 +112,7 @@ class Glo_var():
         if type(Game_envi)==type("") and len(Game_envi) >= 3 and Game_envi[0:3] == "url" :
             self.is_url = True
             print("Game_envi is url")
-            
+            ip = ""
             try :
                 response = requests.get("http://"+ip+"/crawler/getCompanys")
                 # print("response : "+str(response.content))
