@@ -1,6 +1,6 @@
 import unittest
 import os
-from threading import Thread
+from threading import Thread, Event
 import datetime
 import random
 import sys
@@ -13,8 +13,7 @@ import Tool_Main
 # from Card import Card
 from Gf_Except import Game_fail_Exception
 
-from Minesweeper import Minesweeper
-
+from Minesweeper.Minesweeper_manager import Minesweeper_manager
 from RL_Agent import get_agent
 
 class Minesweeper_Begin_thread (Thread):
@@ -354,7 +353,8 @@ if __name__=="__main__" :
     round_count = round_count-1
     print("Tool_Main.glo_var : ",Tool_Main.glo_var)
     if Game_envi == "Minesweeper_local_py" :
-        Minesweeper.thread_start()
+        game_only_var.mine = Minesweeper_manager()
+        game_only_var.mine.thread_start()
         print("open the game successfully")
     else :
         print("打開遊戲網頁")
@@ -388,7 +388,7 @@ if __name__=="__main__" :
 
         # 這一整塊是如果有發生錯誤 要做什麼事
         # 重整時間(一局結束的時間) 
-        sleep_time = 100
+        sleep_time = 20
         if Tool_Main.glo_var.fail_playing : 
             # 報錯到 txt
             Tool_Main.report_error("開場")
@@ -398,7 +398,8 @@ if __name__=="__main__" :
             time.sleep(sleep_time)
             # 網頁刷新
             Tool_Main.print_to_output("重新啟動")
-            Tool_Main.glo_var.game_driver.refresh() # 按下網頁刷新鍵
+            game_only_var.mine.thread_stop()
+            game_only_var.mine.thread_start()
             # 參數reset
             Tool_Main.glo_var.reset_var(round_count)
             # game_only_var.fail_reset()

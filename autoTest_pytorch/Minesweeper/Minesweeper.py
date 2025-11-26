@@ -4,8 +4,9 @@ import random
 import time
 
 class Minesweeper:
-    def __init__(self, root):
+    def __init__(self, root, stop_event=None):
         self.root = root
+        self.root.state('zoomed')
         self.root.title("Minesweeper 掃雷")
         self.root.configure(bg='#f0f0f0')
         self.root.minsize(400, 450)
@@ -23,6 +24,17 @@ class Minesweeper:
         
         self.current_difficulty = 'Beginner'
         self.setup_game()
+
+        self.stop_event = stop_event
+        if self.stop_event:
+            self.check_stop()
+
+    def check_stop(self):
+        if self.stop_event and self.stop_event.is_set():
+            self.root.quit()
+            self.root.destroy()
+        else:
+            self.root.after(100, self.check_stop)
         
     def setup_game(self):
         # Clear existing widgets
@@ -364,15 +376,13 @@ class Minesweeper:
             
         self.root.after(1000, self.update_timer)
 
-def main():
-    root = tk.Tk()
-    game = Minesweeper(root)
-    root.state('zoomed')
-    root.mainloop()
+    def close_game(self):
+        self.root.after(0, self._shutdown)
 
-def thread_start():
-    from threading import Thread
-    Thread( target=main ).start()
+    def _shutdown(self):
+        self.root.quit()
+        self.root.destroy()
 
 if __name__ == "__main__":
-    thread_start()
+    root = tk.Tk()
+    Minesweeper(root, None)
