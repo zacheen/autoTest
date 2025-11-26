@@ -14,6 +14,9 @@ import Tool_Main
 from Gf_Except import Game_fail_Exception
 
 from Minesweeper import Minesweeper
+
+from RL_Agent import get_agent
+
 class Minesweeper_Begin_thread (Thread):
     def __init__(self) :
         Thread.__init__(self)
@@ -138,48 +141,155 @@ class Game_test_case(unittest.TestCase) :
             if Tool_Main.compare_sim("init_grid",sys._getframe().f_code.co_name) > 0.97 :
             # if Tool_Main.compare_sim("grab_none",sys._getframe().f_code.co_name) > 0.97 :
                 Minesweeper_Begin_thread().start()
-                time.sleep(1)
-                # prepare for test_RL
-                Tool_Main.cut_pic_data("whole_screen", Tool_Main.glo_var.player_num, Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len, cover=True, comp=True)
-                Tool_Main.click_mid("點擊正中間的 grid")
                 break
 
-    def test_RL(self):
-        Tool_Main.glo_var.s_record_time()
-        time_out_cnt = 0
+    def decide_next_step_and_play(self, game_status):
+        # looping until find a position that is in the game_region
         while True :
-            # there is no time out here, since 
-            if Tool_Main.cal_time_out(5,sys._getframe().f_code.co_name) or Tool_Main.glo_var.fail_playing :
-                if time_out_cnt == 10000 :
+            # 1. 截取當前畫面
+            Tool_Main.cut_pic_data(
+                "whole_screen", 
+                Tool_Main.glo_var.player_num, 
+                Tool_Main.glo_var.round_count % Tool_Main.glo_var.list_len, 
+                cover=True, 
+                comp=True
+            )
+        
+            # 2. 載入截圖並預處理
+            screenshot_path = game_status.save_pic_path[-1]
+            print("screenshot_path", screenshot_path)
+            current_state = game_status.agent.preprocess_screen(screenshot_path)
+        
+            # 3. 選擇動作 (輸出 [0,1] 範圍的 x, y)
+            action = game_status.agent.select_action(current_state, add_noise=True)
+            game_status.update_state(current_state, action)
+        
+            # 4. 轉換為螢幕座標並點擊
+            click_x, click_y = game_status.agent.action_to_screen_coords(action)
+            print(f"Step {game_status.step_count}: action=({action[0]:.3f}, {action[1]:.3f}) -> click=({click_x}, {click_y})")
+            
+            if Tool_Main.click((click_x, click_y), limit_region=game_status.game_region) :
+                break
+
+            # if click position is out of game_region 
+            # really negitive reward and keep looping
+            game_status.reward = -100.0
+            self.update_model(game_status)
+
+    def update_model(self, game_status):
+        # 6. 儲存經驗
+        if game_status.previous_state is not None and game_status.previous_action is not None:
+            game_status.agent.store_transition(
+                game_status.previous_state,
+                game_status.previous_action,
+                game_status.current_state if not game_status.game_over else None,
+                game_status.reward,
+                game_status.game_over
+            )
+        
+        # 7. 訓練
+        loss_info = game_status.agent.train_step()
+        if loss_info:
+            print(f"  Loss - Critic: {loss_info['critic_loss']:.4f}", end="")
+            if loss_info['actor_loss']:
+                print(f", Actor: {loss_info['actor_loss']:.4f}")
+            else:
+                print()
+
+    class Game_status():
+        def __init__(self):
+            # regions (left, top, width, height)
+            screen_region = (0,0,1920,1080) # the size of the screen
+            self.game_region = (1, 31, 1919, 987)   # the size of the game that is clickable
+            
+            # 取得 Agent
+            self.agent = get_agent(screen_region)
+            self.agent.reset_episode()
+
+            self.previous_state = None
+            self.previous_action = None
+            self.current_state = None
+            self.action = None
+
+            # Since might due to unexpected reason, we are not able to keep playing the game
+            # EX: cover by other window, the game crush or close ...
+            self.max_steps = 200
+            self.step_count = 0 # can I use the step in agent??
+
+            self.game_over = False
+            self.reward = 0.0
+
+        def update_state(self, new_state, new_action):
+            self.previous_state = self.current_state
+            self.previous_action = self.action
+
+            self.current_state = new_state
+            self.action = new_action
+
+    def test_RL(self):
+        UI_waiting_time = 1
+        game_status = Game_test_case.Game_status()
+        # Do the first click
+        time.sleep(UI_waiting_time)
+        game_status.save_pic_path = Tool_Main.cut_pic_data("whole_screen", Tool_Main.glo_var.player_num, Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len, cover=True, comp=True)
+        Tool_Main.click_mid("點擊正中間的 grid")
+        time.sleep(UI_waiting_time)
+        
+        Tool_Main.glo_var.s_record_time()
+        while True:
+            time.sleep(3)
+            if Tool_Main.glo_var.fail_playing :
+                self.assertTrue(False, "time_out")
+                break
+
+            last_pic_pos = f"whole_screen_comp_{0+11}_{Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len}"
+            # since a small change in the whole screen shot is tiny, the threshold should be very strick
+            if Tool_Main.compare_sim(last_pic_pos,sys._getframe().f_code.co_name, precise = True) < 0.99999 : 
+                # case : something changed
+                # game status for valid click
+                game_status.step_count += 1
+                game_status.reward = 1.0
+                print("有效點擊！")
+
+                time.sleep(UI_waiting_time)
+
+                # 檢查輸了
+                if Tool_Main.compare_sim("lose", sys._getframe().f_code.co_name, precise=True) >= 0.9:
+                    game_status.reward = -10.0
+                    game_status.game_over = True
+                    print("💥 踩到地雷！")
+                
+                # 檢查贏了
+                elif Tool_Main.compare_sim("win", sys._getframe().f_code.co_name, precise=True) >= 0.9:
+                    game_status.reward = 50.0
+                    game_status.game_over = True
+                    print("🎉 獲勝！")
+
+                self.update_model(game_status)
+                self.decide_next_step_and_play(game_status)
+
+            if Tool_Main.cal_time_out(10,sys._getframe().f_code.co_name):
+                # check still in game ??
+                
+                # case : nothing change after a period
+                game_status.step_count += 1
+                game_status.reward = -0.5
+                print("無效點擊（畫面無變化）")
+                self.update_model(game_status)
+                self.decide_next_step_and_play(game_status)
+                if game_status.step_count > game_status.max_steps:
                     Tool_Main.glo_var.fail_playing = True
-                    self.assertTrue(False,"time_out")
-                    break
-                # select another position to click ??
-                # RL neg score
-
-            if Tool_Main.compare_sim(f"whole_screen_comp_{0+11}_{Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len}",sys._getframe().f_code.co_name, precise = True) < 0.97 : 
-                # something changed
-                
-                # another screen shot
-                Tool_Main.cut_pic_data("whole_screen", Tool_Main.glo_var.player_num, Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len, cover=True, comp=True)
-                # reset timer??
-                
-                time.sleep(3) # let UI run
-                lost_or_win = False
-                # detect lose UI
-                if Tool_Main.compare_sim("lose",sys._getframe().f_code.co_name, precise = True) > 0.9 :
-                    # big neg score
-                    break
-
-                # detect win UI
-                if Tool_Main.compare_sim("win",sys._getframe().f_code.co_name, precise = True) > 0.9 : 
-                    # big pos score
-                    break
-
-                # pos score
-                # select another position to click ??
-                    
-                
+            
+            # save model periodically
+            if game_status.agent.steps % 500 == 0:
+                game_status.agent.save_model()
+                print(f"Stats: {game_status.agent.get_stats()}")
+            
+            # game_over
+            if game_status.game_over:
+                game_status.agent.save_model()
+                print(f"Episode 結束: {game_status.agent.get_stats()}")
+                break
 
     # 等待遊戲結束
     def test_wait_result(self):

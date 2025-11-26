@@ -343,22 +343,33 @@ def read_pos(read_dst_f) : #將要讀寫的座標進行寫並處理資料，將�
     
     return position #回傳資料置回傳資料至read_pos，使用完成後該參數即消失
 
+def inside_region(pos, region):
+    x,y = pos
+    st_x,st_1,len_n,len_y = region
+    if (st_x <= x <= (st_x+len_n)) and (st_1 <= y <= (st_1+len_y)) :
+        return True
+    return False
+
 # 點擊位置 pos EX: (X,Y)
 # stri 是點擊時想輸出的字串
 # dosleep 點擊完後 要等幾秒 才進續進行
 # long_click 帶入數字 代表要點擊XX秒才放開
 # move_click 帶入數字 滑鼠會先移動到上面 等待XX秒 後才進行點擊
-def click(pos, stri = None, dosleep = 0.3, long_click = None, move_click = None) : 
+def click(pos, stri = "", dosleep = 0.3, long_click = None, move_click = None, limit_region = None) : 
     #呼叫全域變數
     global glo_var 
-    global use_sel 
+    global use_sel
     
     x = pos[0] # 定義pos內x的位置
     y = pos[1] # 定義pos內y的位置
     
     if use_sel == 0 : #使用pyautogui
+        if limit_region != None :
+            if not inside_region((x,y), limit_region) :
+                return False
+        
         if stri != None :
-            print_to_output(stri+" click_pos : ("+str(x)+","+str(y)+")")
+            print_to_output(stri + " click_pos : ("+str(x)+","+str(y)+")")
         else :
             print_to_output("click_pos : ("+str(x)+","+str(y)+")")
         
@@ -398,6 +409,8 @@ def click(pos, stri = None, dosleep = 0.3, long_click = None, move_click = None)
 
     if dosleep > 0:
         time.sleep(dosleep)
+
+    return True
 
 # 點擊最後一張 compare_sim 找到的圖片的位置的正中間
 # stri : 是點擊時想輸出的字串
@@ -742,6 +755,7 @@ def cut_pic_data(location, num, round_count, cover = True, cut_new = False, pic_
     end_file_path = glo_var.game_pic_path / location
     print("end_file_dst : " + str(end_file_path) + ".txt")
 
+    png_path = []
     with open(str(end_file_path) + ".txt", "r") as read_dst_f :
         for x in range(num):
             position = read_pos(read_dst_f)
@@ -753,13 +767,16 @@ def cut_pic_data(location, num, round_count, cover = True, cut_new = False, pic_
                 
             if comp :
                 comp_pic_pos = user_pic_location.with_name(user_pic_location.stem + f"_comp_{x+11}_{round_count}")
-                pyautogui.screenshot(str(comp_pic_pos.with_suffix(".png")), region=position) #透過已定義的座標位置進行截圖
+                png_path.append(str(comp_pic_pos.with_suffix(".png")))
+                pyautogui.screenshot(png_path[-1], region=position) #透過已定義的座標位置進行截圖
                 with open(str(comp_pic_pos.with_suffix(".txt")), "w") as fw :
                     fw.write(str(position)[1:-1]) 
             if pic_count == None :
-                pyautogui.screenshot(str(user_pic_location / f"{x+11}_{round_count}.png"), region=position) #透過已定義的座標位置進行截圖
+                png_path.append(str(user_pic_location / f"{x+11}_{round_count}.png"))
+                pyautogui.screenshot(png_path[-1], region=position) #透過已定義的座標位置進行截圖
             else :
-                pyautogui.screenshot(str(user_pic_location / f"{x+11}_{round_count}_{pic_count}.png"), region=position) #透過已定義的座標位置進行截圖
+                png_path.append(str(user_pic_location / f"{x+11}_{round_count}_{pic_count}.png"))
+                pyautogui.screenshot(png_path[-1], region=position) #透過已定義的座標位置進行截圖
             # 用來切特定位置 不一樣的圖
             # 有 _r 跟 _b 目前好像只能用在牌上?? 所以先注解掉
             # if cut_new == True :
@@ -783,7 +800,7 @@ def cut_pic_data(location, num, round_count, cover = True, cut_new = False, pic_
                     pyautogui.screenshot(str(training_location / f"{x}_{theTime}.png"), region=position) #截圖(檔名多了時間)
                 else :
                     pyautogui.screenshot(str(training_location / f"{pic_count}_{x}_{theTime}.png"), region=position) #透過已定義的座標位置進行截圖
-
+    return png_path
 # 把 cut_pic_data 截好的圖片 辨識後 放入 glo_var.client_data 中
 # 這個 funciton 只能用<每個玩家>都<只有一個>的<數字>資料
 # label : 要使用哪個訓練好的辨識神經 (會抓取 inference_graph_for_XXX 和 training_for_XXX 的設定)
