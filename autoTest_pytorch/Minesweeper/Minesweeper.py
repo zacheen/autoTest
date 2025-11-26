@@ -31,8 +31,8 @@ class Minesweeper:
 
     def check_stop(self):
         if self.stop_event and self.stop_event.is_set():
-            self.root.quit()
-            self.root.destroy()
+            self.root.withdraw()
+            self.root.quit()  # 只 quit，讓 mainloop 結束
         else:
             self.root.after(100, self.check_stop)
         

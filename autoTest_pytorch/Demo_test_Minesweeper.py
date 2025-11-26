@@ -271,7 +271,11 @@ class Game_test_case(unittest.TestCase) :
                     self.decide_next_step_and_play(game_status)
 
             elif Tool_Main.cal_time_out(7,sys._getframe().f_code.co_name):
-                # check still in game ??
+                # check still in game
+                if Tool_Main.compare_sim("buttons",sys._getframe().f_code.co_name, precise = True) < 0.99 :
+                    # not sure what happens, so don't give reward to model
+                    game_status.game_over = True
+                    Tool_Main.glo_var.fail_playing = True
                 
                 # case : nothing change after a period
                 game_status.step_count += 1
@@ -385,29 +389,8 @@ if __name__=="__main__" :
         # 開始執行測是用例
         runner.run(open_game)
         fp.close()
-
-        # 這一整塊是如果有發生錯誤 要做什麼事
-        # 重整時間(一局結束的時間) 
-        sleep_time = 20
-        if Tool_Main.glo_var.fail_playing : 
-            # 報錯到 txt
-            Tool_Main.report_error("開場")
-            # 睡眠(為了等待遊戲結束)
-            
-            Tool_Main.print_to_output("fail_playing 等待 "+str(sleep_time)+" 秒")
-            time.sleep(sleep_time)
-            # 網頁刷新
-            Tool_Main.print_to_output("重新啟動")
-            game_only_var.mine.thread_stop()
-            game_only_var.mine.thread_start()
-            # 參數reset
-            Tool_Main.glo_var.reset_var(round_count)
-            # game_only_var.fail_reset()
-            continue
-        # 驗證開到遊戲前有沒有出錯
         
-        
-        while True:
+        while Tool_Main.glo_var.fail_playing == False:
             # 此區塊是遊戲內的 testcase
             
             # 要先加一 (但有錯的是上一回合 因此兩行下面 report_error 的 round_count 要減一)
@@ -431,26 +414,15 @@ if __name__=="__main__" :
             # 開始執行測是用例
             runner.run(during_gameing)
             fp.close()
-
-            
-            if Tool_Main.glo_var.fail_playing :
-                Tool_Main.report_error(round_count)
-                Tool_Main.print_to_output("fail_playing 等待 "+str(sleep_time)+" 秒")
-                time.sleep(sleep_time)
-                Tool_Main.print_to_output("重新啟動")
-                Tool_Main.glo_var.game_driver.refresh() # 按下網頁刷新鍵
-                Tool_Main.glo_var.reset_var(round_count+1)
-                # game_only_var.fail_reset()
-                break
-
         
+        sleep_time = 20
         if Tool_Main.glo_var.fail_playing :
             Tool_Main.report_error(round_count)
-            sleep_time = 50
+            game_only_var.mine.thread_stop()
             Tool_Main.print_to_output("fail_playing 等待 "+str(sleep_time)+" 秒")
             time.sleep(sleep_time)
             Tool_Main.print_to_output("重新啟動")
-            Tool_Main.glo_var.game_driver.refresh() # 按下網頁刷新鍵
+            game_only_var.mine.thread_start()
             Tool_Main.glo_var.reset_var(round_count+1)
-            break
+            continue
             
