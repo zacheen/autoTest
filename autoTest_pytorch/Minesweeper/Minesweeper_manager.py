@@ -1,5 +1,10 @@
 import tkinter as tk
 from Minesweeper import Minesweeper
+import inspect
+
+# Fix for import ambiguity when running from parent directory
+if inspect.ismodule(Minesweeper):
+    Minesweeper = Minesweeper.Minesweeper
 from multiprocessing import Process, Event
 import time
 
@@ -41,5 +46,5 @@ class Minesweeper_manager:
 if __name__ == "__main__":
     mine = Minesweeper_manager()
     mine.thread_start()
-    time.sleep(10)
+    time.sleep(100)
     mine.thread_stop()
