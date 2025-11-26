@@ -280,14 +280,8 @@ class Game_test_case(unittest.TestCase) :
                 if game_status.step_count > game_status.max_steps:
                     Tool_Main.glo_var.fail_playing = True
             
-            # save model periodically
-            if game_status.agent.steps % 500 == 0:
-                game_status.agent.save_model()
-                print(f"Stats: {game_status.agent.get_stats()}")
-            
             # game_over
             if game_status.game_over:
-                game_status.agent.save_model()
                 print(f"Episode 結束: {game_status.agent.get_stats()}")
                 break
 

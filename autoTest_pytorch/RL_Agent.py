@@ -43,6 +43,7 @@ class Config:
     
     # 儲存
     MODEL_PATH = Path("./rl_models")
+    SAVE_INTERVAL = 5
 
 CONFIG = Config()
 
@@ -312,6 +313,10 @@ class TD3Agent:
             self._soft_update(self.critic, self.critic_target)
             
             actor_loss = actor_loss.item()
+
+        if self.steps % CONFIG.SAVE_INTERVAL == CONFIG.SAVE_INTERVAL-1:
+            self.save_model()
+            print(f"[Auto Save] Steps: {self.steps}, Stats: {self.get_stats()}")
         
         return {
             'critic_loss': critic_loss.item(),
