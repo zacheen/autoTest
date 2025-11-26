@@ -173,7 +173,8 @@ class Game_test_case(unittest.TestCase) :
 
             # if click position is out of game_region 
             # really negitive reward and keep looping
-            game_status.reward = -100.0
+            print("Model decided to click in invalid position")
+            game_status.reward = -10.0
             self.update_model(game_status)
 
     def update_model(self, game_status):
@@ -199,8 +200,9 @@ class Game_test_case(unittest.TestCase) :
     class Game_status():
         def __init__(self):
             # regions (left, top, width, height)
-            screen_region = (0,0,1920,1080) # the size of the screen
-            self.game_region = (1, 31, 1919, 987)   # the size of the game that is clickable
+            screen_region = (0, 0, 1920, 1080) # the size of the screen
+            # region limitation [(st_x,st_1,len_n,len_y), have to be inside or outside]
+            self.game_region = [((1, 31, 1919, 987), True), ((713, 32, 498, 45), False)]
             
             # 取得 Agent
             self.agent = get_agent(screen_region)
@@ -237,7 +239,7 @@ class Game_test_case(unittest.TestCase) :
         
         Tool_Main.glo_var.s_record_time()
         while True:
-            time.sleep(3)
+            time.sleep(1)
             if Tool_Main.glo_var.fail_playing :
                 self.assertTrue(False, "time_out")
                 break
@@ -266,9 +268,10 @@ class Game_test_case(unittest.TestCase) :
                     print("🎉 獲勝！")
 
                 self.update_model(game_status)
-                self.decide_next_step_and_play(game_status)
+                if not game_status.game_over :
+                    self.decide_next_step_and_play(game_status)
 
-            if Tool_Main.cal_time_out(10,sys._getframe().f_code.co_name):
+            elif Tool_Main.cal_time_out(7,sys._getframe().f_code.co_name):
                 # check still in game ??
                 
                 # case : nothing change after a period

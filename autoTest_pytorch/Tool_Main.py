@@ -343,12 +343,13 @@ def read_pos(read_dst_f) : #將要讀寫的座標進行寫並處理資料，將�
     
     return position #回傳資料置回傳資料至read_pos，使用完成後該參數即消失
 
-def inside_region(pos, region):
+def check_valid_region(pos, region):
     x,y = pos
-    st_x,st_1,len_n,len_y = region
-    if (st_x <= x <= (st_x+len_n)) and (st_1 <= y <= (st_1+len_y)) :
-        return True
-    return False
+    for (st_x,st_1,len_n,len_y), in_flag in region :
+        if ((st_x <= x <= (st_x+len_n)) and (st_1 <= y <= (st_1+len_y))) != in_flag :
+            return False
+    return True
+    
 
 # 點擊位置 pos EX: (X,Y)
 # stri 是點擊時想輸出的字串
@@ -365,7 +366,7 @@ def click(pos, stri = "", dosleep = 0.3, long_click = None, move_click = None, l
     
     if use_sel == 0 : #使用pyautogui
         if limit_region != None :
-            if not inside_region((x,y), limit_region) :
+            if not check_valid_region((x,y), limit_region) :
                 return False
         
         if stri != None :
