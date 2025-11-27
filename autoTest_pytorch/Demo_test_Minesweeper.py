@@ -143,6 +143,7 @@ class Game_test_case(unittest.TestCase) :
                 break
 
     def decide_next_step_and_play(self, game_status):
+        Tool_Main.glo_var.s_record_time()
         # looping until find a position that is in the game_region
         while True :
             # 1. 截取當前畫面
@@ -172,7 +173,7 @@ class Game_test_case(unittest.TestCase) :
             # if click position is out of game_region 
             # really negitive reward and keep looping
             print("Model decided to click in invalid position")
-            game_status.reward = -10.0
+            game_status.reward = -5.0
             self.update_model(game_status)
 
     def update_model(self, game_status):
@@ -227,13 +228,13 @@ class Game_test_case(unittest.TestCase) :
             self.action = new_action
 
     def test_RL(self):
+        Tool_Main.glo_var.s_record_time()
         UI_waiting_time = 1
         game_status = Game_test_case.Game_status()
         time.sleep(UI_waiting_time)
         self.decide_next_step_and_play(game_status)
         time.sleep(UI_waiting_time)
         
-        Tool_Main.glo_var.s_record_time()
         while True:
             time.sleep(1)
             if Tool_Main.glo_var.fail_playing :
@@ -248,12 +249,11 @@ class Game_test_case(unittest.TestCase) :
                 game_status.step_count += 1
                 game_status.reward = 5.0
                 print("有效點擊！")
-
                 time.sleep(UI_waiting_time)
 
                 # 檢查輸了
                 if Tool_Main.compare_sim("lose", sys._getframe().f_code.co_name, precise=True) >= 0.9:
-                    game_status.reward = -10.0
+                    game_status.reward = -5.0
                     game_status.game_over = True
                     print("💥 踩到地雷！")
                 
@@ -280,6 +280,7 @@ class Game_test_case(unittest.TestCase) :
                 print("無效點擊（畫面無變化）")
                 self.update_model(game_status)
                 self.decide_next_step_and_play(game_status)
+                
                 if game_status.step_count > game_status.max_steps:
                     Tool_Main.glo_var.fail_playing = True
             
