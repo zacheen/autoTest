@@ -247,7 +247,7 @@ class Game_test_case(unittest.TestCase) :
                 # case : something changed
                 # game status for valid click
                 game_status.step_count += 1
-                game_status.reward = 5.0
+                game_status.reward = 20.0
                 print("有效點擊！")
                 time.sleep(UI_waiting_time)
 
@@ -267,7 +267,7 @@ class Game_test_case(unittest.TestCase) :
                 if not game_status.game_over :
                     self.decide_next_step_and_play(game_status)
 
-            elif Tool_Main.cal_time_out(7,sys._getframe().f_code.co_name):
+            elif Tool_Main.cal_time_out(5,sys._getframe().f_code.co_name):
                 # check still in game
                 if Tool_Main.compare_sim("buttons",sys._getframe().f_code.co_name, precise = True) < 0.99 :
                     # not sure what happens, so don't give reward to model
