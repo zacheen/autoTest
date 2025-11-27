@@ -12,7 +12,6 @@ from collections import deque, namedtuple
 from pathlib import Path
 from PIL import Image
 import random
-import pyautogui
 import torchvision.models as models
 
 # ==================== Config ====================
@@ -26,8 +25,8 @@ class Config:
     SCREEN_WIDTH = 1920
     SCREEN_HEIGHT = 1080
 
-    # Model input size – ResNet18 expects 224×224
-    INPUT_SIZE = 224
+    # Model input size – we keep the original resolution (no forced resize)
+    INPUT_SIZE = None  # kept for backward compatibility
 
     # Training parameters
     BATCH_SIZE = 64
@@ -56,7 +55,10 @@ class ReplayBuffer:
         self.buffer = deque(maxlen=capacity)
 
     def push(self, state, action, next_state, reward, done):
-        self.buffer.append(Transition(state, action, next_state, reward, done))
+        # Store tensors on CPU to avoid GPU OOM
+        state_cpu = state.detach().cpu()
+        next_state_cpu = next_state.detach().cpu() if next_state is not None else None
+        self.buffer.append(Transition(state_cpu, action, next_state_cpu, reward, done))
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
@@ -67,20 +69,20 @@ class ReplayBuffer:
 
 # ==================== Feature Encoder (ResNet18) ====================
 class ResNetEncoder(nn.Module):
-    """Pre‑trained ResNet18 backbone used as a feature extractor.
-    The final fully‑connected layer is replaced with an identity so that we obtain a
-    flat feature vector. The output size is computed dynamically.
+    """Pre‑trained ResNet‑18 backbone used as a feature extractor.
+    The final fully‑connected layer is replaced with an identity, leaving a
+    512‑dimensional feature vector regardless of input resolution (thanks to the
+    adaptive average‑pool inside ResNet).
     """
     def __init__(self):
         super().__init__()
         self.resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
         self.resnet.fc = nn.Identity()
-        with torch.no_grad():
-            dummy = torch.zeros(1, 3, CONFIG.INPUT_SIZE, CONFIG.INPUT_SIZE)
-            self.output_size = self.resnet(dummy).view(1, -1).size(1)
+        self.output_size = 512
 
     def forward(self, x):
-        return self.resnet(x).view(x.size(0), -1)
+        # x shape: (B, 3, H, W) – any H,W >= 224 works fine
+        return self.resnet(x)  # shape (B, 512)
 
 # ==================== Actor ====================
 class Actor(nn.Module):
@@ -103,7 +105,7 @@ class Actor(nn.Module):
 
 # ==================== Critic ====================
 class Critic(nn.Module):
-    """Estimates Q‑values for a (state, action) pair using twin critics (TD3)."""
+    """Twin critics for TD3 – estimate Q‑values for (state, action)."""
     def __init__(self):
         super().__init__()
         self.encoder = ResNetEncoder()
@@ -170,6 +172,7 @@ class TD3Agent:
 
         self._try_load_model()
 
+    # -------------------- Model Persistence --------------------
     def _try_load_model(self):
         """Load a saved checkpoint if it exists."""
         model_file = CONFIG.MODEL_PATH / "td3_minesweeper.pth"
@@ -184,16 +187,18 @@ class TD3Agent:
 
     # -------------------- Pre‑processing --------------------
     def preprocess_screen(self, screenshot_path: str) -> torch.Tensor:
-        """Convert a screenshot file to a tensor suitable for the network."""
+        """Convert a screenshot file to a tensor suitable for the network.
+        No resizing – the raw resolution (e.g., 1920×1080) is kept.
+        """
         img = Image.open(screenshot_path).convert('RGB')
-        img = img.resize((CONFIG.INPUT_SIZE, CONFIG.INPUT_SIZE))
         arr = np.array(img).transpose((2, 0, 1)) / 255.0
         return torch.tensor(arr, dtype=torch.float32).unsqueeze(0)
 
     def preprocess_from_array(self, screen_array: np.ndarray) -> torch.Tensor:
-        """Convert a NumPy array (H×W×C) to a network tensor."""
+        """Convert a NumPy array (H×W×C) to a network tensor.
+        The array is assumed to already be in the correct resolution.
+        """
         img = Image.fromarray(screen_array).convert('RGB')
-        img = img.resize((CONFIG.INPUT_SIZE, CONFIG.INPUT_SIZE))
         arr = np.array(img).transpose((2, 0, 1)) / 255.0
         return torch.tensor(arr, dtype=torch.float32).unsqueeze(0)
 
@@ -216,7 +221,9 @@ class TD3Agent:
 
     # -------------------- Experience Storage --------------------
     def store_transition(self, state, action, next_state, reward, done):
-        """Save a transition into the replay buffer and update episode reward."""
+        """Save a transition into the replay buffer and update episode reward.
+        Tensors are stored on CPU to keep GPU memory free.
+        """
         self.memory.push(state, action, next_state, reward, done)
         self.current_episode_reward += reward
         if done:
@@ -232,7 +239,7 @@ class TD3Agent:
         self.steps += 1
         batch = self.memory.sample(CONFIG.BATCH_SIZE)
 
-        # Batch tensors
+        # Batch tensors – move to GPU for training
         state = torch.cat(batch.state).to(DEVICE)
         action = torch.tensor(np.array(batch.action), dtype=torch.float32).to(DEVICE)
         reward = torch.tensor(batch.reward, dtype=torch.float32).to(DEVICE).unsqueeze(1)
@@ -276,6 +283,8 @@ class TD3Agent:
             self.save_model()
             print(f"[Auto Save] Steps: {self.steps}, Stats: {self.get_stats()}")
 
+        # Free intermediate GPU memory
+        torch.cuda.empty_cache()
         return {'critic_loss': critic_loss.item(), 'actor_loss': actor_loss}
 
     # -------------------- Utilities --------------------
