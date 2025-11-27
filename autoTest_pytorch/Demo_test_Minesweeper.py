@@ -146,10 +146,10 @@ class Game_test_case(unittest.TestCase) :
         # looping until find a position that is in the game_region
         while True :
             # 1. 截取當前畫面
-            Tool_Main.cut_pic_data(
+            game_status.save_pic_path = Tool_Main.cut_pic_data(
                 "whole_screen", 
                 Tool_Main.glo_var.player_num, 
-                Tool_Main.glo_var.round_count % Tool_Main.glo_var.list_len, 
+                0, 
                 cover=True, 
                 comp=True
             )
@@ -229,10 +229,8 @@ class Game_test_case(unittest.TestCase) :
     def test_RL(self):
         UI_waiting_time = 1
         game_status = Game_test_case.Game_status()
-        # Do the first click
         time.sleep(UI_waiting_time)
-        game_status.save_pic_path = Tool_Main.cut_pic_data("whole_screen", Tool_Main.glo_var.player_num, Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len, cover=True, comp=True)
-        Tool_Main.click_mid("點擊正中間的 grid")
+        self.decide_next_step_and_play(game_status)
         time.sleep(UI_waiting_time)
         
         Tool_Main.glo_var.s_record_time()
@@ -242,7 +240,7 @@ class Game_test_case(unittest.TestCase) :
                 self.assertTrue(False, "time_out")
                 break
 
-            last_pic_pos = f"whole_screen_comp_{0+11}_{Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len}"
+            last_pic_pos = f"whole_screen_comp_{0+11}_{0}"
             # since a small change in the whole screen shot is tiny, the threshold should be very strick
             if Tool_Main.compare_sim(last_pic_pos,sys._getframe().f_code.co_name, precise = True) < 0.99999 : 
                 # case : something changed
