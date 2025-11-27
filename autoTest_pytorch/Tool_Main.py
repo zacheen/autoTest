@@ -540,7 +540,14 @@ def read_template(pic_file) :
 
 def locateCenterOnScreen(template_pic, region = None, save_loc = None):
     # Take screenshot
-    screenshot = pyautogui.screenshot(imageFilename = save_loc, region=region)
+    if region is not None:
+        region = tuple(map(int, region))
+        
+    screenshot = pyautogui.screenshot(region=region)
+    
+    if save_loc != None:
+        screenshot.save(save_loc)
+        
     screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
 
     # Load and Match template
@@ -552,6 +559,10 @@ def locateCenterOnScreen(template_pic, region = None, save_loc = None):
     h, w = template_pic.shape[:2]
     center_x = max_loc[0] + w // 2
     center_y = max_loc[1] + h // 2
+    if region is not None:
+        center_x += region[0]
+        center_y += region[1]
+    print("return mid", (center_x, center_y))
     return max_val, (center_x, center_y)
 
 # 這個是Main在用的
