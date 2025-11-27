@@ -330,7 +330,6 @@ def report_error(round_num, why = None) :
 # read_dst_f : 是讀寫頭 並不是檔名 所以做完讀寫頭的位置是會改變的
 def read_pos(read_dst_f) : #將要讀寫的座標進行寫並處理資料，將頭尾的字符去掉，且把逗號分離
     read_in = read_dst_f.readline()
-    print("read_in :", read_in)
     read_in = read_in.strip()
     read_in = read_in.split(", ")
 
@@ -562,7 +561,6 @@ def locateCenterOnScreen(template_pic, region = None, save_loc = None):
     if region is not None:
         center_x += region[0]
         center_y += region[1]
-    print("return mid", (center_x, center_y))
     return max_val, (center_x, center_y)
 
 # 這個是Main在用的
@@ -585,13 +583,11 @@ def locateCenterOnScreen(template_pic, region = None, save_loc = None):
 def compare_sim(file_place, className, confidence = 0.9, precise = False, before = False, lobby = False) : 
     global glo_var
 
-    # should be move to cut picture
-    if file_place == "" : #用於遊戲流程進行中，若有想要把過程中發生的狀態進行截圖，可透過此func進行(compare_sim("", className))，此方法目的僅為在該狀態中沒有要進行結圖比對或辨識，僅儲存圖片
-        screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
-        pyautogui.screenshot(str(screenshot_path))
-        #'./testreport/testpic/→當前目錄與指定資料夾
-        #+className+ "_"+ glo_var.file_create_time+'.png'→定義截圖檔名
-        return None #結束點
+    report_screenshot_path = str(testpic_path / f'{className}_{glo_var.file_create_time}.png')
+    # if file_place == "", which means we just want to do screenshot for the report
+    if file_place == "" : 
+        pyautogui.screenshot(report_screenshot_path)
+        return None
 
     # 使用 pathlib 處理路徑
     if not lobby :
@@ -605,27 +601,24 @@ def compare_sim(file_place, className, confidence = 0.9, precise = False, before
         exact_pos_file = lobby_path / f"{file_place}.txt"
         pic_file = lobby_path / f"{file_place}.png"
         region_file = lobby_path / f"{file_place}_region.txt"
-        
-
+    
     # 開啟以前圖片
     template_img = read_template(pic_file)
-    # the picture path for the report
-    save_loc = testpic_path / f'{glo_var.file_create_time}_{file_place}_detail.png' #實際測試過程在指定區域的截圖照片(被比對的圖要儲存的位置)
-
+    # still keep it for easier to compare the template image and the screenshot
+    debug_screen_pic = None # if want to save energy, set it to None
+    debug_screen_pic = str(testpic_path / f'{glo_var.file_create_time}_{file_place}_detail.png')
     if before == True: #在下一個狀態要進行動作之前先進行截圖(else:在做完動作後再進行截圖)→兩者差異為可能因為時間差間接影響實際截圖出來的結果，可透過實際執行進行驗證
-        screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
-        pyautogui.screenshot(str(screenshot_path))
+        pyautogui.screenshot(report_screenshot_path)
 
     sim = 0
     region_sim = 0
     with open(exact_pos_file, "r") as read_dst_f : 
         exact_region = read_pos(read_dst_f)
-        sim, glo_var.mid_pos = locateCenterOnScreen(template_img, region = exact_region, save_loc = str(save_loc))
+        sim, glo_var.mid_pos = locateCenterOnScreen(template_img, region = exact_region, save_loc = debug_screen_pic)
         print("比較"+file_place+" , sim : "+str(sim))
 
         if before == False: #else:在做完動作後再進行截圖
-            screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
-            pyautogui.screenshot(str(screenshot_path))
+            pyautogui.screenshot(report_screenshot_path)
 
         if sim > confidence :
             return sim
@@ -639,14 +632,14 @@ def compare_sim(file_place, className, confidence = 0.9, precise = False, before
 
         region_sim, glo_var.mid_pos = locateCenterOnScreen(template_img, region = find_region)
         if before == False : #若第二次判斷沒有return，則會進行此截圖，複寫第二次的結果
-            screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
-            pyautogui.screenshot(str(screenshot_path))
+            pyautogui.screenshot(report_screenshot_path)
 
         if region_sim > confidence :
             print("< " + file_place + " > cannot find at particular position, but find in screen") #意味著如果透過上一動的方式可以找到座標，那就是畫面中有能找到這個座標位置
             return 0.9 #因此回傳0.9，但表示圖片有位移，透過0.9表示
 
     if region_sim < sim :
+        print("sim :", sim, "region_sim :", region_sim)
         print("sometimes sim is better than region_sim")
     return max(sim, region_sim)
 
@@ -751,7 +744,7 @@ def cut_pic_data(location, num, round_count, cover = True, cut_new = False, pic_
     global glo_var
     # print("BBBB glo_var.file_absolute_pos : ",glo_var.file_absolute_pos)
     end_file_path = glo_var.game_pic_path / location
-    print("end_file_dst : " + str(end_file_path) + ".txt")
+    # print("end_file_path : " + str(end_file_path) + ".txt")
 
     png_path = []
     with open(str(end_file_path) + ".txt", "r") as read_dst_f :

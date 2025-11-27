@@ -156,7 +156,6 @@ class Game_test_case(unittest.TestCase) :
         
             # 2. 載入截圖並預處理
             screenshot_path = game_status.save_pic_path[-1]
-            print("screenshot_path", screenshot_path)
             current_state = game_status.agent.preprocess_screen(screenshot_path)
         
             # 3. 選擇動作 (輸出 [0,1] 範圍的 x, y)
@@ -249,7 +248,7 @@ class Game_test_case(unittest.TestCase) :
                 # case : something changed
                 # game status for valid click
                 game_status.step_count += 1
-                game_status.reward = 1.0
+                game_status.reward = 5.0
                 print("有效點擊！")
 
                 time.sleep(UI_waiting_time)
