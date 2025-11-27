@@ -214,7 +214,7 @@ class Game_test_case(unittest.TestCase) :
 
             # Since might due to unexpected reason, we are not able to keep playing the game
             # EX: cover by other window, the game crush or close ...
-            self.max_steps = 200
+            self.max_steps = 30
             self.step_count = 0 # can I use the step in agent??
 
             self.game_over = False
