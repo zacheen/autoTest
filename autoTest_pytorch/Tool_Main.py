@@ -532,6 +532,28 @@ def cancel_first_time() : #
 #     cap_var.saveDC.BitBlt((0, 0), (w, h), cap_var.mfcDC, (region[0], region[1]), win32con.SRCCOPY)
 #     cap_var.saveBitMap.SaveBitmapFile(cap_var.saveDC, filename)
 
+# To replace pyautogui.locateCenterOnScreen
+    # Since version of PyAutoGUI 0.9.54 doesn't compatible with OpenCV 4.11
+def read_template(pic_file) :
+    pic_file = str(pic_file)
+    return cv2.imread(pic_file)
+
+def locateCenterOnScreen(template_pic, region = None, save_loc = None):
+    # Take screenshot
+    screenshot = pyautogui.screenshot(imageFilename = save_loc, region=region)
+    screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+
+    # Load and Match template
+    # cv2.compareHist(img_cut, img, 0) # 其他種比較方法
+    result = cv2.matchTemplate(screenshot, template_pic, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+    
+    # Calculate center
+    h, w = template_pic.shape[:2]
+    center_x = max_loc[0] + w // 2
+    center_y = max_loc[1] + h // 2
+    return max_val, (center_x, center_y)
+
 # 這個是Main在用的
 # 1. 與之前儲存的圖片比較相似度 如果圖片相似度 > confidence(預設0.9) 則回傳圖片相似度
 # 2. 如果 < confidence 先找是否有移位 如果有找到會回傳 0.9
@@ -552,6 +574,7 @@ def cancel_first_time() : #
 def compare_sim(file_place, className, confidence = 0.9, precise = False, before = False, lobby = False) : 
     global glo_var
 
+    # should be move to cut picture
     if file_place == "" : #用於遊戲流程進行中，若有想要把過程中發生的狀態進行截圖，可透過此func進行(compare_sim("", className))，此方法目的僅為在該狀態中沒有要進行結圖比對或辨識，僅儲存圖片
         screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
         pyautogui.screenshot(str(screenshot_path))
@@ -559,99 +582,62 @@ def compare_sim(file_place, className, confidence = 0.9, precise = False, before
         #+className+ "_"+ glo_var.file_create_time+'.png'→定義截圖檔名
         return None #結束點
 
-    default_dest = True
-    #測試前需先進行的前置作業
-
-    if default_dest :
-        #有小工具
-        # 使用 pathlib 處理路徑
-        pos_file = glo_var.game_pic_path / f"{file_place}.txt" # FKNN_pic內的座標位置檔案，是自己先創建確認好的，為比對位置標準
+    # 使用 pathlib 處理路徑
+    if not lobby :
+        exact_pos_file = glo_var.game_pic_path / f"{file_place}.txt" # FKNN_pic內的座標位置檔案，是自己先創建確認好的，為比對位置標準
         pic_file = glo_var.game_pic_path / f"{file_place}.png" # FKNN_pic內的圖片檔案(EX:湊一倍，繼續遊戲)，是自己先創建確認好的，可以拿來判斷狀態，也可以拿來進行點擊
         region_file = glo_var.game_pic_path / f"{file_place}_region.txt"
-        # 當pos_file比對失敗時，可透過定義一個範圍，重新再找一次(若沒有此檔案，預設為找全部畫面，但避免找到類似的發生誤導，因此可限定區域)，此參數也是由使用者決定是否提供
-        # 如果是要找共同的圖片 就把位置改成lobby 圖都放在這底下
-        if lobby :
-            lobby_path = glo_var.game_pic_path.parent / "lobby_pic"
-            pos_file = lobby_path / f"{file_place}.txt"
-            pic_file = lobby_path / f"{file_place}.png"
-            region_file = lobby_path / f"{file_place}_region.txt"
+    # 當pos_file比對失敗時，可透過定義一個範圍，重新再找一次(若沒有此檔案，預設為找全部畫面，但避免找到類似的發生誤導，因此可限定區域)，此參數也是由使用者決定是否提供
+    # 如果是要找共同的圖片 就把位置改成lobby 圖都放在這底下
+    else :
+        lobby_path = glo_var.game_pic_path.parent / "lobby_pic"
+        exact_pos_file = lobby_path / f"{file_place}.txt"
+        pic_file = lobby_path / f"{file_place}.png"
+        region_file = lobby_path / f"{file_place}_region.txt"
         
 
     # 開啟以前圖片
-    img = cv2.imread(str(pic_file)) #讀取原始標準圖
-
+    template_img = read_template(pic_file)
+    # the picture path for the report
     save_loc = testpic_path / f'{glo_var.file_create_time}_{file_place}_detail.png' #實際測試過程在指定區域的截圖照片(被比對的圖要儲存的位置)
 
     if before == True: #在下一個狀態要進行動作之前先進行截圖(else:在做完動作後再進行截圖)→兩者差異為可能因為時間差間接影響實際截圖出來的結果，可透過實際執行進行驗證
         screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
         pyautogui.screenshot(str(screenshot_path))
 
-    with open(pos_file, "r") as read_dst_f : 
-        position = read_pos(read_dst_f) #根據提供的座標(pos_file)
-        # 不管怎樣都要換成現在比的東西的位置 (因為有些東西可能是判斷不一樣 反而要在這個位置做動作)
-        glo_var.mid_pos = [position[0]+(position[2]/2),position[1]+(position[3]/2)] # 計算圖片中心點
-
-        pyautogui.screenshot(str(save_loc), region=position) #讀取要截圖的座標位置(region)，並儲存在指定的資料夾路徑內(save_loc)
-        
-        img_cut = cv2.imread(str(save_loc)) #將上一動截圖的檔案讀取出來
-
-        # 比較相似度
-        # sim = cv2.compareHist(img_cut, img, 0)
-        sim = cv2.matchTemplate(img_cut, img, cv2.TM_CCOEFF_NORMED)[0][0] ##@ 運作邏輯與細節待確認 將正確的圖片img與指定截取的圖片img_cut進行比對
+    sim = 0
+    region_sim = 0
+    with open(exact_pos_file, "r") as read_dst_f : 
+        exact_region = read_pos(read_dst_f)
+        sim, glo_var.mid_pos = locateCenterOnScreen(template_img, region = exact_region, save_loc = str(save_loc))
         print("比較"+file_place+" , sim : "+str(sim))
 
         if before == False: #else:在做完動作後再進行截圖
             screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
             pyautogui.screenshot(str(screenshot_path))
 
-        # print(sim)
-        # try :
-        #     sim = sim[1][1]
-        # except :
-        #     try : 
-        #         sim = sim[0][0]
-        #     except :
-        #         pass
-        if confidence > 0.91 : #這邊為可手動設定confidence(信心度或嚴格度)，預設為需大於0.91，可根據測試需求指定更高層級(EX:0.97)
-            # print(file_place + " sim: " + str(sim))
-            if sim > confidence : #判斷sim比對結果是否大於手動設定的confidence
-                # write_mid_pos(mid_pos_file,glo_var.mid_pos)
-                return sim #如果是則回傳sim比較值
-
-        elif sim > 0.91 : #若執行到這一行，進入這個條件(confidence設定<0.91)，表示confidence在這邊無效用
-            # write_mid_pos(mid_pos_file,glo_var.mid_pos)
+        if sim > confidence :
             return sim
 
-    if precise == False: #當confidence設定大於0.91且當sim小於confidence時，或是sim小於預設的0.91，兩個條件其中一個成立時執行這段
-        #如果比對找不到 就從畫面找
-        # locateCenterOnScreen 原理是用 cv2.matchTemplate
-        region = None #將region創造出來
+    if confidence <= 0.91 and precise == False: 
+        # if didn't find it at particular position, find it in screen
+        find_region = None
         if region_file.exists() : # 確認region_file檔案是否存在(代表是否要用region)
             with open(region_file, "r") as region_dst_f : 
-                region = read_pos(region_dst_f)
+                find_region = read_pos(region_dst_f)
 
-        try:
-            if region == None :
-                pic_position = pyautogui.locateCenterOnScreen(str(pic_file), grayscale=False, confidence = 0.93) #透過全畫面尋找是否有pic_file這個檔案圖片
-            else :
-                pic_position = pyautogui.locateCenterOnScreen(str(pic_file), grayscale=False, confidence = 0.93, region = region) #透過定義過的region尋找是否有pic_file這個檔案圖片
+        region_sim, glo_var.mid_pos = locateCenterOnScreen(template_img, region = find_region)
+        if before == False : #若第二次判斷沒有return，則會進行此截圖，複寫第二次的結果
+            screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
+            pyautogui.screenshot(str(screenshot_path))
 
-            if before == False : #若第二次判斷沒有return，則會進行此截圖，複寫第二次的結果
-                screenshot_path = testpic_path / f'{className}_{glo_var.file_create_time}.png'
-                pyautogui.screenshot(str(screenshot_path))
+        if region_sim > confidence :
+            print("< " + file_place + " > cannot find at particular position, but find in screen") #意味著如果透過上一動的方式可以找到座標，那就是畫面中有能找到這個座標位置
+            return 0.9 #因此回傳0.9，但表示圖片有位移，透過0.9表示
 
-            if pic_position != None :
-                print("< " + file_place + " > cannot find at particular position, but find in screen") #意味著如果透過上一動的方式可以找到座標，那就是畫面中有能找到這個座標位置
-                # 這裡如果找到東西 也會更新位置 但是是找到東西的位置
-                glo_var.mid_pos = pic_position
-                # write_mid_pos(mid_pos_file,glo_var.mid_pos)
-                # 0.9 這是我自己定義的
-                return 0.9 #因此回傳0.9，但表示圖片有位移，透過0.9表示
-        except pyautogui.ImageNotFoundException :
-            # cannot find this picture even in the whole screen
-            pass
-
-    return 0 #如果手動設定的confidence與預設的0.91及最後的位移判斷()0.9)都失效了，就意味著找不到，回傳0
+    if region_sim < sim :
+        print("sometimes sim is better than region_sim")
+    return max(sim, region_sim)
 
 # 一次比較多個圖片與其對應到的位置 若某個圖片對應的位置 相似度高就會回傳
 # 但 它又扣到 是假設 pos 一定很多個
