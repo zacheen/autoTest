@@ -1,4 +1,0 @@
-spade
-heart
-club
-diamond
