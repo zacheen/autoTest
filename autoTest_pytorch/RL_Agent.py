@@ -13,6 +13,7 @@ from pathlib import Path
 from PIL import Image
 import random
 import torchvision.models as models
+import gc
 
 # ==================== Config ====================
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -29,7 +30,7 @@ class Config:
     INPUT_SIZE = None  # kept for backward compatibility
 
     # Training parameters
-    BATCH_SIZE = 64
+    BATCH_SIZE = 16
     GAMMA = 0.99
     TAU = 0.005  # soft‑update coefficient
     LR_ACTOR = 1e-4
@@ -169,6 +170,9 @@ class TD3Agent:
         self.steps = 0
         self.episode_rewards = []
         self.current_episode_reward = 0
+        
+        # Mixed Precision Scaler
+        self.scaler = torch.cuda.amp.GradScaler()
 
         self._try_load_model()
 
@@ -187,20 +191,22 @@ class TD3Agent:
 
     # -------------------- Pre‑processing --------------------
     def preprocess_screen(self, screenshot_path: str) -> torch.Tensor:
-        """Convert a screenshot file to a tensor suitable for the network.
-        No resizing – the raw resolution (e.g., 1920×1080) is kept.
-        """
         img = Image.open(screenshot_path).convert('RGB')
+        w, h = img.size  # PIL is (W, H)
+        new_size = (w // 3, h // 3)
+        img = img.resize(new_size, Image.BILINEAR)
         arr = np.array(img).transpose((2, 0, 1)) / 255.0
-        return torch.tensor(arr, dtype=torch.float32).unsqueeze(0)
+        tensor = torch.tensor(arr, dtype=torch.float32).unsqueeze(0)
+        return tensor
 
     def preprocess_from_array(self, screen_array: np.ndarray) -> torch.Tensor:
-        """Convert a NumPy array (H×W×C) to a network tensor.
-        The array is assumed to already be in the correct resolution.
-        """
         img = Image.fromarray(screen_array).convert('RGB')
+        w, h = img.size
+        new_size = (w // 3, h // 3)
+        img = img.resize(new_size, Image.BILINEAR)
         arr = np.array(img).transpose((2, 0, 1)) / 255.0
-        return torch.tensor(arr, dtype=torch.float32).unsqueeze(0)
+        tensor = torch.tensor(arr, dtype=torch.float32).unsqueeze(0)
+        return tensor
 
     # -------------------- Action Selection --------------------
     def select_action(self, state: torch.Tensor, add_noise: bool = True) -> np.ndarray:
@@ -231,15 +237,21 @@ class TD3Agent:
             self.current_episode_reward = 0
 
     # -------------------- Training Step --------------------
+    def log_gpu_memory(self, tag=""):
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**2
+            reserved = torch.cuda.memory_reserved() / 1024**2
+            # print(f"[GPU {tag}] Allocated: {allocated:.1f}MB, Reserved: {reserved:.1f}MB")
+    
     def train_step(self) -> dict:
-        """Perform a single TD3 training iteration and return loss info."""
+        self.log_gpu_memory("Start Train")
         if len(self.memory) < CONFIG.BATCH_SIZE:
             return None
 
         self.steps += 1
         batch = self.memory.sample(CONFIG.BATCH_SIZE)
 
-        # Batch tensors – move to GPU for training
+        # Batch tensors
         state = torch.cat(batch.state).to(DEVICE)
         action = torch.tensor(np.array(batch.action), dtype=torch.float32).to(DEVICE)
         reward = torch.tensor(batch.reward, dtype=torch.float32).to(DEVICE).unsqueeze(1)
@@ -249,43 +261,61 @@ class TD3Agent:
         non_final_next = torch.cat([s for s in batch.next_state if s is not None]).to(DEVICE)
 
         # ----- Critic update -----
-        with torch.no_grad():
-            next_action = self.actor_target(non_final_next)
-            noise = torch.clamp(
-                torch.randn_like(next_action) * CONFIG.NOISE_STD,
-                -CONFIG.NOISE_CLIP, CONFIG.NOISE_CLIP)
-            next_action = torch.clamp(next_action + noise, 0.0, 1.0)
-            target_q1, target_q2 = self.critic_target(non_final_next, next_action)
-            target_q = torch.min(target_q1, target_q2)
-            target = torch.zeros(CONFIG.BATCH_SIZE, 1, device=DEVICE)
-            target[non_final_mask] = target_q
-            target = reward + (1 - done) * CONFIG.GAMMA * target
+        with torch.cuda.amp.autocast():
+            with torch.no_grad():
+                next_action = self.actor_target(non_final_next)
+                noise = torch.clamp(
+                    torch.randn_like(next_action) * CONFIG.NOISE_STD,
+                    -CONFIG.NOISE_CLIP, CONFIG.NOISE_CLIP)
+                next_action = torch.clamp(next_action + noise, 0.0, 1.0)
+                target_q1, target_q2 = self.critic_target(non_final_next, next_action)
+                target_q = torch.min(target_q1, target_q2)
+                target = torch.zeros(CONFIG.BATCH_SIZE, 1, device=DEVICE, dtype=target_q.dtype)
+                target[non_final_mask] = target_q
+                target = reward + (1 - done) * CONFIG.GAMMA * target
 
-        current_q1, current_q2 = self.critic(state, action)
-        critic_loss = F.mse_loss(current_q1, target) + F.mse_loss(current_q2, target)
+            current_q1, current_q2 = self.critic(state, action)
+            critic_loss = F.mse_loss(current_q1, target) + F.mse_loss(current_q2, target)
+        
         self.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        self.critic_optimizer.step()
+        self.scaler.scale(critic_loss).backward()
+        self.scaler.step(self.critic_optimizer)
+        self.scaler.update()
+        
+        critic_loss_val = critic_loss.item()
+        
+        del current_q1, current_q2, critic_loss, target
+        del target_q1, target_q2, target_q, next_action
 
         # ----- Actor update (delayed) -----
-        actor_loss = None
+        actor_loss_val = None
         if self.steps % CONFIG.POLICY_DELAY == 0:
-            actor_loss = -self.critic.q1_forward(state, self.actor(state)).mean()
+            with torch.cuda.amp.autocast():
+                actor_output = self.actor(state)
+                actor_loss = -self.critic.q1_forward(state, actor_output).mean()
+            
             self.actor_optimizer.zero_grad()
-            actor_loss.backward()
-            self.actor_optimizer.step()
+            self.scaler.scale(actor_loss).backward()
+            self.scaler.step(self.actor_optimizer)
+            self.scaler.update()
+            
+            actor_loss_val = actor_loss.item()
+            
+            del actor_output, actor_loss
+            
             self._soft_update(self.actor, self.actor_target)
             self._soft_update(self.critic, self.critic_target)
-            actor_loss = actor_loss.item()
 
-        # ----- Periodic checkpoint -----
+        del state, action, reward, done, non_final_mask, non_final_next
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # Periodic checkpoint
         if self.steps % CONFIG.SAVE_INTERVAL == CONFIG.SAVE_INTERVAL - 1:
             self.save_model()
-            print(f"[Auto Save] Steps: {self.steps}, Stats: {self.get_stats()}")
 
-        # Free intermediate GPU memory
-        torch.cuda.empty_cache()
-        return {'critic_loss': critic_loss.item(), 'actor_loss': actor_loss}
+        return {'critic_loss': critic_loss_val, 'actor_loss': actor_loss_val}
 
     # -------------------- Utilities --------------------
     def _soft_update(self, source, target):
@@ -307,6 +337,7 @@ class TD3Agent:
             'critic_optimizer': self.critic_optimizer.state_dict(),
             'steps': self.steps,
             'episode_rewards': self.episode_rewards,
+            'scaler': self.scaler.state_dict(), # Save scaler state
         }, CONFIG.MODEL_PATH / "td3_minesweeper.pth")
         print(f"Model saved, steps: {self.steps}")
 
