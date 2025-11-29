@@ -26,16 +26,13 @@ class Config:
     SCREEN_WIDTH = 1920
     SCREEN_HEIGHT = 1080
 
-    # Model input size – we keep the original resolution (no forced resize)
-    INPUT_SIZE = None  # kept for backward compatibility
-
     # Training parameters
     BATCH_SIZE = 16
+    MEMORY_SIZE = 300
     GAMMA = 0.99
     TAU = 0.005  # soft‑update coefficient
     LR_ACTOR = 1e-4
     LR_CRITIC = 3e-4
-    MEMORY_SIZE = 5000
 
     # Exploration noise
     NOISE_STD = 0.05
@@ -58,13 +55,10 @@ class ReplayBuffer:
     def push(self, state, action, next_state, reward, done):
         # Store tensors on CPU to avoid GPU OOM
         # Optimize: Store as uint8 to save RAM (0-1 float -> 0-255 uint8)
-        state_cpu = (state.detach().cpu() * 255).to(torch.uint8)
+        state = (state.detach().cpu()*255).to(torch.uint8)
         if next_state is not None:
-            next_state_cpu = (next_state.detach().cpu() * 255).to(torch.uint8)
-        else:
-            next_state_cpu = None
-            
-        self.buffer.append(Transition(state_cpu, action, next_state_cpu, reward, done))
+            next_state = (next_state.detach().cpu()*255).to(torch.uint8)
+        self.buffer.append(Transition(state, action, next_state, reward, done))
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
@@ -257,7 +251,7 @@ class TD3Agent:
         if torch.cuda.is_available():
             allocated = torch.cuda.memory_allocated() / 1024**2
             reserved = torch.cuda.memory_reserved() / 1024**2
-            # print(f"[GPU {tag}] Allocated: {allocated:.1f}MB, Reserved: {reserved:.1f}MB")
+            print(f"[GPU {tag}] Allocated: {allocated:.1f}MB, Reserved: {reserved:.1f}MB")
     
     def train_step(self) -> dict:
         self.log_gpu_memory("Start Train")
