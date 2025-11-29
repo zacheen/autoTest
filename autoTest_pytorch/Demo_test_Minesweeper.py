@@ -173,7 +173,7 @@ class Game_test_case(unittest.TestCase) :
             # if click position is out of game_region 
             # really negitive reward and keep looping
             print("Model decided to click in invalid position")
-            game_status.reward = -3.0
+            game_status.reward = -10.0
             self.update_model(game_status)
 
     def update_model(self, game_status):
@@ -214,7 +214,7 @@ class Game_test_case(unittest.TestCase) :
 
             # Since might due to unexpected reason, we are not able to keep playing the game
             # EX: cover by other window, the game crush or close ...
-            self.max_steps = 30
+            self.max_steps = 10
             self.step_count = 0 # can I use the step in agent??
 
             self.game_over = False
@@ -247,19 +247,19 @@ class Game_test_case(unittest.TestCase) :
                 # case : something changed
                 # game status for valid click
                 game_status.step_count += 1
-                game_status.reward = 20.0
+                game_status.reward = 4.0
                 print("有效點擊！")
                 time.sleep(UI_waiting_time)
 
                 # 檢查輸了
                 if Tool_Main.compare_sim("lose", sys._getframe().f_code.co_name, precise=True) >= 0.9:
-                    game_status.reward = -5.0
+                    game_status.reward = -1.0
                     game_status.game_over = True
                     print("💥 踩到地雷！")
                 
                 # 檢查贏了
                 elif Tool_Main.compare_sim("win", sys._getframe().f_code.co_name, precise=True) >= 0.9:
-                    game_status.reward = 50.0
+                    game_status.reward = 10.0
                     game_status.game_over = True
                     print("🎉 獲勝！")
 
@@ -276,7 +276,7 @@ class Game_test_case(unittest.TestCase) :
                 
                 # case : nothing change after a period
                 game_status.step_count += 1
-                game_status.reward = -1.0
+                game_status.reward = -5.0
                 print("無效點擊（畫面無變化）")
                 self.update_model(game_status)
                 self.decide_next_step_and_play(game_status)
