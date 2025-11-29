@@ -35,7 +35,7 @@ class Config:
     TAU = 0.005  # soft‑update coefficient
     LR_ACTOR = 1e-4
     LR_CRITIC = 3e-4
-    MEMORY_SIZE = 50000
+    MEMORY_SIZE = 5000
 
     # Exploration noise
     NOISE_STD = 0.05
@@ -57,8 +57,13 @@ class ReplayBuffer:
 
     def push(self, state, action, next_state, reward, done):
         # Store tensors on CPU to avoid GPU OOM
-        state_cpu = state.detach().cpu()
-        next_state_cpu = next_state.detach().cpu() if next_state is not None else None
+        # Optimize: Store as uint8 to save RAM (0-1 float -> 0-255 uint8)
+        state_cpu = (state.detach().cpu() * 255).to(torch.uint8)
+        if next_state is not None:
+            next_state_cpu = (next_state.detach().cpu() * 255).to(torch.uint8)
+        else:
+            next_state_cpu = None
+            
         self.buffer.append(Transition(state_cpu, action, next_state_cpu, reward, done))
 
     def sample(self, batch_size):
@@ -211,8 +216,19 @@ class TD3Agent:
     # -------------------- Action Selection --------------------
     def select_action(self, state: torch.Tensor, add_noise: bool = True) -> np.ndarray:
         """Return an (x, y) action in [0, 1]."""
+        # Check for NaNs in input state
+        if torch.isnan(state).any():
+            print("WARNING: NaN detected in state tensor during select_action. Returning random action.")
+            return np.random.rand(2)
+
         with torch.no_grad():
             action = self.actor(state.to(DEVICE)).cpu().numpy().squeeze()
+        
+        # Check for NaNs in output action
+        if np.isnan(action).any():
+            print("WARNING: NaN detected in actor output. Returning random action.")
+            return np.random.rand(2)
+
         if add_noise:
             noise = np.random.normal(0, CONFIG.NOISE_STD, size=2)
             action = action + noise
@@ -252,13 +268,14 @@ class TD3Agent:
         batch = self.memory.sample(CONFIG.BATCH_SIZE)
 
         # Batch tensors
-        state = torch.cat(batch.state).to(DEVICE)
+        # Restore from uint8 (0-255) to float32 (0.0-1.0)
+        state = torch.cat(batch.state).to(DEVICE).float() / 255.0
         action = torch.tensor(np.array(batch.action), dtype=torch.float32).to(DEVICE)
         reward = torch.tensor(batch.reward, dtype=torch.float32).to(DEVICE).unsqueeze(1)
         done = torch.tensor(batch.done, dtype=torch.float32).to(DEVICE).unsqueeze(1)
 
         non_final_mask = torch.tensor([s is not None for s in batch.next_state], device=DEVICE)
-        non_final_next = torch.cat([s for s in batch.next_state if s is not None]).to(DEVICE)
+        non_final_next = torch.cat([s for s in batch.next_state if s is not None]).to(DEVICE).float() / 255.0
 
         # ----- Critic update -----
         with torch.cuda.amp.autocast():
@@ -279,6 +296,11 @@ class TD3Agent:
         
         self.critic_optimizer.zero_grad()
         self.scaler.scale(critic_loss).backward()
+        
+        # Check for NaNs in gradients before step
+        self.scaler.unscale_(self.critic_optimizer)
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0) # Add gradient clipping
+        
         self.scaler.step(self.critic_optimizer)
         self.scaler.update()
         
@@ -296,6 +318,11 @@ class TD3Agent:
             
             self.actor_optimizer.zero_grad()
             self.scaler.scale(actor_loss).backward()
+            
+            # Check for NaNs in gradients before step
+            self.scaler.unscale_(self.actor_optimizer)
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0) # Add gradient clipping
+            
             self.scaler.step(self.actor_optimizer)
             self.scaler.update()
             

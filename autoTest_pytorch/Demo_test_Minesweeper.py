@@ -173,7 +173,7 @@ class Game_test_case(unittest.TestCase) :
             # if click position is out of game_region 
             # really negitive reward and keep looping
             print("Model decided to click in invalid position")
-            game_status.reward = -5.0
+            game_status.reward = -3.0
             self.update_model(game_status)
 
     def update_model(self, game_status):
@@ -276,7 +276,7 @@ class Game_test_case(unittest.TestCase) :
                 
                 # case : nothing change after a period
                 game_status.step_count += 1
-                game_status.reward = -0.5
+                game_status.reward = -1.0
                 print("無效點擊（畫面無變化）")
                 self.update_model(game_status)
                 self.decide_next_step_and_play(game_status)
