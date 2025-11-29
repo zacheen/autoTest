@@ -61,8 +61,40 @@ class ReplayBuffer:
         self.buffer.append(Transition(state, action, next_state, reward, done))
 
     def sample(self, batch_size):
-        batch = random.sample(self.buffer, batch_size)
-        return Transition(*zip(*batch))
+        # Group transitions by reward
+        groups = {}
+        for t in self.buffer:
+            r = t.reward
+            if r not in groups:
+                groups[r] = []
+            groups[r].append(t)
+        
+        num_groups = len(groups)
+        if num_groups == 0:
+            return Transition(*zip(*[])) # Should not happen if check len before sample
+            
+        samples_per_group = batch_size // num_groups
+        remainder = batch_size % num_groups
+        
+        sampled_transitions = []
+        
+        # Sample from each group
+        for r, group in groups.items():
+            # Distribute remainder one by one to groups
+            count = samples_per_group + (1 if remainder > 0 else 0)
+            remainder -= 1
+            
+            if len(group) >= count:
+                # Enough samples, sample without replacement
+                sampled_transitions.extend(random.sample(group, count))
+            else:
+                # Not enough samples, sample with replacement
+                sampled_transitions.extend(random.choices(group, k=count))
+        
+        # Shuffle the combined batch
+        random.shuffle(sampled_transitions)
+        
+        return Transition(*zip(*sampled_transitions))
 
     def __len__(self):
         return len(self.buffer)
