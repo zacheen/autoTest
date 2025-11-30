@@ -1,3 +1,9 @@
+# model
+rl_models/*
+
+# OOM
+OOM/*
+
 # TOOL
 models/research/object_detection/TOOL/labelImg-master/labelImg.exe
 
