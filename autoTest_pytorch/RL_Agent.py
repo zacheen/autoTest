@@ -29,6 +29,7 @@ class Config:
     # Training parameters
     BATCH_SIZE = 16
     MEMORY_SIZE = 300
+    EPISODE_MAX_LEN = 300
     GAMMA = 0.99
     TAU = 0.005  # soft‑update coefficient
     LR_ACTOR = 1e-4
@@ -199,7 +200,7 @@ class TD3Agent:
 
         # Statistics
         self.steps = 0
-        self.episode_rewards = []
+        self.episode_rewards = deque(maxlen=CONFIG.EPISODE_MAX_LEN)
         self.current_episode_reward = 0
         
         # Mixed Precision Scaler
@@ -399,7 +400,7 @@ class TD3Agent:
         return {
             'steps': self.steps,
             'memory_size': len(self.memory),
-            'avg_reward': np.mean(self.episode_rewards[-100:]) if self.episode_rewards else 0,
+            'avg_reward': np.mean(list(self.episode_rewards)[-CONFIG.EPISODE_MAX_LEN:]) if self.episode_rewards else 0,
             'episodes': len(self.episode_rewards),
         }
 
