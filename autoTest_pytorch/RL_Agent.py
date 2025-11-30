@@ -54,11 +54,11 @@ class ReplayBuffer:
         self.buffer = deque(maxlen=capacity)
 
     def push(self, state, action, next_state, reward, done):
-        # Store tensors on CPU to avoid GPU OOM
-        # Optimize: Store as uint8 to save RAM (0-1 float -> 0-255 uint8)
-        state = (state.detach().cpu()*255).to(torch.uint8)
+        # Store tensors on CPU as float16 to save RAM but preserve precision
+        # Input state is assumed to be float32 [0, 1]
+        state = state.detach().cpu().to(torch.float16)
         if next_state is not None:
-            next_state = (next_state.detach().cpu()*255).to(torch.uint8)
+            next_state = next_state.detach().cpu().to(torch.float16)
         self.buffer.append(Transition(state, action, next_state, reward, done))
 
     def sample(self, batch_size, include_latest=False):
@@ -261,6 +261,8 @@ class TD3Agent:
         w, h = img.size  # PIL is (W, H)
         new_size = (w // 3, h // 3)
         img = img.resize(new_size, Image.BILINEAR)
+        # # write to file to check whether the image is correct
+        # img.save("preprocessed.png")
         arr = np.array(img).transpose((2, 0, 1)) / 255.0
         tensor = torch.tensor(arr, dtype=torch.float32).unsqueeze(0)
         return tensor
@@ -331,14 +333,14 @@ class TD3Agent:
         batch = self.memory.sample(CONFIG.BATCH_SIZE, include_latest=True)
 
         # Batch tensors
-        # Restore from uint8 (0-255) to float32 (0.0-1.0)
-        state = torch.cat(batch.state).to(DEVICE).float() / 255.0
+        # Restore from float16 to float32 for training
+        state = torch.cat(batch.state).to(DEVICE).float()
         action = torch.tensor(np.array(batch.action), dtype=torch.float32).to(DEVICE)
         reward = torch.tensor(batch.reward, dtype=torch.float32).to(DEVICE).unsqueeze(1)
         done = torch.tensor(batch.done, dtype=torch.float32).to(DEVICE).unsqueeze(1)
 
         non_final_mask = torch.tensor([s is not None for s in batch.next_state], device=DEVICE)
-        non_final_next = torch.cat([s for s in batch.next_state if s is not None]).to(DEVICE).float() / 255.0
+        non_final_next = torch.cat([s for s in batch.next_state if s is not None]).to(DEVICE).float()
 
         # ----- Critic update -----
         with torch.cuda.amp.autocast():
