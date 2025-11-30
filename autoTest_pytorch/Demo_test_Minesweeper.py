@@ -237,8 +237,12 @@ class Game_test_case(unittest.TestCase) :
         
         while True:
             time.sleep(1)
+            if game_status.game_over :
+                self.assertTrue(True, "game_over(really finish the game)")
+                break
+            
             if Tool_Main.glo_var.fail_playing :
-                self.assertTrue(False, "time_out")
+                self.assertTrue(False, "time_out(reach max steps)")
                 break
 
             last_pic_pos = f"whole_screen_comp_{0+11}_{0}"
@@ -247,7 +251,7 @@ class Game_test_case(unittest.TestCase) :
                 # case : something changed
                 # game status for valid click
                 game_status.step_count += 1
-                game_status.reward = 4.0
+                game_status.reward = 10.0
                 print("有效點擊！")
                 time.sleep(UI_waiting_time)
 
@@ -272,11 +276,10 @@ class Game_test_case(unittest.TestCase) :
                 if Tool_Main.compare_sim("buttons",sys._getframe().f_code.co_name, precise = True) < 0.99 :
                     # not sure what happens, so don't give reward to model
                     game_status.game_over = True
-                    Tool_Main.glo_var.fail_playing = True
                 
                 # case : nothing change after a period
                 game_status.step_count += 1
-                game_status.reward = -5.0
+                game_status.reward = -10.0
                 print("無效點擊（畫面無變化）")
                 self.update_model(game_status)
                 self.decide_next_step_and_play(game_status)
