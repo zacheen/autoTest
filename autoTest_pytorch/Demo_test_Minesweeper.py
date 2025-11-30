@@ -157,11 +157,11 @@ class Game_test_case(unittest.TestCase) :
         
             # 2. 載入截圖並預處理
             screenshot_path = game_status.save_pic_path[-1]
-            current_state = game_status.agent.preprocess_screen(screenshot_path)
+            current_screenshot = game_status.agent.preprocess_screen(screenshot_path)
         
             # 3. 選擇動作 (輸出 [0,1] 範圍的 x, y)
-            action = game_status.agent.select_action(current_state, add_noise=True)
-            game_status.update_state(current_state, action)
+            action = game_status.agent.select_action(current_screenshot, add_noise=True)
+            game_status.update_state(current_screenshot, action)
         
             # 4. 轉換為螢幕座標並點擊
             click_x, click_y = game_status.agent.action_to_screen_coords(action)
@@ -178,11 +178,11 @@ class Game_test_case(unittest.TestCase) :
 
     def update_model(self, game_status):
         # 6. 儲存經驗
-        if game_status.previous_state is not None and game_status.previous_action is not None:
+        if game_status.previous_pic is not None and game_status.previous_action is not None:
             game_status.agent.store_transition(
-                game_status.previous_state,
+                game_status.previous_pic,
                 game_status.previous_action,
-                game_status.current_state if not game_status.game_over else None,
+                game_status.current_pic if not game_status.game_over else None,
                 game_status.reward,
                 game_status.game_over
             )
@@ -207,9 +207,9 @@ class Game_test_case(unittest.TestCase) :
             self.agent = get_agent(screen_region)
             self.agent.reset_episode()
 
-            self.previous_state = None
+            self.previous_pic = None
             self.previous_action = None
-            self.current_state = None
+            self.current_pic = None
             self.action = None
 
             # Since might due to unexpected reason, we are not able to keep playing the game
@@ -221,10 +221,10 @@ class Game_test_case(unittest.TestCase) :
             self.reward = 0.0
 
         def update_state(self, new_state, new_action):
-            self.previous_state = self.current_state
+            self.previous_pic = self.current_pic
             self.previous_action = self.action
 
-            self.current_state = new_state
+            self.current_pic = new_state
             self.action = new_action
 
     def test_RL(self):
