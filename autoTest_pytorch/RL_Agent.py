@@ -131,8 +131,8 @@ class Actor(nn.Module):
     
     def _init_output_layer(self):
         nn.init.uniform_(self.output_layer.weight, -0.01, 0.01)
-        # bias 設為 0.5，讓初始輸出接近中央
-        nn.init.constant_(self.output_layer.bias, 0.5)
+        # bias 設為 0.0，讓初始輸出經過 sigmoid 後為 0.5 (中央)
+        nn.init.constant_(self.output_layer.bias, 0.0)
     
     def forward(self, state):
         features = self.encoder(state)
@@ -145,13 +145,7 @@ class Actor(nn.Module):
                 if (raw_output.abs() > 5).any():
                     print(f"WARNING: Actor raw output extreme: {raw_output.detach().cpu().numpy()}")
         
-        return self.soft_clamp(raw_output, 0.0, 1.0)
-    
-    @staticmethod
-    def soft_clamp(x, min_val, max_val, sharpness=10.0):
-        x = min_val + F.softplus(x - min_val, beta=sharpness)
-        x = max_val - F.softplus(max_val - x, beta=sharpness)
-        return x
+        return torch.sigmoid(raw_output)
 
 
 # ==================== Critic ====================
