@@ -28,7 +28,7 @@ class Config:
 
     # Training parameters
     BATCH_SIZE = 16
-    MEMORY_SIZE = 300
+    MEMORY_SIZE = 500
     EPISODE_MAX_LEN = 300
     GAMMA = 0.99
     TAU = 0.005  # soft‑update coefficient
@@ -81,8 +81,9 @@ class ReplayBuffer:
         samples_per_group = batch_size // num_groups
         remainder = batch_size % num_groups
         
-        # Sample from each group
-        for r, group in groups.items():
+        # Sample from each group (positive rewards have higher priority)
+        loop_order = sorted(groups.items(), key=lambda x: x[0], reverse=True)
+        for r, group in loop_order:
             # Distribute remainder one by one to groups
             count = samples_per_group + (1 if remainder > 0 else 0)
             remainder -= 1
