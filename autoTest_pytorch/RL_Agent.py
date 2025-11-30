@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from collections import deque, namedtuple
+from collections import deque, namedtuple, defaultdict
 from pathlib import Path
 from PIL import Image
 import random
@@ -36,7 +36,7 @@ class Config:
     LR_CRITIC = 3e-4
 
     # Exploration noise
-    NOISE_STD = 0.05
+    NOISE_STD = 0.2
     NOISE_CLIP = 0.5
     POLICY_DELAY = 2  # delayed actor update
 
@@ -63,17 +63,12 @@ class ReplayBuffer:
 
     def sample(self, batch_size):
         # Group transitions by reward
-        groups = {}
+        groups = defaultdict(list)
         for t in self.buffer:
             r = t.reward
-            if r not in groups:
-                groups[r] = []
             groups[r].append(t)
         
         num_groups = len(groups)
-        if num_groups == 0:
-            return Transition(*zip(*[])) # Should not happen if check len before sample
-            
         samples_per_group = batch_size // num_groups
         remainder = batch_size % num_groups
         
@@ -94,7 +89,6 @@ class ReplayBuffer:
         
         # Shuffle the combined batch
         random.shuffle(sampled_transitions)
-        
         return Transition(*zip(*sampled_transitions))
 
     def __len__(self):
@@ -119,7 +113,6 @@ class ResNetEncoder(nn.Module):
 
 # ==================== Actor ====================
 class Actor(nn.Module):
-    """Maps a screen tensor to (x, y) coordinates in [0, 1]."""
     def __init__(self):
         super().__init__()
         self.encoder = ResNetEncoder()
@@ -128,13 +121,37 @@ class Actor(nn.Module):
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Linear(128, 2),
-            nn.Sigmoid()
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
         )
-
+        self.output_layer = nn.Linear(128, 2)
+        self._init_output_layer()
+    
+    def _init_output_layer(self):
+        # 初始化讓輸出一開始就在 [0.3, 0.7] 附近
+        nn.init.uniform_(self.output_layer.weight, -0.01, 0.01)
+        # bias 設為 0.5，讓初始輸出接近中央
+        nn.init.constant_(self.output_layer.bias, 0.5)
+    
     def forward(self, state):
         features = self.encoder(state)
-        return self.fc(features)
+        x = self.fc(features)
+        x = self.output_layer(x)
+        # 使用 softclamp：在邊界附近是軟的，不會完全殺死梯度
+        return self.soft_clamp(x, 0.0, 1.0)
+    
+    @staticmethod
+    def soft_clamp(x, min_val, max_val, sharpness=10.0):
+        """
+        軟剪裁：在範圍內接近 identity，範圍外緩慢飽和
+        比 sigmoid 飽和更慢，比 hard clamp 有更好的梯度
+        """
+        # 使用 softplus 實現軟邊界
+        x = min_val + F.softplus(x - min_val, beta=sharpness)
+        x = max_val - F.softplus(max_val - x, beta=sharpness)
+        return x
 
 # ==================== Critic ====================
 class Critic(nn.Module):
@@ -147,12 +164,20 @@ class Critic(nn.Module):
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
             nn.Linear(128, 1)
         )
         self.q2 = nn.Sequential(
             nn.Linear(self.encoder.output_size + 2, 256),
             nn.ReLU(),
             nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
             nn.ReLU(),
             nn.Linear(128, 1)
         )
