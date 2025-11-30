@@ -761,8 +761,8 @@ def cut_pic_data(location, num, round_count, cover = True, cut_new = False, pic_
                 png_path.append(str(comp_pic_pos.with_suffix(".png")))
                 pyautogui.screenshot(png_path[-1], region=position) #透過已定義的座標位置進行截圖
                 with open(str(comp_pic_pos.with_suffix(".txt")), "w") as fw :
-                    fw.write(str(position)[1:-1]) 
-            if pic_count == None :
+                    fw.write(str(position)[1:-1])
+            elif pic_count == None :
                 png_path.append(str(user_pic_location / f"{x+11}_{round_count}.png"))
                 pyautogui.screenshot(png_path[-1], region=position) #透過已定義的座標位置進行截圖
             else :
