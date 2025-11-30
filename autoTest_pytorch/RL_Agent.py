@@ -130,7 +130,6 @@ class Actor(nn.Module):
         self._init_output_layer()
     
     def _init_output_layer(self):
-        # 初始化讓輸出一開始就在 [0.3, 0.7] 附近
         nn.init.uniform_(self.output_layer.weight, -0.01, 0.01)
         # bias 設為 0.5，讓初始輸出接近中央
         nn.init.constant_(self.output_layer.bias, 0.5)
@@ -138,28 +137,31 @@ class Actor(nn.Module):
     def forward(self, state):
         features = self.encoder(state)
         x = self.fc(features)
-        x = self.output_layer(x)
-        # 使用 softclamp：在邊界附近是軟的，不會完全殺死梯度
-        return self.soft_clamp(x, 0.0, 1.0)
+        raw_output = self.output_layer(x)
+        
+        # 加入監控：如果原始輸出太極端，打印警告
+        if self.training:
+            with torch.no_grad():
+                if (raw_output.abs() > 5).any():
+                    print(f"WARNING: Actor raw output extreme: {raw_output.detach().cpu().numpy()}")
+        
+        return self.soft_clamp(raw_output, 0.0, 1.0)
     
     @staticmethod
     def soft_clamp(x, min_val, max_val, sharpness=10.0):
-        """
-        軟剪裁：在範圍內接近 identity，範圍外緩慢飽和
-        比 sigmoid 飽和更慢，比 hard clamp 有更好的梯度
-        """
-        # 使用 softplus 實現軟邊界
         x = min_val + F.softplus(x - min_val, beta=sharpness)
         x = max_val - F.softplus(max_val - x, beta=sharpness)
         return x
 
+
 # ==================== Critic ====================
 class Critic(nn.Module):
-    """Twin critics for TD3 – estimate Q‑values for (state, action)."""
     def __init__(self):
         super().__init__()
         self.encoder = ResNetEncoder()
-        self.q1 = nn.Sequential(
+        
+        # 分離最後一層以便初始化
+        self.q1_fc = nn.Sequential(
             nn.Linear(self.encoder.output_size + 2, 256),
             nn.ReLU(),
             nn.Linear(256, 128),
@@ -168,9 +170,10 @@ class Critic(nn.Module):
             nn.ReLU(),
             nn.Linear(128, 128),
             nn.ReLU(),
-            nn.Linear(128, 1)
         )
-        self.q2 = nn.Sequential(
+        self.q1_out = nn.Linear(128, 1)
+        
+        self.q2_fc = nn.Sequential(
             nn.Linear(self.encoder.output_size + 2, 256),
             nn.ReLU(),
             nn.Linear(256, 128),
@@ -179,18 +182,26 @@ class Critic(nn.Module):
             nn.ReLU(),
             nn.Linear(128, 128),
             nn.ReLU(),
-            nn.Linear(128, 1)
         )
+        self.q2_out = nn.Linear(128, 1)
+        
+        self._init_output_layers()
+    
+    def _init_output_layers(self):
+        # 讓 Q 值初始輸出接近 0
+        for out_layer in [self.q1_out, self.q2_out]:
+            nn.init.uniform_(out_layer.weight, -0.001, 0.001)
+            nn.init.zeros_(out_layer.bias)
 
     def forward(self, state, action):
         features = self.encoder(state)
         x = torch.cat([features, action], dim=1)
-        return self.q1(x), self.q2(x)
+        return self.q1_out(self.q1_fc(x)), self.q2_out(self.q2_fc(x))
 
     def q1_forward(self, state, action):
         features = self.encoder(state)
         x = torch.cat([features, action], dim=1)
-        return self.q1(x)
+        return self.q1_out(self.q1_fc(x))
 
 # ==================== TD3 Agent ====================
 class TD3Agent:
