@@ -170,7 +170,7 @@ class Game_test_case(unittest.TestCase) :
             if Tool_Main.click((click_x, click_y), limit_region=game_status.game_region) :
                 break
 
-            # if click position is out of game_region 
+            # if click position is out of game_region
             # really negitive reward and keep looping
             print("Model decided to click in invalid position")
             game_status.reward = -10.0
