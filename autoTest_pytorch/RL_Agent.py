@@ -141,22 +141,15 @@ class Actor(nn.Module):
         self._init_output_layer()
     
     def _init_output_layer(self):
-        nn.init.uniform_(self.output_layer.weight, -0.01, 0.01)
-        # bias 設為 0.0，讓初始輸出經過 sigmoid 後為 0.5 (中央)
+        nn.init.uniform_(self.output_layer.weight, -0.003, 0.003)
+        # bias 設為 0.0，讓初始輸出經過 tanh 後為 0.0 (中央)
         nn.init.constant_(self.output_layer.bias, 0.0)
     
     def forward(self, state):
         features = self.encoder(state)
         x = self.fc(features)
         raw_output = self.output_layer(x)
-        
-        # 加入監控：如果原始輸出太極端，打印警告
-        if self.training:
-            with torch.no_grad():
-                if (raw_output.abs() > 5).any():
-                    print(f"WARNING: Actor raw output extreme: {raw_output.detach().cpu().numpy()}")
-        
-        return torch.sigmoid(raw_output)
+        return torch.tanh(raw_output)
 
 
 # ==================== Critic ====================
@@ -283,11 +276,11 @@ class TD3Agent:
 
     # -------------------- Action Selection --------------------
     def select_action(self, state: torch.Tensor, add_noise: bool = True) -> np.ndarray:
-        """Return an (x, y) action in [0, 1]."""
+        """Return an (x, y) action in [-1, 1]."""
         # Check for NaNs in input state
         if torch.isnan(state).any():
             print("WARNING: NaN detected in state tensor during select_action. Returning random action.")
-            return np.random.rand(2)
+            return np.random.uniform(-1, 1, size=2)
 
         with torch.no_grad():
             action = self.actor(state.to(DEVICE)).cpu().numpy().squeeze()
@@ -295,18 +288,20 @@ class TD3Agent:
         # Check for NaNs in output action
         if np.isnan(action).any():
             print("WARNING: NaN detected in actor output. Returning random action.")
-            return np.random.rand(2)
+            return np.random.uniform(-1, 1, size=2)
 
         if add_noise:
             noise = np.random.normal(0, CONFIG.NOISE_STD, size=2)
             action = action + noise
-            action = np.clip(action, 0.0, 1.0)
+            action = np.clip(action, -1.0, 1.0)
         return action
 
     def action_to_screen_coords(self, action: np.ndarray) -> tuple:
-        """Map the normalized action to absolute screen coordinates."""
-        x = int(self.screen_left + action[0] * self.screen_width)
-        y = int(self.screen_top + action[1] * self.screen_height)
+        """Map the normalized action [-1, 1] to absolute screen coordinates."""
+        # Map [-1, 1] -> [0, 1]
+        norm_action = (action + 1) / 2.0
+        x = int(self.screen_left + norm_action[0] * self.screen_width)
+        y = int(self.screen_top + norm_action[1] * self.screen_height)
         return x, y
 
     # -------------------- Experience Storage --------------------
@@ -352,7 +347,7 @@ class TD3Agent:
                 noise = torch.clamp(
                     torch.randn_like(next_action) * CONFIG.NOISE_STD,
                     -CONFIG.NOISE_CLIP, CONFIG.NOISE_CLIP)
-                next_action = torch.clamp(next_action + noise, 0.0, 1.0)
+                next_action = torch.clamp(next_action + noise, -1.0, 1.0)
                 target_q1, target_q2 = self.critic_target(non_final_next, next_action)
                 target_q = torch.min(target_q1, target_q2)
                 target = torch.zeros(CONFIG.BATCH_SIZE, 1, device=DEVICE, dtype=target_q.dtype)
