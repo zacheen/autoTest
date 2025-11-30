@@ -61,18 +61,25 @@ class ReplayBuffer:
             next_state = (next_state.detach().cpu()*255).to(torch.uint8)
         self.buffer.append(Transition(state, action, next_state, reward, done))
 
-    def sample(self, batch_size):
+    def sample(self, batch_size, include_latest=False):
         # Group transitions by reward
         groups = defaultdict(list)
         for t in self.buffer:
             r = t.reward
             groups[r].append(t)
         
+        sampled_transitions = []
+        if include_latest and len(self.buffer) > 0:
+            latest_transition = self.buffer[-1]
+            sampled_transitions.append(latest_transition)
+            batch_size -= 1
+        
         num_groups = len(groups)
+        if num_groups == 0:
+             return None
+
         samples_per_group = batch_size // num_groups
         remainder = batch_size % num_groups
-        
-        sampled_transitions = []
         
         # Sample from each group
         for r, group in groups.items():
@@ -80,6 +87,9 @@ class ReplayBuffer:
             count = samples_per_group + (1 if remainder > 0 else 0)
             remainder -= 1
             
+            if count <= 0:
+                continue
+
             if len(group) >= count:
                 # Enough samples, sample without replacement
                 sampled_transitions.extend(random.sample(group, count))
@@ -322,7 +332,7 @@ class TD3Agent:
             return None
 
         self.steps += 1
-        batch = self.memory.sample(CONFIG.BATCH_SIZE)
+        batch = self.memory.sample(CONFIG.BATCH_SIZE, include_latest=True)
 
         # Batch tensors
         # Restore from uint8 (0-255) to float32 (0.0-1.0)
