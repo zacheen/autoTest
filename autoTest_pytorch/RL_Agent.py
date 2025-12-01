@@ -369,6 +369,14 @@ class TD3Agent:
             self.critic.load_state_dict(ckpt['critic'])
             self.actor_target.load_state_dict(ckpt['actor_target'])
             self.critic_target.load_state_dict(ckpt['critic_target'])
+            
+            if 'actor_optimizer' in ckpt:
+                self.actor_optimizer.load_state_dict(ckpt['actor_optimizer'])
+            if 'critic_optimizer' in ckpt:
+                self.critic_optimizer.load_state_dict(ckpt['critic_optimizer'])
+            if 'scaler' in ckpt:
+                self.scaler.load_state_dict(ckpt['scaler'])
+
             self.steps = ckpt.get('steps', 0)
             self.episode_count = ckpt.get('episode_count', 0)
             print(f"Loaded model, steps: {self.steps}, episodes: {self.episode_count}")
