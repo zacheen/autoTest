@@ -160,7 +160,7 @@ class Game_test_case(unittest.TestCase) :
             current_screenshot = game_status.agent.preprocess_screen(screenshot_path)
         
             # 3. 選擇動作 (輸出 [0,1] 範圍的 x, y)
-            action = game_status.agent.select_action(current_screenshot, add_noise=True)
+            action = game_status.agent.select_action(current_screenshot, add_noise=False)
             game_status.update_state(current_screenshot, action)
         
             # 4. 轉換為螢幕座標並點擊

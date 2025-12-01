@@ -31,11 +31,11 @@ class Config:
 
     # Training parameters
     BATCH_SIZE = 16
-    MEMORY_SIZE = 500
+    MEMORY_SIZE = 2000
     EPISODE_MAX_LEN = 300
     GAMMA = 0.99
     TAU = 0.002  # soft-update coefficient
-    LR_ACTOR = 0.00004
+    LR_ACTOR = 0.0002
     LR_CRITIC = 0.0004
     
     # LR Scheduler
