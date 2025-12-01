@@ -1,5 +1,6 @@
 # model
 rl_models/*
+rl_models_save/*
 
 # OOM
 OOM/*
