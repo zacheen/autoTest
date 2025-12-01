@@ -173,7 +173,7 @@ class Game_test_case(unittest.TestCase) :
             # if click position is out of game_region
             # really negitive reward and keep looping
             print("Model decided to click in invalid position")
-            game_status.reward = -10.0
+            game_status.reward = -12.0
             self.update_model(game_status)
 
     def update_model(self, game_status):
@@ -263,7 +263,7 @@ class Game_test_case(unittest.TestCase) :
                 
                 # 檢查贏了
                 elif Tool_Main.compare_sim("win", sys._getframe().f_code.co_name, precise=True) >= 0.9:
-                    game_status.reward = 10.0
+                    game_status.reward = 15.0
                     game_status.game_over = 1
                     print("🎉 獲勝！")
 
@@ -282,15 +282,10 @@ class Game_test_case(unittest.TestCase) :
                 game_status.reward = -10.0
                 print("無效點擊（畫面無變化）")
                 self.update_model(game_status)
-                self.decide_next_step_and_play(game_status)
-                
                 if game_status.step_count > game_status.max_steps:
                     Tool_Main.glo_var.fail_playing = True
-            
-            # game_over
-            if game_status.game_over:
-                print(f"Episode 結束: {game_status.agent.get_stats()}")
-                break
+                else :
+                    self.decide_next_step_and_play(game_status)
 
     # 等待遊戲結束
     def test_wait_result(self):
