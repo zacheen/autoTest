@@ -42,10 +42,16 @@ class Config:
     LR_DECAY_STEP = 1000
     LR_DECAY_GAMMA = 0.9
 
-    # Exploration noise
-    NOISE_STD = 0.2
-    NOISE_CLIP = 0.5
-    POLICY_DELAY = 2  # delayed actor update
+    # Exploration noise (Decaying)
+    EXPL_NOISE_INIT = 0.1      # 初始探索噪聲 (約 100 pixel) - Reduced from 0.2
+    EXPL_NOISE_MIN = 0.01      # 最小探索噪聲 (約 10 pixel)
+    EXPL_NOISE_DECAY_STEP = 1000
+    EXPL_NOISE_DECAY_GAMMA = 0.95
+
+    # Target Policy Smoothing (Fixed, small)
+    TARGET_NOISE = 0.02        # 目標網路平滑噪聲 (約 20 pixel)
+    TARGET_NOISE_CLIP = 0.05   # 噪聲截斷範圍
+    POLICY_DELAY = 2           # delayed actor update
 
     # Regularization
     ACTION_REG_COEF = 0.01  # Penalty for large actions
@@ -399,6 +405,7 @@ class TD3Agent:
             self.episode_count = ckpt.get('episode_count', 0)
             print(f"Loaded model, steps: {self.steps}, episodes: {self.episode_count}")
             print(f"Current LR - Actor: {self.actor_scheduler.get_last_lr()[0]:.6f}, Critic: {self.critic_scheduler.get_last_lr()[0]:.6f}")
+            print(f"Current Exploration Noise: {self.get_exploration_noise():.4f}")
 
     def preprocess_screen(self, screenshot_path: str) -> torch.Tensor:
         img = Image.open(screenshot_path).convert('RGB')
@@ -418,6 +425,12 @@ class TD3Agent:
         tensor = torch.tensor(arr, dtype=torch.float32).unsqueeze(0)
         return tensor
 
+    def get_exploration_noise(self):
+        """Calculate current exploration noise based on steps."""
+        decay_steps = self.steps // CONFIG.EXPL_NOISE_DECAY_STEP
+        noise = CONFIG.EXPL_NOISE_INIT * (CONFIG.EXPL_NOISE_DECAY_GAMMA ** decay_steps)
+        return max(CONFIG.EXPL_NOISE_MIN, noise)
+
     def select_action(self, state: torch.Tensor, add_noise: bool = True) -> np.ndarray:
         """Return an (x, y) action in [-1, 1]."""
         if torch.isnan(state).any():
@@ -432,7 +445,8 @@ class TD3Agent:
             return np.random.uniform(-1, 1, size=2)
 
         if add_noise:
-            noise = np.random.normal(0, CONFIG.NOISE_STD, size=2)
+            current_noise_std = self.get_exploration_noise()
+            noise = np.random.normal(0, current_noise_std, size=2)
             action = action + noise
             action = np.clip(action, -1.0, 1.0)
         return action
@@ -513,9 +527,10 @@ class TD3Agent:
         with torch.cuda.amp.autocast():
             with torch.no_grad():
                 next_action = self.actor_target(non_final_next)
+                # Target Policy Smoothing Noise (Fixed small noise)
                 noise = torch.clamp(
-                    torch.randn_like(next_action) * CONFIG.NOISE_STD,
-                    -CONFIG.NOISE_CLIP, CONFIG.NOISE_CLIP)
+                    torch.randn_like(next_action) * CONFIG.TARGET_NOISE,
+                    -CONFIG.TARGET_NOISE_CLIP, CONFIG.TARGET_NOISE_CLIP)
                 next_action = torch.clamp(next_action + noise, -1.0, 1.0)
                 target_q1, target_q2 = self.critic_target(non_final_next, next_action)
                 target_q = torch.min(target_q1, target_q2)
