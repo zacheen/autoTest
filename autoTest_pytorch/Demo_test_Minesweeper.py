@@ -190,7 +190,7 @@ class Game_test_case(unittest.TestCase) :
         # 7. 訓練
         loss_info = game_status.agent.train_step()
         if loss_info:
-            print(f"  Loss - Critic: {loss_info['critic_loss']:.4f}", end="")
+            print(f"Loss - Critic: {loss_info['critic_loss']:.4f}", end="")
             if loss_info['actor_loss']:
                 print(f", Actor: {loss_info['actor_loss']:.4f}")
             else:
@@ -217,7 +217,7 @@ class Game_test_case(unittest.TestCase) :
             self.max_steps = 10
             self.step_count = 0 # can I use the step in agent??
 
-            self.game_over = False
+            self.game_over = 0 # Since this will pass into the model, and 0 represents not game over, 1 represents game over
             self.reward = 0.0
 
         def update_state(self, new_state, new_action):
@@ -258,13 +258,13 @@ class Game_test_case(unittest.TestCase) :
                 # 檢查輸了
                 if Tool_Main.compare_sim("lose", sys._getframe().f_code.co_name, precise=True) >= 0.9:
                     game_status.reward = -5.0
-                    game_status.game_over = True
+                    game_status.game_over = 1
                     print("💥 踩到地雷！")
                 
                 # 檢查贏了
                 elif Tool_Main.compare_sim("win", sys._getframe().f_code.co_name, precise=True) >= 0.9:
                     game_status.reward = 10.0
-                    game_status.game_over = True
+                    game_status.game_over = 1
                     print("🎉 獲勝！")
 
                 self.update_model(game_status)
@@ -275,7 +275,7 @@ class Game_test_case(unittest.TestCase) :
                 # check still in game
                 if Tool_Main.compare_sim("buttons",sys._getframe().f_code.co_name, precise = True) < 0.99 :
                     # not sure what happens, so don't give reward to model
-                    game_status.game_over = True
+                    game_status.game_over = 1
                 
                 # case : nothing change after a period
                 game_status.step_count += 1

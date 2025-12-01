@@ -34,9 +34,9 @@ class Config:
     MEMORY_SIZE = 500
     EPISODE_MAX_LEN = 300
     GAMMA = 0.99
-    TAU = 0.005  # soft-update coefficient
-    LR_ACTOR = 1e-4
-    LR_CRITIC = 3e-4
+    TAU = 0.002  # soft-update coefficient
+    LR_ACTOR = 0.00004
+    LR_CRITIC = 0.0004
 
     # Exploration noise
     NOISE_STD = 0.2
