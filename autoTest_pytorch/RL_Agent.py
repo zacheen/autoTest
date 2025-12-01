@@ -51,6 +51,11 @@ class Config:
     ACTION_REG_COEF = 0.01  # Penalty for large actions
     REWARD_SCALE = 0.1      # Scale rewards to keep gradients stable
 
+    DISCRETE = True
+    if DISCRETE :
+        NOISE_CLIP = 0.05
+        NO_NOISE_PROB = 20 #% of time no noise
+
     # Model persistence
     MODEL_PATH = Path("./rl_models")
     STEP_LOG_FILE = Path("./rl_models/step_log.csv")        # 每步記錄
@@ -432,9 +437,13 @@ class TD3Agent:
             return np.random.uniform(-1, 1, size=2)
 
         if add_noise:
-            noise = np.random.normal(0, CONFIG.NOISE_STD, size=2)
-            action = action + noise
-            action = np.clip(action, -1.0, 1.0)
+            # DISCRETE should have a higher possibility of no noise, so that it would know the action is correct or not
+            if CONFIG.DISCRETE and (random.randint(1,100) <= CONFIG.NO_NOISE_PROB):
+                print("<No noise precise click>")
+            else:
+                noise = np.random.normal(0, CONFIG.NOISE_STD, size=2)
+                action = action + noise
+                action = np.clip(action, -1.0, 1.0)
         return action
 
     def action_to_screen_coords(self, action: np.ndarray) -> tuple:
@@ -513,10 +522,11 @@ class TD3Agent:
         with torch.cuda.amp.autocast():
             with torch.no_grad():
                 next_action = self.actor_target(non_final_next)
-                noise = torch.clamp(
-                    torch.randn_like(next_action) * CONFIG.NOISE_STD,
-                    -CONFIG.NOISE_CLIP, CONFIG.NOISE_CLIP)
-                next_action = torch.clamp(next_action + noise, -1.0, 1.0)
+                if not CONFIG.DISCRETE:
+                    noise = torch.clamp(
+                        torch.randn_like(next_action) * CONFIG.NOISE_STD,
+                        -CONFIG.NOISE_CLIP, CONFIG.NOISE_CLIP)
+                    next_action = torch.clamp(next_action + noise, -1.0, 1.0)
                 target_q1, target_q2 = self.critic_target(non_final_next, next_action)
                 target_q = torch.min(target_q1, target_q2)
                 target = torch.zeros(CONFIG.BATCH_SIZE, 1, device=DEVICE, dtype=target_q.dtype)
