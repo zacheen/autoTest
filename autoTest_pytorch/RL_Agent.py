@@ -37,6 +37,10 @@ class Config:
     TAU = 0.002  # soft-update coefficient
     LR_ACTOR = 0.00004
     LR_CRITIC = 0.0004
+    
+    # LR Scheduler
+    LR_DECAY_STEP = 1000
+    LR_DECAY_GAMMA = 0.9
 
     # Exploration noise
     NOISE_STD = 0.2
@@ -325,6 +329,14 @@ class TD3Agent:
         # Optimizers
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=CONFIG.LR_ACTOR)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=CONFIG.LR_CRITIC)
+        
+        # Schedulers
+        self.actor_scheduler = torch.optim.lr_scheduler.StepLR(
+            self.actor_optimizer, step_size=CONFIG.LR_DECAY_STEP, gamma=CONFIG.LR_DECAY_GAMMA
+        )
+        self.critic_scheduler = torch.optim.lr_scheduler.StepLR(
+            self.critic_optimizer, step_size=CONFIG.LR_DECAY_STEP, gamma=CONFIG.LR_DECAY_GAMMA
+        )
 
         # Replay buffer
         self.memory = ReplayBuffer(CONFIG.MEMORY_SIZE)
@@ -376,10 +388,17 @@ class TD3Agent:
                 self.critic_optimizer.load_state_dict(ckpt['critic_optimizer'])
             if 'scaler' in ckpt:
                 self.scaler.load_state_dict(ckpt['scaler'])
+            
+            # Load Scheduler state
+            if 'actor_scheduler' in ckpt:
+                self.actor_scheduler.load_state_dict(ckpt['actor_scheduler'])
+            if 'critic_scheduler' in ckpt:
+                self.critic_scheduler.load_state_dict(ckpt['critic_scheduler'])
 
             self.steps = ckpt.get('steps', 0)
             self.episode_count = ckpt.get('episode_count', 0)
             print(f"Loaded model, steps: {self.steps}, episodes: {self.episode_count}")
+            print(f"Current LR - Actor: {self.actor_scheduler.get_last_lr()[0]:.6f}, Critic: {self.critic_scheduler.get_last_lr()[0]:.6f}")
 
     def preprocess_screen(self, screenshot_path: str) -> torch.Tensor:
         img = Image.open(screenshot_path).convert('RGB')
@@ -547,6 +566,10 @@ class TD3Agent:
             self._soft_update(self.actor, self.actor_target)
             self._soft_update(self.critic, self.critic_target)
 
+        # Step schedulers
+        self.actor_scheduler.step()
+        self.critic_scheduler.step()
+
         # 記錄每步數據
         latest_action = batch.action[-1] if batch.action else None
         latest_reward = batch.reward[-1] if batch.reward else 0
@@ -579,6 +602,8 @@ class TD3Agent:
             'critic_target': self.critic_target.state_dict(),
             'actor_optimizer': self.actor_optimizer.state_dict(),
             'critic_optimizer': self.critic_optimizer.state_dict(),
+            'actor_scheduler': self.actor_scheduler.state_dict(),
+            'critic_scheduler': self.critic_scheduler.state_dict(),
             'steps': self.steps,
             'episode_count': self.episode_count,
             'episode_rewards': self.episode_rewards,
