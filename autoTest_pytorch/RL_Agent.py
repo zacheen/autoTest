@@ -43,6 +43,10 @@ class Config:
     NOISE_CLIP = 0.5
     POLICY_DELAY = 2  # delayed actor update
 
+    # Regularization
+    ACTION_REG_COEF = 0.01  # Penalty for large actions
+    REWARD_SCALE = 0.1      # Scale rewards to keep gradients stable
+
     # Model persistence
     MODEL_PATH = Path("./rl_models")
     STEP_LOG_FILE = Path("./rl_models/step_log.csv")        # 每步記錄
@@ -413,7 +417,9 @@ class TD3Agent:
         return x, y
 
     def store_transition(self, state, action, next_state, reward, done):
-        self.memory.push(state, action, next_state, reward, done)
+        # Scale reward for training stability
+        scaled_reward = reward * CONFIG.REWARD_SCALE
+        self.memory.push(state, action, next_state, scaled_reward, done)
         self.current_episode_reward += reward
         self.current_episode_steps += 1
         
@@ -514,7 +520,10 @@ class TD3Agent:
         if self.steps % CONFIG.POLICY_DELAY == 0:
             with torch.cuda.amp.autocast():
                 actor_output = self.actor(state)
+                # Actor Loss = -Q_value + Regularization
+                # We want to maximize Q (minimize -Q) and minimize action magnitude
                 actor_loss = -self.critic.q1_forward(state, actor_output).mean()
+                actor_loss += CONFIG.ACTION_REG_COEF * (actor_output ** 2).mean()
             
             self.actor_optimizer.zero_grad()
             self.scaler.scale(actor_loss).backward()
