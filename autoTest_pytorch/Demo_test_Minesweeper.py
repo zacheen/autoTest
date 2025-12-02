@@ -165,7 +165,7 @@ class Game_test_case(unittest.TestCase) :
         
             # 4. 轉換為螢幕座標並點擊
             click_x, click_y = game_status.agent.action_to_screen_coords(action)
-            print(f"Step {game_status.step_count}: action=({action[0]:.3f}, {action[1]:.3f}) -> click=({click_x}, {click_y})")
+            print(f"Step {game_status.step_count}: action=({action[0]:.3f}, {action[1]:.3f}) -> ", end="")
             
             if Tool_Main.click((click_x, click_y), limit_region=game_status.game_region) :
                 break
@@ -240,7 +240,6 @@ class Game_test_case(unittest.TestCase) :
             if game_status.game_over :
                 self.assertTrue(True, "game_over(really finish the game)")
                 break
-            
             if Tool_Main.glo_var.fail_playing :
                 self.assertTrue(False, "time_out(reach max steps)")
                 break

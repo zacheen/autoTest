@@ -355,7 +355,7 @@ def check_valid_region(pos, region):
 # dosleep 點擊完後 要等幾秒 才進續進行
 # long_click 帶入數字 代表要點擊XX秒才放開
 # move_click 帶入數字 滑鼠會先移動到上面 等待XX秒 後才進行點擊
-def click(pos, stri = "", dosleep = 0.3, long_click = None, move_click = None, limit_region = None) : 
+def click(pos, stri = None, dosleep = 0.3, long_click = None, move_click = None, limit_region = None) : 
     #呼叫全域變數
     global glo_var 
     global use_sel
@@ -368,7 +368,7 @@ def click(pos, stri = "", dosleep = 0.3, long_click = None, move_click = None, l
             if not check_valid_region((x,y), limit_region) :
                 return False
         
-        if stri != None :
+        if stri != None:
             print_to_output(stri + " click_pos : ("+str(x)+","+str(y)+")")
         else :
             print_to_output("click_pos : ("+str(x)+","+str(y)+")")
