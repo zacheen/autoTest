@@ -54,7 +54,7 @@ class Config:
     DISCRETE = True
     if DISCRETE :
         NOISE_CLIP = 0.05
-        NO_NOISE_PROB = 20 #% of time no noise
+        NOISE_PROB = 0.8
 
     # Model persistence
     MODEL_PATH = Path("./rl_models")
@@ -438,7 +438,7 @@ class TD3Agent:
 
         if add_noise:
             # DISCRETE should have a higher possibility of no noise, so that it would know the action is correct or not
-            if CONFIG.DISCRETE and (random.randint(1,100) <= CONFIG.NO_NOISE_PROB):
+            if CONFIG.DISCRETE and (random.random() > CONFIG.NOISE_PROB):
                 print("<No noise precise click>")
             else:
                 noise = np.random.normal(0, CONFIG.NOISE_STD, size=2)
@@ -503,7 +503,7 @@ class TD3Agent:
             print(f"[GPU {tag}] Allocated: {allocated:.1f}MB, Reserved: {reserved:.1f}MB")
     
     def train_step(self) -> dict:
-        self.log_gpu_memory("Start Train")
+        # self.log_gpu_memory("Start Train")
         if len(self.memory) < CONFIG.BATCH_SIZE:
             return None
 
