@@ -160,7 +160,7 @@ class Game_test_case(unittest.TestCase) :
             current_screenshot = game_status.agent.preprocess_screen(screenshot_path)
         
             # 3. 選擇動作 (輸出 [0,1] 範圍的 x, y)
-            action = game_status.agent.select_action(current_screenshot, add_noise=True)
+            action = game_status.agent.select_action(current_screenshot, add_noise=game_status.noise)
             game_status.update_state(current_screenshot, action)
         
             # 4. 轉換為螢幕座標並點擊
@@ -177,6 +177,11 @@ class Game_test_case(unittest.TestCase) :
             self.update_model(game_status)
 
     def update_model(self, game_status):
+        if game_status.reward > 0 :
+            game_status.positive_reward += 1
+        elif game_status.reward < 0 :
+            game_status.negative_reward += 1
+        
         # 6. 儲存經驗
         if game_status.previous_pic is not None and game_status.previous_action is not None:
             game_status.agent.store_transition(
@@ -231,12 +236,23 @@ class Game_test_case(unittest.TestCase) :
         Tool_Main.glo_var.s_record_time()
         UI_waiting_time = 1
         game_status = Game_test_case.Game_status()
+        game_status.positive_reward = 0
+        game_status.negative_reward = 0
+        if Tool_Main.glo_var.round_count > 10 and (random.random() > Tool_Main.glo_var.NOISE_PROB):
+            print("This round no noise precise click")
+            game_status.noise = False
+        else:
+            game_status.noise = True
         time.sleep(UI_waiting_time)
         self.decide_next_step_and_play(game_status)
         time.sleep(UI_waiting_time)
         
         while True:
             time.sleep(1)
+            if game_status.game_over or Tool_Main.glo_var.fail_playing:
+                Tool_Main.glo_var.NOISE_PROB = game_status.negative_reward / \
+                    (game_status.positive_reward + game_status.negative_reward)
+                print("Tool_Main.glo_var.NOISE_PROB :", Tool_Main.glo_var.NOISE_PROB)
             if game_status.game_over :
                 self.assertTrue(True, "game_over(really finish the game)")
                 break
@@ -346,6 +362,7 @@ if __name__=="__main__" :
         player_num = player_num,           # 玩家數量最大數量 通常是截圖看要截幾張
         round_count = round_count
     )
+    Tool_Main.glo_var.NOISE_PROB = 0.9
     print("開始初始化此遊戲必要變數")
     # 初始化這個遊戲才會用到的參數
     game_only_var = Game_only_var()
