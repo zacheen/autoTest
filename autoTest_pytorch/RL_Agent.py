@@ -30,12 +30,12 @@ class Config:
     SCREEN_HEIGHT = 1080
 
     # Training parameters
-    BATCH_SIZE = 16
-    MEMORY_SIZE = 500
+    BATCH_SIZE = 24 # my device can accept 64, but too slow
+    MEMORY_SIZE = 1000
     EPISODE_MAX_LEN = 300
     GAMMA = 0.99
     TAU = 0.002  # soft-update coefficient
-    LR_ACTOR = 0.00004
+    LR_ACTOR = 0.00005
     LR_CRITIC = 0.0004
     
     # LR Scheduler
