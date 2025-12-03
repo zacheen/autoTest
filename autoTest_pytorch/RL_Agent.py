@@ -613,7 +613,15 @@ class TD3Agent:
     def save_model(self):
         CONFIG.MODEL_PATH.mkdir(parents=True, exist_ok=True)
 
-        prev_train_data = list(self.memory.buffer)[-CONFIG.START_TRAIN_SIZE:]
+        if len(self.memory) > CONFIG.START_TRAIN_SIZE:
+            batch = self.memory.sample(CONFIG.START_TRAIN_SIZE, include_latest=False)
+            # 轉換回 list of Transition 格式
+            prev_train_data = [
+                Transition(s, a, ns, r, d) 
+                for s, a, ns, r, d in zip(batch.state, batch.action, batch.next_state, batch.reward, batch.done)
+            ]
+        else:
+            prev_train_data = list(self.memory.buffer)
         torch.save({
             'actor': self.actor.state_dict(),
             'critic': self.critic.state_dict(),
