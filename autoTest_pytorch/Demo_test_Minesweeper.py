@@ -238,7 +238,8 @@ class Game_test_case(unittest.TestCase) :
         game_status = Game_test_case.Game_status()
         game_status.positive_reward = 0
         game_status.negative_reward = 0
-        if Tool_Main.glo_var.round_count > 10 and (random.random() > Tool_Main.glo_var.NOISE_PROB):
+        game_status.init_positive_reward = 10
+        if Tool_Main.glo_var.round_count > 30 and (random.random() > Tool_Main.glo_var.NOISE_PROB):
             print("This round no noise precise click")
             game_status.noise = False
         else:
@@ -252,21 +253,23 @@ class Game_test_case(unittest.TestCase) :
             if game_status.game_over or Tool_Main.glo_var.fail_playing:
                 Tool_Main.glo_var.NOISE_PROB = game_status.negative_reward / \
                     (game_status.positive_reward + game_status.negative_reward)
+                Tool_Main.glo_var.NOISE_PROB /= 2
                 print("Tool_Main.glo_var.NOISE_PROB :", Tool_Main.glo_var.NOISE_PROB)
             if game_status.game_over :
                 self.assertTrue(True, "game_over(really finish the game)")
                 break
-            if Tool_Main.glo_var.fail_playing :
+            elif Tool_Main.glo_var.fail_playing :
                 self.assertTrue(False, "time_out(reach max steps)")
                 break
 
             last_pic_pos = f"whole_screen_comp_{0+11}_{0}"
             # since a small change in the whole screen shot is tiny, the threshold should be very strick
-            if Tool_Main.compare_sim(last_pic_pos,sys._getframe().f_code.co_name, precise = True) < 0.99999 : 
+            if Tool_Main.compare_sim(last_pic_pos,sys._getframe().f_code.co_name, precise = True) < 0.9995 : 
                 # case : something changed
                 # game status for valid click
                 game_status.step_count += 1
-                game_status.reward = 10.0
+                game_status.reward = game_status.init_positive_reward
+                game_status.init_positive_reward += 3
                 print("有效點擊！")
                 time.sleep(UI_waiting_time)
 

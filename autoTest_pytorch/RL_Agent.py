@@ -77,6 +77,7 @@ class ReplayBuffer:
         state = state.detach().cpu().to(torch.float16)
         if next_state is not None:
             next_state = next_state.detach().cpu().to(torch.float16)
+        print("new reward: ", reward)
         self.buffer.append(Transition(state, action, next_state, reward, done))
 
     def sample(self, batch_size, include_latest=False):
