@@ -238,7 +238,7 @@ class Game_test_case(unittest.TestCase) :
         game_status = Game_test_case.Game_status()
         game_status.positive_reward = 0
         game_status.negative_reward = 0
-        game_status.init_positive_reward = 10
+        game_status.init_positive_reward = 8
         if Tool_Main.glo_var.round_count > 30 and (random.random() > Tool_Main.glo_var.NOISE_PROB):
             print("This round no noise precise click")
             game_status.noise = False
@@ -270,7 +270,7 @@ class Game_test_case(unittest.TestCase) :
                 # game status for valid click
                 game_status.step_count += 1
                 game_status.reward = game_status.init_positive_reward
-                game_status.init_positive_reward += 3
+                game_status.init_positive_reward += 2
                 print("有效點擊！")
                 time.sleep(UI_waiting_time)
 

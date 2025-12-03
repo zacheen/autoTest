@@ -49,7 +49,7 @@ class Config:
     POLICY_DELAY = 2  # delayed actor update
 
     # Regularization
-    ACTION_REG_COEF = 0.01  # Penalty for large actions
+    ACTION_REG_COEF = 0.1  # Penalty for large actions
     REWARD_SCALE = 0.1      # Scale rewards to keep gradients stable
 
     DISCRETE = True
