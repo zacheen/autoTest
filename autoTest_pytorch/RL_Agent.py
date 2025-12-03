@@ -31,6 +31,7 @@ class Config:
 
     # Training parameters
     BATCH_SIZE = 24 # my device can accept 64, but too slow
+    START_TRAIN_SIZE = 100
     MEMORY_SIZE = 1000
     EPISODE_MAX_LEN = 300
     GAMMA = 0.99
@@ -504,7 +505,7 @@ class TD3Agent:
     
     def train_step(self) -> dict:
         # self.log_gpu_memory("Start Train")
-        if len(self.memory) < CONFIG.BATCH_SIZE:
+        if len(self.memory) < CONFIG.START_TRAIN_SIZE:
             return None
 
         self.steps += 1
