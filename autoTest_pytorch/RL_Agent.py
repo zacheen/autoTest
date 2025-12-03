@@ -383,7 +383,7 @@ class TD3Agent:
     def _try_load_model(self):
         model_file = CONFIG.MODEL_PATH / "td3_minesweeper.pth"
         if model_file.exists():
-            ckpt = torch.load(model_file, map_location=DEVICE)
+            ckpt = torch.load(model_file, map_location='cpu')
             self.actor.load_state_dict(ckpt['actor'])
             self.critic.load_state_dict(ckpt['critic'])
             self.actor_target.load_state_dict(ckpt['actor_target'])
@@ -401,6 +401,11 @@ class TD3Agent:
                 self.actor_scheduler.load_state_dict(ckpt['actor_scheduler'])
             if 'critic_scheduler' in ckpt:
                 self.critic_scheduler.load_state_dict(ckpt['critic_scheduler'])
+
+            # Load prev_train_data
+            if 'prev_train_data' in ckpt:
+                self.memory.buffer = deque(ckpt['prev_train_data'], maxlen=CONFIG.MEMORY_SIZE)
+                print(f"Loaded prev_train_data with {len(self.memory)} transitions")
 
             self.steps = ckpt.get('steps', 0)
             self.episode_count = ckpt.get('episode_count', 0)
@@ -607,6 +612,8 @@ class TD3Agent:
 
     def save_model(self):
         CONFIG.MODEL_PATH.mkdir(parents=True, exist_ok=True)
+
+        prev_train_data = list(self.memory.buffer)[-CONFIG.START_TRAIN_SIZE:]
         torch.save({
             'actor': self.actor.state_dict(),
             'critic': self.critic.state_dict(),
@@ -620,6 +627,7 @@ class TD3Agent:
             'episode_count': self.episode_count,
             'episode_rewards': self.episode_rewards,
             'scaler': self.scaler.state_dict(),
+            'prev_train_data': prev_train_data,
         }, CONFIG.MODEL_PATH / "td3_minesweeper.pth")
         print(f"Model saved, steps: {self.steps}, episodes: {self.episode_count}")
         
