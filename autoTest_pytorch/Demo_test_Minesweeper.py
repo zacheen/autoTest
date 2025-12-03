@@ -250,10 +250,11 @@ class Game_test_case(unittest.TestCase) :
         
         while True:
             time.sleep(1)
-            if game_status.game_over or Tool_Main.glo_var.fail_playing:
-                Tool_Main.glo_var.NOISE_PROB = game_status.negative_reward / \
+            if (game_status.game_over == 1) or Tool_Main.glo_var.fail_playing:
+                non_noise_prob = game_status.positive_reward / \
                     (game_status.positive_reward + game_status.negative_reward)
-                Tool_Main.glo_var.NOISE_PROB /= 2
+                non_noise_prob /= 2
+                Tool_Main.glo_var.NOISE_PROB = 1-non_noise_prob
                 print("Tool_Main.glo_var.NOISE_PROB :", Tool_Main.glo_var.NOISE_PROB)
             if game_status.game_over :
                 self.assertTrue(True, "game_over(really finish the game)")
