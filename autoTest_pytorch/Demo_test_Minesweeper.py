@@ -272,7 +272,6 @@ class Game_test_case(unittest.TestCase) :
         game_status.negative_reward = 0
         game_status.init_positive_reward = 8
         if Tool_Main.glo_var.round_count > 30 and (random.random() > Tool_Main.glo_var.NOISE_PROB):
-            print("This round no noise precise click")
             game_status.noise = False
         else:
             game_status.noise = True

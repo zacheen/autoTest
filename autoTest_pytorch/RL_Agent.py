@@ -56,7 +56,7 @@ class Config:
     if DISCRETE :
         NOISE_CLIP = 0.05
         NOISE_PROB = 0.8
-        ACTION_REG_COEF = 0.02
+        ACTION_REG_COEF = 0.03
 
     # Action logging
     LOG_ACTIONS = True
