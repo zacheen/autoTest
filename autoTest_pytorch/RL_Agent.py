@@ -748,11 +748,6 @@ class TD3Agent:
             self.scaler.scale(actor_loss).backward()
             self.scaler.unscale_(self.actor_optimizer)
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
-            
-            # ====== 記錄梯度（在 optimizer.step 之前）======
-            if self.steps % CONFIG.LOG_ACTIVATIONS_INTERVAL == 0:
-                self.log_gradients_to_tensorboard()
-            
             self.scaler.step(self.actor_optimizer)
             self.scaler.update()
             
@@ -763,28 +758,11 @@ class TD3Agent:
             self._soft_update(self.actor, self.actor_target)
             self._soft_update(self.critic, self.critic_target)
 
-        # ====== TensorBoard 記錄 ======
-        if self.steps % CONFIG.LOG_ACTIVATIONS_INTERVAL == 0:
-            # 用單張圖片觸發 forward 來記錄 activations
-            with torch.no_grad():
-                sample_state = state[:1]  # 取一張
-                _ = self.actor(sample_state)
-                self.log_activations_to_tensorboard()
-                self.log_weights_to_tensorboard()
-            
-            # 記錄訓練指標
-            self.writer.add_scalar('train/critic_loss', critic_loss_val, self.steps)
-            if actor_loss_val is not None:
-                self.writer.add_scalar('train/actor_loss', actor_loss_val, self.steps)
-            self.writer.add_scalar('train/q_mean', q_mean, self.steps)
-            self.writer.add_scalar('train/q_std', q_std, self.steps)
-            self.writer.flush()
-
         # Step schedulers
         self.actor_scheduler.step()
         self.critic_scheduler.step()
 
-        # 記錄每步數據
+        # 記錄每步數據到 CSV
         latest_action = batch.action[-1] if batch.action else None
         latest_reward = batch.reward[-1] if batch.reward else 0
         self._log_step(critic_loss_val, actor_loss_val, q_mean, q_std, latest_reward, latest_action)
@@ -810,15 +788,45 @@ class TD3Agent:
     def save_model(self):
         CONFIG.MODEL_PATH.mkdir(parents=True, exist_ok=True)
 
+        # ====== TensorBoard 記錄 ======
+        # 需要一張 sample state 來觸發 forward，記錄 activations
+        if len(self.memory) > 0:
+            sample_state = self.memory.buffer[-1].state.to(DEVICE).float()
+            with torch.no_grad():
+                _ = self.actor(sample_state)
+                self.log_activations_to_tensorboard()
+            self.log_weights_to_tensorboard()
+        
+        # 記錄訓練指標（從最近的 step log 取得）
+        if CONFIG.STEP_LOG_FILE.exists():
+            try:
+                with open(CONFIG.STEP_LOG_FILE, 'r') as f:
+                    lines = f.readlines()
+                    if len(lines) > 1:  # 有 header + 至少一筆資料
+                        last_line = lines[-1].strip().split(',')
+                        critic_loss = float(last_line[3]) if last_line[3] else 0
+                        actor_loss = float(last_line[4]) if last_line[4] else None
+                        q_mean = float(last_line[5]) if last_line[5] else 0
+                        q_std = float(last_line[6]) if last_line[6] else 0
+                        
+                        self.writer.add_scalar('train/critic_loss', critic_loss, self.steps)
+                        if actor_loss is not None:
+                            self.writer.add_scalar('train/actor_loss', actor_loss, self.steps)
+                        self.writer.add_scalar('train/q_mean', q_mean, self.steps)
+                        self.writer.add_scalar('train/q_std', q_std, self.steps)
+            except Exception as e:
+                print(f"Error reading step log for TensorBoard: {e}")
+
+        # ====== 存檔 ======
         if len(self.memory) > CONFIG.START_TRAIN_SIZE:
             batch = self.memory.sample(CONFIG.START_TRAIN_SIZE, include_latest=False)
-            # 轉換回 list of Transition 格式
             prev_train_data = [
                 Transition(s, a, ns, r, d) 
                 for s, a, ns, r, d in zip(batch.state, batch.action, batch.next_state, batch.reward, batch.done)
             ]
         else:
             prev_train_data = list(self.memory.buffer)
+        
         torch.save({
             'actor': self.actor.state_dict(),
             'critic': self.critic.state_dict(),
@@ -835,6 +843,7 @@ class TD3Agent:
             'prev_train_data': prev_train_data,
         }, CONFIG.MODEL_PATH / "td3_minesweeper.pth")
         print(f"Model saved, steps: {self.steps}, episodes: {self.episode_count}")
+        
         self.writer.flush()
         
         # 更新訓練曲線圖
