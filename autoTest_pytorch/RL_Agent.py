@@ -113,13 +113,10 @@ class ReplayBuffer:
                 continue
 
             if len(group) >= count:
-                # Enough samples, sample without replacement
                 sampled_transitions.extend(random.sample(group, count))
             else:
-                # Not enough samples, sample with replacement
                 sampled_transitions.extend(random.choices(group, k=count))
         
-        # Shuffle the combined batch
         random.shuffle(sampled_transitions)
         return Transition(*zip(*sampled_transitions))
 
@@ -145,12 +142,9 @@ class Actor(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(self.encoder.output_size, 256),
             nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
+            nn.Linear(256, 128), nn.ReLU(),
+            nn.Linear(128, 128), nn.ReLU(),
+            nn.Linear(128, 128), nn.ReLU(),
         )
         self.output_layer = nn.Linear(128, 2)
         self._init_output_layer()
@@ -174,24 +168,18 @@ class Critic(nn.Module):
         self.q1_fc = nn.Sequential(
             nn.Linear(self.encoder.output_size + 2, 256),
             nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
+            nn.Linear(256, 128), nn.ReLU(),
+            nn.Linear(128, 128), nn.ReLU(),
+            nn.Linear(128, 128), nn.ReLU(),
         )
         self.q1_out = nn.Linear(128, 1)
         
         self.q2_fc = nn.Sequential(
             nn.Linear(self.encoder.output_size + 2, 256),
             nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
+            nn.Linear(256, 128), nn.ReLU(),
+            nn.Linear(128, 128), nn.ReLU(),
+            nn.Linear(128, 128), nn.ReLU(),
         )
         self.q2_out = nn.Linear(128, 1)
         
@@ -575,7 +563,7 @@ class TD3Agent:
         draw.text((20, legend_y + 15 - 7), "Final (with noise)", fill='white', font=font)
         
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"step_{step_count:04d}_{timestamp}.png"
+        filename = f"{timestamp}_step_{step_count:04d}.png"
         img.save(CONFIG.ACTION_LOG_PATH / filename)
         print(f"Action log saved: {filename}")
 
@@ -636,7 +624,6 @@ class TD3Agent:
             print(f"[GPU {tag}] Allocated: {allocated:.1f}MB, Reserved: {reserved:.1f}MB")
     
     def train_step(self) -> dict:
-        # self.log_gpu_memory("Start Train")
         if len(self.memory) < CONFIG.START_TRAIN_SIZE:
             return None
 

@@ -26,7 +26,6 @@ def check_pause():
 
 import HTMLTestRun
 import Tool_Main
-# from Card import Card
 from Gf_Except import Game_fail_Exception
 
 from Minesweeper.Minesweeper_manager import Minesweeper_manager
@@ -38,9 +37,7 @@ class Minesweeper_Begin_thread (Thread):
 
     def run(self) :    
         pass
-        # Tool_Main.cut_pic_data("player_money_bef", Tool_Main.glo_var.player_num, Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len, cover=False)
 
-# 初始化 遊戲結束要執行的 Thread
 class Minesweeper_End_thread (Thread):
     def __init__(self):
         Thread.__init__(self)
