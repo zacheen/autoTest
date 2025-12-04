@@ -309,7 +309,7 @@ class Game_test_case(unittest.TestCase) :
 
                 # 檢查輸了
                 if Tool_Main.compare_sim("lose", sys._getframe().f_code.co_name, precise=True) >= 0.9:
-                    game_status.reward = -5.0
+                    game_status.reward = -8.0
                     game_status.game_over = 1
                     print("💥 踩到地雷！")
                 

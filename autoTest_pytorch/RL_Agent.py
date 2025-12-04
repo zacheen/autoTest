@@ -49,13 +49,14 @@ class Config:
     POLICY_DELAY = 2  # delayed actor update
 
     # Regularization
-    ACTION_REG_COEF = 0.1  # Penalty for large actions
+    ACTION_REG_COEF = 0.1   # if hoping Model output be close to 0
     REWARD_SCALE = 0.1      # Scale rewards to keep gradients stable
 
     DISCRETE = True
     if DISCRETE :
         NOISE_CLIP = 0.05
         NOISE_PROB = 0.8
+        ACTION_REG_COEF = 0.02
 
     # Action logging
     LOG_ACTIONS = True
