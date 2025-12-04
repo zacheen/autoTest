@@ -17,6 +17,8 @@ import gc
 import csv
 import datetime
 import matplotlib.pyplot as plt
+from torch.utils.tensorboard import SummaryWriter
+import atexit
 
 # ==================== Config ====================
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -61,6 +63,9 @@ class Config:
     # Action logging
     LOG_ACTIONS = True
     ACTION_LOG_PATH = Path("./rl_models/action_logs")
+
+    TENSORBOARD_LOG_DIR = Path("./rl_models/tensorboard_logs")
+    LOG_ACTIVATIONS_INTERVAL = 10
 
     # Model persistence
     MODEL_PATH = Path("./rl_models")
@@ -354,7 +359,102 @@ class TD3Agent:
         # Mixed Precision Scaler
         self.scaler = torch.cuda.amp.GradScaler()
 
+        # TensorBoard
+        self.writer = SummaryWriter(CONFIG.TENSORBOARD_LOG_DIR)
+        atexit.register(self.close)
+        
+        # Activation hooks
+        self.activations = {}
+        self._register_hooks()
+
         self._try_load_model()
+
+    def _register_hooks(self):
+        """註冊 forward hooks 來捕捉 activations"""
+        
+        def get_activation(name):
+            def hook(module, input, output):
+                self.activations[name] = output.detach()
+            return hook
+        
+        # Actor hooks
+        self.actor.encoder.resnet.layer4.register_forward_hook(
+            get_activation('actor/resnet_layer4')
+        )
+        self.actor.encoder.register_forward_hook(
+            get_activation('actor/encoder_out')
+        )
+        
+        # 為 fc Sequential 中的每層註冊 hook
+        for i, layer in enumerate(self.actor.fc):
+            layer.register_forward_hook(
+                get_activation(f'actor/fc_{i}_{layer.__class__.__name__}')
+            )
+        
+        self.actor.output_layer.register_forward_hook(
+            get_activation('actor/output_layer_pre_tanh')
+        )
+        
+        # Critic hooks (可選)
+        self.critic.encoder.register_forward_hook(
+            get_activation('critic/encoder_out')
+        )
+
+    def log_activations_to_tensorboard(self):
+        """記錄 activations 到 TensorBoard"""
+        for name, activation in self.activations.items():
+            # 記錄直方圖
+            self.writer.add_histogram(
+                f'activations/{name}', 
+                activation.cpu().flatten(), 
+                self.steps
+            )
+            
+            # 記錄統計數據
+            self.writer.add_scalar(
+                f'activation_stats/{name}_mean', 
+                activation.mean().item(), 
+                self.steps
+            )
+            self.writer.add_scalar(
+                f'activation_stats/{name}_std', 
+                activation.std().item(), 
+                self.steps
+            )
+            
+            # 檢查死神經元（ReLU 後全為 0 的比例）
+            if 'ReLU' in name:
+                dead_ratio = (activation == 0).float().mean().item()
+                self.writer.add_scalar(
+                    f'activation_stats/{name}_dead_ratio', 
+                    dead_ratio, 
+                    self.steps
+                )
+
+    def log_weights_to_tensorboard(self):
+        """記錄權重到 TensorBoard"""
+        for name, param in self.actor.named_parameters():
+            if 'weight' in name:
+                self.writer.add_histogram(f'weights/actor/{name}', param.cpu(), self.steps)
+        
+        for name, param in self.critic.named_parameters():
+            if 'weight' in name:
+                self.writer.add_histogram(f'weights/critic/{name}', param.cpu(), self.steps)
+
+    def log_gradients_to_tensorboard(self):
+        """記錄梯度到 TensorBoard"""
+        for name, param in self.actor.named_parameters():
+            if param.grad is not None and 'weight' in name:
+                self.writer.add_histogram(
+                    f'gradients/actor/{name}', 
+                    param.grad.cpu(), 
+                    self.steps
+                )
+
+    def close(self):
+        """關閉 TensorBoard writer"""
+        self.writer.flush()  # ← 加這行
+        self.writer.close()
 
     def _init_log_files(self):
         """Initialize CSV log files with headers."""
@@ -621,7 +721,6 @@ class TD3Agent:
             current_q1, current_q2 = self.critic(state, action)
             critic_loss = F.mse_loss(current_q1, target) + F.mse_loss(current_q2, target)
         
-        # 記錄 Q 值統計
         q_mean = current_q1.mean().item()
         q_std = current_q1.std().item()
         
@@ -642,8 +741,6 @@ class TD3Agent:
         if self.steps % CONFIG.POLICY_DELAY == 0:
             with torch.cuda.amp.autocast():
                 actor_output = self.actor(state)
-                # Actor Loss = -Q_value + Regularization
-                # We want to maximize Q (minimize -Q) and minimize action magnitude
                 actor_loss = -self.critic.q1_forward(state, actor_output).mean()
                 actor_loss += CONFIG.ACTION_REG_COEF * (actor_output ** 2).mean()
             
@@ -651,6 +748,11 @@ class TD3Agent:
             self.scaler.scale(actor_loss).backward()
             self.scaler.unscale_(self.actor_optimizer)
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+            
+            # ====== 記錄梯度（在 optimizer.step 之前）======
+            if self.steps % CONFIG.LOG_ACTIVATIONS_INTERVAL == 0:
+                self.log_gradients_to_tensorboard()
+            
             self.scaler.step(self.actor_optimizer)
             self.scaler.update()
             
@@ -660,6 +762,23 @@ class TD3Agent:
             
             self._soft_update(self.actor, self.actor_target)
             self._soft_update(self.critic, self.critic_target)
+
+        # ====== TensorBoard 記錄 ======
+        if self.steps % CONFIG.LOG_ACTIVATIONS_INTERVAL == 0:
+            # 用單張圖片觸發 forward 來記錄 activations
+            with torch.no_grad():
+                sample_state = state[:1]  # 取一張
+                _ = self.actor(sample_state)
+                self.log_activations_to_tensorboard()
+                self.log_weights_to_tensorboard()
+            
+            # 記錄訓練指標
+            self.writer.add_scalar('train/critic_loss', critic_loss_val, self.steps)
+            if actor_loss_val is not None:
+                self.writer.add_scalar('train/actor_loss', actor_loss_val, self.steps)
+            self.writer.add_scalar('train/q_mean', q_mean, self.steps)
+            self.writer.add_scalar('train/q_std', q_std, self.steps)
+            self.writer.flush()
 
         # Step schedulers
         self.actor_scheduler.step()
@@ -716,6 +835,7 @@ class TD3Agent:
             'prev_train_data': prev_train_data,
         }, CONFIG.MODEL_PATH / "td3_minesweeper.pth")
         print(f"Model saved, steps: {self.steps}, episodes: {self.episode_count}")
+        self.writer.flush()
         
         # 更新訓練曲線圖
         self._plot_training_curves()
