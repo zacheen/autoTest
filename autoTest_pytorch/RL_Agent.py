@@ -503,23 +503,11 @@ class TD3Agent:
         img_array = (img_array * 255).astype(np.uint8)
         img_array = img_array.transpose(1, 2, 0)
         img = Image.fromarray(img_array)
-        
-        img_w, img_h = img.size
-        
-        raw_norm = (log_info['raw_action'] + 1) / 2.0
-        raw_img_x = int(raw_norm[0] * img_w)
-        raw_img_y = int(raw_norm[1] * img_h)
-        
-        final_norm = (log_info['final_action'] + 1) / 2.0
-        final_img_x = int(final_norm[0] * img_w)
-        final_img_y = int(final_norm[1] * img_h)
-        
         draw = ImageDraw.Draw(img)
         
-        try:
-            font = ImageFont.truetype("arial.ttf", 12)
-        except:
-            font = ImageFont.load_default()
+        img_w, img_h = img.size
+        raw_img_x, raw_img_y = self.action_to_coords(log_info['raw_action'], img_w, img_h)
+        final_img_x, final_img_y = self.action_to_coords(log_info['final_action'], img_w, img_h)
         
         radius = 5
         draw.ellipse([raw_img_x - radius, raw_img_y - radius, 
@@ -551,6 +539,10 @@ class TD3Agent:
             text_lines.append(f"Reward: {reward:.1f}")
         
         text_y = 5
+        try:
+            font = ImageFont.truetype("arial.ttf", 12)
+        except:
+            font = ImageFont.load_default()
         for line in text_lines:
             bbox = draw.textbbox((5, text_y), line, font=font)
             draw.rectangle(bbox, fill='black')
@@ -568,11 +560,18 @@ class TD3Agent:
         img.save(CONFIG.ACTION_LOG_PATH / filename)
         print(f"Action log saved: {filename}")
 
-    def action_to_screen_coords(self, action: np.ndarray) -> tuple:
-        norm_action = (action + 1) / 2.0
-        x = int(self.screen_left + norm_action[0] * self.screen_width)
-        y = int(self.screen_top + norm_action[1] * self.screen_height)
+    def action_to_normalized(self, action: np.ndarray) -> np.ndarray:
+        """Convert action from [-1, 1] to [0, 1] normalized coordinates."""
+        return (action + 1) / 2.0
+
+    def action_to_coords(self, action: np.ndarray, width, height, left = 0, top = 0) -> tuple:
+        norm_action = self.action_to_normalized(action)
+        x = int(left + norm_action[0] * width)
+        y = int(top + norm_action[1] * height)
         return x, y
+
+    def action_to_screen_coords(self, action: np.ndarray) -> tuple:
+        return self.action_to_coords(action, self.screen_width, self.screen_height, self.screen_left, self.screen_top)
 
     def store_transition(self, state, action, next_state, reward, done):
         # Scale reward for training stability
