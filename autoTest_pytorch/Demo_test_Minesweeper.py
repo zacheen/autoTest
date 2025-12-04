@@ -7,6 +7,22 @@ import sys
 import time
 import traceback
 import pyautogui
+from pynput import keyboard
+
+IS_PAUSED = False
+def on_press(key):
+    global IS_PAUSED
+    if key == keyboard.Key.end:
+        IS_PAUSED = not IS_PAUSED
+        if IS_PAUSED:
+            print("\n[PAUSED] Press 'End' to resume...")
+        else:
+            print("\n[RESUMED]")
+
+def check_pause():
+    global IS_PAUSED
+    while IS_PAUSED:
+        time.sleep(0.1)
 
 import HTMLTestRun
 import Tool_Main
@@ -146,6 +162,7 @@ class Game_test_case(unittest.TestCase) :
         Tool_Main.glo_var.s_record_time()
         # looping until find a position that is in the game_region
         while True :
+            check_pause()
             # 1. 截取當前畫面
             game_status.save_pic_path = Tool_Main.cut_pic_data(
                 "whole_screen", 
@@ -219,7 +236,7 @@ class Game_test_case(unittest.TestCase) :
 
             # Since might due to unexpected reason, we are not able to keep playing the game
             # EX: cover by other window, the game crush or close ...
-            self.max_steps = 10
+            self.max_steps = 20
             self.step_count = 0 # can I use the step in agent??
 
             self.game_over = 0 # Since this will pass into the model, and 0 represents not game over, 1 represents game over
@@ -249,6 +266,7 @@ class Game_test_case(unittest.TestCase) :
         time.sleep(UI_waiting_time)
         
         while True:
+            check_pause()
             time.sleep(1)
             if (game_status.game_over == 1) or Tool_Main.glo_var.fail_playing:
                 non_noise_prob = game_status.positive_reward / \
@@ -358,6 +376,10 @@ player_num = 1
 next_wait_time = 60
 
 if __name__=="__main__" : 
+    # Start keyboard listener
+    listener = keyboard.Listener(on_press=on_press)
+    listener.start()
+
     print("完成import全部東西 開始執行 Main")
     # round_count 記數 (用來記現在跑到第幾回合)  (只要程式哪裡有問題或跳error 就要reset Glo_var 的 round_count)
     round_count = 1
@@ -431,7 +453,7 @@ if __name__=="__main__" :
             runner.run(during_gameing)
             fp.close()
         
-        sleep_time = 20
+        sleep_time = 3
         if Tool_Main.glo_var.fail_playing :
             Tool_Main.report_error(round_count)
             game_only_var.mine.thread_stop()
