@@ -150,7 +150,7 @@ class Actor(nn.Module):
         self._init_output_layer()
     
     def _init_output_layer(self):
-        nn.init.uniform_(self.output_layer.weight, -0.003, 0.003)
+        nn.init.xavier_uniform_(self.output_layer.weight)
         nn.init.constant_(self.output_layer.bias, 0.0)
     
     def forward(self, state):
@@ -187,7 +187,7 @@ class Critic(nn.Module):
     
     def _init_output_layers(self):
         for out_layer in [self.q1_out, self.q2_out]:
-            nn.init.uniform_(out_layer.weight, -0.001, 0.001)
+            nn.init.xavier_uniform_(out_layer.weight)
             nn.init.zeros_(out_layer.bias)
 
     def forward(self, state, action):
