@@ -174,7 +174,7 @@ class Game_test_case(unittest.TestCase) :
             current_screenshot = game_status.agent.preprocess_screen(screenshot_path)
         
             # 3. 選擇動作 (輸出 [0,1] 範圍的 x, y)
-            action, log_info = game_status.agent.select_action_with_log(
+            action, log_info = game_status.agent.select_action(
                 current_screenshot, 
                 add_noise=game_status.noise
             )

@@ -423,60 +423,25 @@ class TD3Agent:
         tensor = torch.tensor(arr, dtype=torch.float32).unsqueeze(0)
         return tensor
 
-    def select_action(self, state: torch.Tensor, add_noise: bool = True) -> np.ndarray:
-        """Return an (x, y) action in [-1, 1]."""
-        if torch.isnan(state).any():
-            print("WARNING: NaN detected in state tensor. Returning random action.")
-            return np.random.uniform(-1, 1, size=2)
-
-        with torch.no_grad():
-            action = self.actor(state.to(DEVICE)).cpu().numpy().squeeze()
-        
-        if np.isnan(action).any():
-            print("WARNING: NaN detected in actor output. Returning random action.")
-            return np.random.uniform(-1, 1, size=2)
-
-        if add_noise:
-            # DISCRETE should have a higher possibility of no noise, so that it would know the action is correct or not
-            if CONFIG.DISCRETE and (random.random() > CONFIG.NOISE_PROB):
-                print("<No noise precise click>")
-            else:
-                noise = np.random.normal(0, CONFIG.NOISE_STD, size=2)
-                action = action + noise
-                action = np.clip(action, -1.0, 1.0)
-        return action
-
-    def select_action_with_log(self, state: torch.Tensor, add_noise: bool = True) -> tuple:
+    def select_action(self, state: torch.Tensor, add_noise: bool = True) -> tuple:
         """
         Return action and log info.
         Returns: (final_action, log_info)
         """
-        if torch.isnan(state).any():
-            print("WARNING: NaN detected in state tensor. Returning random action.")
-            random_action = np.random.uniform(-1, 1, size=2)
-            return random_action, None
-
         with torch.no_grad():
             raw_action = self.actor(state.to(DEVICE)).cpu().numpy().squeeze()
-        
-        if np.isnan(raw_action).any():
-            print("WARNING: NaN detected in actor output. Returning random action.")
-            random_action = np.random.uniform(-1, 1, size=2)
-            return random_action, None
 
         raw_coords = self.action_to_screen_coords(raw_action)
         
         final_action = raw_action.copy()
         noise_applied = False
-        
-        if add_noise:
-            if CONFIG.DISCRETE and (random.random() > CONFIG.NOISE_PROB):
-                print("<No noise precise click>")
-            else:
-                noise = np.random.normal(0, CONFIG.NOISE_STD, size=2)
-                final_action = raw_action + noise
-                final_action = np.clip(final_action, -1.0, 1.0)
-                noise_applied = True
+        if not add_noise or (CONFIG.DISCRETE and (random.random() > CONFIG.NOISE_PROB)):
+            print("<No noise precise click>")
+        else:
+            noise = np.random.normal(0, CONFIG.NOISE_STD, size=2)
+            final_action = raw_action + noise
+            final_action = np.clip(final_action, -1.0, 1.0)
+            noise_applied = True
         
         final_coords = self.action_to_screen_coords(final_action)
         
