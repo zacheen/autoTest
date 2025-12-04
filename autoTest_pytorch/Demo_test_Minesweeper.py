@@ -177,20 +177,37 @@ class Game_test_case(unittest.TestCase) :
             current_screenshot = game_status.agent.preprocess_screen(screenshot_path)
         
             # 3. 選擇動作 (輸出 [0,1] 範圍的 x, y)
-            action = game_status.agent.select_action(current_screenshot, add_noise=game_status.noise)
+            action, log_info = game_status.agent.select_action_with_log(
+                current_screenshot, 
+                add_noise=game_status.noise
+            )
             game_status.update_state(current_screenshot, action)
+            game_status.log_info = log_info
         
             # 4. 轉換為螢幕座標並點擊
             click_x, click_y = game_status.agent.action_to_screen_coords(action)
             print(f"Step {game_status.step_count}: action=({action[0]:.3f}, {action[1]:.3f}) -> ", end="")
             
-            if Tool_Main.click((click_x, click_y), limit_region=game_status.game_region) :
+            if Tool_Main.click((click_x, click_y), limit_region=game_status.game_region):
+                game_status.agent.log_action_image(
+                    current_screenshot, 
+                    log_info, 
+                    game_status.step_count
+                )
                 break
 
             # if click position is out of game_region
             # really negitive reward and keep looping
             print("Model decided to click in invalid position")
             game_status.reward = -12.0
+            
+            game_status.agent.log_action_image(
+                current_screenshot, 
+                log_info, 
+                game_status.step_count,
+                reward=game_status.reward
+            )
+            
             self.update_model(game_status)
 
     def update_model(self, game_status):
@@ -221,7 +238,7 @@ class Game_test_case(unittest.TestCase) :
     class Game_status():
         def __init__(self):
             # regions (left, top, width, height)
-            screen_region = (0, 0, 1920, 1080) # the size of the screen
+            screen_region = (0, 0, 1920, 1020) # the size of the screen
             # region limitation [(st_x,st_1,len_n,len_y), have to be inside or outside]
             self.game_region = [((1, 31, 1919, 987), True), ((713, 32, 498, 45), False)]
             
@@ -233,6 +250,7 @@ class Game_test_case(unittest.TestCase) :
             self.previous_action = None
             self.current_pic = None
             self.action = None
+            self.log_info = None
 
             # Since might due to unexpected reason, we are not able to keep playing the game
             # EX: cover by other window, the game crush or close ...

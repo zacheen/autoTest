@@ -57,6 +57,10 @@ class Config:
         NOISE_CLIP = 0.05
         NOISE_PROB = 0.8
 
+    # Action logging
+    LOG_ACTIONS = True
+    ACTION_LOG_PATH = Path("./rl_models/action_logs")
+
     # Model persistence
     MODEL_PATH = Path("./rl_models")
     STEP_LOG_FILE = Path("./rl_models/step_log.csv")        # 每步記錄
@@ -452,6 +456,128 @@ class TD3Agent:
                 action = action + noise
                 action = np.clip(action, -1.0, 1.0)
         return action
+
+    def select_action_with_log(self, state: torch.Tensor, add_noise: bool = True) -> tuple:
+        """
+        Return action and log info.
+        Returns: (final_action, log_info)
+        """
+        if torch.isnan(state).any():
+            print("WARNING: NaN detected in state tensor. Returning random action.")
+            random_action = np.random.uniform(-1, 1, size=2)
+            return random_action, None
+
+        with torch.no_grad():
+            raw_action = self.actor(state.to(DEVICE)).cpu().numpy().squeeze()
+        
+        if np.isnan(raw_action).any():
+            print("WARNING: NaN detected in actor output. Returning random action.")
+            random_action = np.random.uniform(-1, 1, size=2)
+            return random_action, None
+
+        raw_coords = self.action_to_screen_coords(raw_action)
+        
+        final_action = raw_action.copy()
+        noise_applied = False
+        
+        if add_noise:
+            if CONFIG.DISCRETE and (random.random() > CONFIG.NOISE_PROB):
+                print("<No noise precise click>")
+            else:
+                noise = np.random.normal(0, CONFIG.NOISE_STD, size=2)
+                final_action = raw_action + noise
+                final_action = np.clip(final_action, -1.0, 1.0)
+                noise_applied = True
+        
+        final_coords = self.action_to_screen_coords(final_action)
+        
+        log_info = {
+            'raw_action': raw_action,
+            'final_action': final_action,
+            'raw_coords': raw_coords,
+            'final_coords': final_coords,
+            'noise_applied': noise_applied
+        }
+        
+        return final_action, log_info
+
+    def log_action_image(self, state: torch.Tensor, log_info: dict, step_count: int, reward: float = None):
+        """Save state image with action markers."""
+        if not CONFIG.LOG_ACTIONS or log_info is None:
+            return
+        
+        from PIL import ImageDraw, ImageFont
+        
+        CONFIG.ACTION_LOG_PATH.mkdir(parents=True, exist_ok=True)
+        
+        img_array = state.squeeze(0).cpu().numpy()
+        img_array = (img_array * 255).astype(np.uint8)
+        img_array = img_array.transpose(1, 2, 0)
+        img = Image.fromarray(img_array)
+        
+        img_w, img_h = img.size
+        
+        raw_norm = (log_info['raw_action'] + 1) / 2.0
+        raw_img_x = int(raw_norm[0] * img_w)
+        raw_img_y = int(raw_norm[1] * img_h)
+        
+        final_norm = (log_info['final_action'] + 1) / 2.0
+        final_img_x = int(final_norm[0] * img_w)
+        final_img_y = int(final_norm[1] * img_h)
+        
+        draw = ImageDraw.Draw(img)
+        
+        try:
+            font = ImageFont.truetype("arial.ttf", 12)
+        except:
+            font = ImageFont.load_default()
+        
+        radius = 5
+        draw.ellipse([raw_img_x - radius, raw_img_y - radius, 
+                      raw_img_x + radius, raw_img_y + radius], 
+                     fill='red', outline='darkred')
+        
+        draw.ellipse([final_img_x - radius, final_img_y - radius,
+                      final_img_x + radius, final_img_y + radius],
+                     fill='purple', outline='darkviolet')
+        
+        if log_info['noise_applied']:
+            draw.line([raw_img_x, raw_img_y, final_img_x, final_img_y], 
+                      fill='yellow', width=1)
+        
+        raw_action = log_info['raw_action']
+        final_action = log_info['final_action']
+        raw_coords = log_info['raw_coords']
+        final_coords = log_info['final_coords']
+        
+        text_lines = [
+            f"Step: {step_count}",
+            f"Raw tanh: ({raw_action[0]:.4f}, {raw_action[1]:.4f})",
+            f"Raw screen: ({raw_coords[0]}, {raw_coords[1]})",
+            f"Final tanh: ({final_action[0]:.4f}, {final_action[1]:.4f})",
+            f"Final screen: ({final_coords[0]}, {final_coords[1]})",
+            f"Noise: {'Yes' if log_info['noise_applied'] else 'No'}",
+        ]
+        if reward is not None:
+            text_lines.append(f"Reward: {reward:.1f}")
+        
+        text_y = 5
+        for line in text_lines:
+            bbox = draw.textbbox((5, text_y), line, font=font)
+            draw.rectangle(bbox, fill='black')
+            draw.text((5, text_y), line, fill='white', font=font)
+            text_y += 15
+        
+        legend_y = img_h - 40
+        draw.ellipse([10 - 4, legend_y - 4, 10 + 4, legend_y + 4], fill='red')
+        draw.text((20, legend_y - 7), "Raw (no noise)", fill='white', font=font)
+        draw.ellipse([10 - 4, legend_y + 15 - 4, 10 + 4, legend_y + 15 + 4], fill='purple')
+        draw.text((20, legend_y + 15 - 7), "Final (with noise)", fill='white', font=font)
+        
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"step_{step_count:04d}_{timestamp}.png"
+        img.save(CONFIG.ACTION_LOG_PATH / filename)
+        print(f"Action log saved: {filename}")
 
     def action_to_screen_coords(self, action: np.ndarray) -> tuple:
         norm_action = (action + 1) / 2.0
