@@ -187,8 +187,9 @@ class TD3Agent:
 
     def train_step(self):
         if self.replay_buffer.size() < BATCH_SIZE:
+            print("Not enough data in replay buffer, size: ", self.replay_buffer.size())
             return None
-
+        print("Training step")
         self.total_it += 1
 
         # Sample replay buffer
@@ -276,32 +277,33 @@ class TD3Agent:
         pass
 
     def save_model(self):
-        if not os.path.exists('models'):
-            os.makedirs('models')
-        torch.save(self.actor.state_dict(), 'models/actor.pth')
-        torch.save(self.critic_1.state_dict(), 'models/critic_1.pth')
-        torch.save(self.critic_2.state_dict(), 'models/critic_2.pth')
+        print("Saving model")
+        if not os.path.exists('./models'):
+            os.makedirs('./models')
+        torch.save(self.actor.state_dict(), './models/actor.pth')
+        torch.save(self.critic_1.state_dict(), './models/critic_1.pth')
+        torch.save(self.critic_2.state_dict(), './models/critic_2.pth')
 
     def try_load_model(self):
-        if os.path.exists('models/actor.pth'):
+        if os.path.exists('./models/actor.pth'):
             try:
-                self.actor.load_state_dict(torch.load('models/actor.pth'))
+                self.actor.load_state_dict(torch.load('./models/actor.pth'))
                 self.actor_target.load_state_dict(self.actor.state_dict())
                 print("Loaded Actor model")
             except:
                 print("Failed to load Actor model")
         
-        if os.path.exists('models/critic_1.pth'):
+        if os.path.exists('./models/critic_1.pth'):
             try:
-                self.critic_1.load_state_dict(torch.load('models/critic_1.pth'))
+                self.critic_1.load_state_dict(torch.load('./models/critic_1.pth'))
                 self.critic_1_target.load_state_dict(self.critic_1.state_dict())
                 print("Loaded Critic 1 model")
             except:
                 print("Failed to load Critic 1 model")
 
-        if os.path.exists('models/critic_2.pth'):
+        if os.path.exists('./models/critic_2.pth'):
             try:
-                self.critic_2.load_state_dict(torch.load('models/critic_2.pth'))
+                self.critic_2.load_state_dict(torch.load('./models/critic_2.pth'))
                 self.critic_2_target.load_state_dict(self.critic_2.state_dict())
                 print("Loaded Critic 2 model")
             except:
@@ -320,6 +322,9 @@ class TD3Agent:
         
         self.replay_buffer.store(state_cpu, action, next_state_cpu, reward, done)
 
-
-def get_agent(screen_region):
-    return TD3Agent(screen_region)
+_agent = None
+def get_agent(screen_region: tuple = None) -> TD3Agent:
+    global _agent
+    if _agent is None:
+        _agent = TD3Agent(screen_region)
+    return _agent
