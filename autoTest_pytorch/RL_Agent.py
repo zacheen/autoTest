@@ -33,7 +33,7 @@ class Config:
 
     # Training parameters
     BATCH_SIZE = 24 # my device can accept 64, but too slow
-    START_TRAIN_SIZE = 100
+    START_TRAIN_SIZE = 10 # for testing # normal : 100
     MEMORY_SIZE = 1000
     EPISODE_MAX_LEN = 300
     GAMMA = 0.99
@@ -772,7 +772,7 @@ class TD3Agent:
         gc.collect()
         torch.cuda.empty_cache()
 
-        if self.steps % CONFIG.SAVE_INTERVAL == CONFIG.SAVE_INTERVAL - 1:
+        if (self.steps % CONFIG.SAVE_INTERVAL) == 1:
             self.save_model()
 
         return {'critic_loss': critic_loss_val, 'actor_loss': actor_loss_val, 'q_mean': q_mean}
