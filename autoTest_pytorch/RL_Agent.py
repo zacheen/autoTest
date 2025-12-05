@@ -147,17 +147,23 @@ class Actor(nn.Module):
         self.encoder = ResNetEncoder()
         self.fc = nn.Sequential(
             nn.Linear(self.encoder.output_size, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128), nn.ReLU(),
-            nn.Linear(128, 128), nn.ReLU(),
-            nn.Linear(128, 128), nn.ReLU(),
+            nn.LeakyReLU(0.01),
+            nn.Linear(256, 128), nn.LeakyReLU(0.01),
+            nn.Linear(128, 128), nn.LeakyReLU(0.01),
         )
         self.output_layer = nn.Linear(128, 2)
+        self._init_weights()
         self._init_output_layer()
     
     def _init_output_layer(self):
-        nn.init.xavier_uniform_(self.output_layer.weight)
-        nn.init.constant_(self.output_layer.bias, 0.0)
+        nn.init.uniform_(self.output_layer.weight, -3e-3, 3e-3)
+        nn.init.constant_(self.output_layer.bias, 0.01)
+
+    def _init_weights(self):
+        for m in self.fc:
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+                nn.init.constant_(m.bias, 0.01)
     
     def forward(self, state):
         features = self.encoder(state)
@@ -173,28 +179,34 @@ class Critic(nn.Module):
         
         self.q1_fc = nn.Sequential(
             nn.Linear(self.encoder.output_size + 2, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128), nn.ReLU(),
-            nn.Linear(128, 128), nn.ReLU(),
-            nn.Linear(128, 128), nn.ReLU(),
+            nn.LeakyReLU(0.01),
+            nn.Linear(256, 128), nn.LeakyReLU(0.01),
+            nn.Linear(128, 128), nn.LeakyReLU(0.01),
         )
         self.q1_out = nn.Linear(128, 1)
         
         self.q2_fc = nn.Sequential(
             nn.Linear(self.encoder.output_size + 2, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128), nn.ReLU(),
-            nn.Linear(128, 128), nn.ReLU(),
-            nn.Linear(128, 128), nn.ReLU(),
+            nn.LeakyReLU(0.01),
+            nn.Linear(256, 128), nn.LeakyReLU(0.01),
+            nn.Linear(128, 128), nn.LeakyReLU(0.01),
         )
         self.q2_out = nn.Linear(128, 1)
+        self._init_weights()
         
         self._init_output_layers()
     
     def _init_output_layers(self):
         for out_layer in [self.q1_out, self.q2_out]:
-            nn.init.xavier_uniform_(out_layer.weight)
+            nn.init.uniform_(out_layer.weight, -3e-3, 3e-3)
             nn.init.zeros_(out_layer.bias)
+
+    def _init_weights(self):
+        for net in [self.q1_fc, self.q2_fc]:
+            for m in net:
+                if isinstance(m, nn.Linear):
+                    nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+                    nn.init.constant_(m.bias, 0.0)
 
     def forward(self, state, action):
         features = self.encoder(state)
@@ -410,15 +422,18 @@ class TD3Agent:
                 self.steps
             )
             
+            mean_val = activation.mean().item()
+            std_val = activation.std().item()
+
             # 記錄統計數據
             self.writer.add_scalar(
                 f'activation_stats/{name}_mean', 
-                activation.mean().item(), 
+                mean_val, 
                 self.steps
             )
             self.writer.add_scalar(
                 f'activation_stats/{name}_std', 
-                activation.std().item(), 
+                std_val, 
                 self.steps
             )
             
@@ -430,6 +445,9 @@ class TD3Agent:
                     dead_ratio, 
                     self.steps
                 )
+                print(f"{name}: mean={mean_val:.4f}, std={std_val:.4f}, dead={dead_ratio:.1%}")
+            else:
+                print(f"{name}: mean={mean_val:.4f}, std={std_val:.4f}")
 
     def log_weights_to_tensorboard(self):
         """記錄權重到 TensorBoard"""
