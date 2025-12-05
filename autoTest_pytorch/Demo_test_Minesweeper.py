@@ -235,12 +235,12 @@ class Game_test_case(unittest.TestCase) :
     class Game_status():
         def __init__(self):
             # regions (left, top, width, height)
-            screen_region = (0, 0, 1920, 1020) # the size of the screen
+            grid_region = (745, 361, 432, 434) # the size of the screen
             # region limitation [(st_x,st_1,len_n,len_y), have to be inside or outside]
             self.game_region = [((1, 31, 1919, 987), True), ((713, 32, 498, 45), False)]
             
             # 取得 Agent
-            self.agent = get_agent(screen_region)
+            self.agent = get_agent(grid_region)
             self.agent.reset_episode()
 
             self.previous_pic = None
