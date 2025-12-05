@@ -162,7 +162,7 @@ class Game_test_case(unittest.TestCase) :
             check_pause()
             # 1. 截取當前畫面
             game_status.save_pic_path = Tool_Main.cut_pic_data(
-                "whole_screen", 
+                "grid_region", 
                 Tool_Main.glo_var.player_num, 
                 0, 
                 cover=True, 
@@ -295,7 +295,7 @@ class Game_test_case(unittest.TestCase) :
                 self.assertTrue(False, "time_out(reach max steps)")
                 break
 
-            last_pic_pos = f"whole_screen_comp_{0+11}_{0}"
+            last_pic_pos = f"grid_region_comp_{0+11}_{0}"
             # since a small change in the whole screen shot is tiny, the threshold should be very strick
             if Tool_Main.compare_sim(last_pic_pos,sys._getframe().f_code.co_name, precise = True) < 0.9995 : 
                 # case : something changed
