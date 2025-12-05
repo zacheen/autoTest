@@ -135,7 +135,7 @@ class TD3Agent:
         
         # Image preprocessing
         self.transform = transforms.Compose([
-            transforms.Resize(IMAGE_SIZE),
+            # transforms.Resize(IMAGE_SIZE), # User requested original size
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
@@ -149,7 +149,9 @@ class TD3Agent:
             return image_tensor # Returns (C, H, W)
         except Exception as e:
             print(f"Error preprocessing screen: {e}")
-            return torch.zeros((3, IMAGE_SIZE[0], IMAGE_SIZE[1]))
+            # Return a small zero tensor as fallback, or try to match expected size if possible
+            # Since size is variable, we just return a small valid tensor
+            return torch.zeros((3, 224, 224))
 
     def select_action(self, state, add_noise=True):
         # state is (C, H, W) tensor
@@ -406,7 +408,7 @@ class TD3Agent:
         draw.text((20, legend_y + 15 - 7), "Final (with noise)", fill='white', font=font)
         
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"step_{step_count:04d}_{timestamp}.png"
+        filename = f"{timestamp}_step_{step_count:04d}.png"
         img.save(ACTION_LOG_PATH / filename)
         print(f"Action log saved: {filename}")
 
