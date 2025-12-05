@@ -9,6 +9,7 @@ import cv2
 import os
 import random
 from PIL import Image
+import datetime
 
 # Hyperparameters
 BATCH_SIZE = 32
@@ -21,6 +22,11 @@ NOISE_CLIP = 0.5
 POLICY_FREQ = 2
 MEMORY_SIZE = 10000
 IMAGE_SIZE = (224, 224) # Resize input to this for ResNet
+
+# Action logging
+LOG_ACTIONS = True
+from pathlib import Path
+ACTION_LOG_PATH = Path("./models/action_logs")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -151,14 +157,24 @@ class TD3Agent:
         
         self.actor.eval()
         with torch.no_grad():
-            action = self.actor(state).cpu().data.numpy().flatten()
+            raw_action = self.actor(state).cpu().data.numpy().flatten()
+            raw_coords = self.action_to_screen_coords(raw_action)
         self.actor.train()
 
         if add_noise:
             noise = np.random.normal(0, 0.1, size=self.action_dim)
-            action = action + noise
+            final_action = raw_action + noise
             
-        return np.clip(action, -1, 1), {} # Return action and empty log_info
+        final_coords = self.action_to_screen_coords(final_action)
+        
+        log_info = {
+            'raw_action': raw_action,
+            'final_action': final_action,
+            'raw_coords': raw_coords,
+            'final_coords': final_coords,
+        }
+        
+        return np.clip(final_action, -1, 1), log_info
 
     def action_to_screen_coords(self, action):
         x, y, w, h = self.screen_region
@@ -272,10 +288,6 @@ class TD3Agent:
             "actor_loss": actor_loss.item() if actor_loss else None
         }
 
-    def log_action_image(self, current_screenshot, log_info, step_count, reward=None):
-        # Optional: Save image with action for debugging
-        pass
-
     def save_model(self):
         print("Saving model")
         if not os.path.exists('./models'):
@@ -321,6 +333,82 @@ class TD3Agent:
             next_state_cpu = next_state.cpu()
         
         self.replay_buffer.store(state_cpu, action, next_state_cpu, reward, done)
+
+    def log_action_image(self, state: torch.Tensor, log_info: dict, step_count: int, reward: float = None):
+        """Save state image with action markers."""
+        if not LOG_ACTIONS or log_info is None:
+            return
+        
+        from PIL import ImageDraw, ImageFont
+        
+        ACTION_LOG_PATH.mkdir(parents=True, exist_ok=True)
+        
+        img_array = state.squeeze(0).cpu().numpy()
+        img_array = (img_array * 255).astype(np.uint8)
+        img_array = img_array.transpose(1, 2, 0)
+        img = Image.fromarray(img_array)
+        
+        img_w, img_h = img.size
+        
+        raw_norm = (log_info['raw_action'] + 1) / 2.0
+        raw_img_x = int(raw_norm[0] * img_w)
+        raw_img_y = int(raw_norm[1] * img_h)
+        
+        final_norm = (log_info['final_action'] + 1) / 2.0
+        final_img_x = int(final_norm[0] * img_w)
+        final_img_y = int(final_norm[1] * img_h)
+        
+        draw = ImageDraw.Draw(img)
+        
+        try:
+            font = ImageFont.truetype("arial.ttf", 12)
+        except:
+            font = ImageFont.load_default()
+        
+        radius = 5
+        draw.ellipse([raw_img_x - radius, raw_img_y - radius, 
+                      raw_img_x + radius, raw_img_y + radius], 
+                     fill='red', outline='darkred')
+        
+        draw.ellipse([final_img_x - radius, final_img_y - radius,
+                      final_img_x + radius, final_img_y + radius],
+                     fill='purple', outline='darkviolet')
+        
+        draw.line([raw_img_x, raw_img_y, final_img_x, final_img_y], 
+                    fill='yellow', width=1)
+        
+        raw_action = log_info['raw_action']
+        final_action = log_info['final_action']
+        raw_coords = log_info['raw_coords']
+        final_coords = log_info['final_coords']
+        
+        text_lines = [
+            f"Step: {step_count}",
+            f"Raw tanh: ({raw_action[0]:.4f}, {raw_action[1]:.4f})",
+            f"Raw screen: ({raw_coords[0]}, {raw_coords[1]})",
+            f"Final tanh: ({final_action[0]:.4f}, {final_action[1]:.4f})",
+            f"Final screen: ({final_coords[0]}, {final_coords[1]})",
+        ]
+        if reward is not None:
+            text_lines.append(f"Reward: {reward:.1f}")
+        
+        text_y = 5
+        for line in text_lines:
+            bbox = draw.textbbox((5, text_y), line, font=font)
+            draw.rectangle(bbox, fill='black')
+            draw.text((5, text_y), line, fill='white', font=font)
+            text_y += 15
+        
+        legend_y = img_h - 40
+        draw.ellipse([10 - 4, legend_y - 4, 10 + 4, legend_y + 4], fill='red')
+        draw.text((20, legend_y - 7), "Raw (no noise)", fill='white', font=font)
+        draw.ellipse([10 - 4, legend_y + 15 - 4, 10 + 4, legend_y + 15 + 4], fill='purple')
+        draw.text((20, legend_y + 15 - 7), "Final (with noise)", fill='white', font=font)
+        
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"step_{step_count:04d}_{timestamp}.png"
+        img.save(ACTION_LOG_PATH / filename)
+        print(f"Action log saved: {filename}")
 
 _agent = None
 def get_agent(screen_region: tuple = None) -> TD3Agent:
