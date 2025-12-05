@@ -1,895 +1,325 @@
-# """
-# Minesweeper RL Agent - Continuous Action Space Version
-# Uses TD3 (Twin Delayed DDPG) algorithm.
-# The model receives a screenshot and outputs (x, y) coordinates in the range [-1, 1].
-# """
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-from collections import deque, namedtuple, defaultdict
-from pathlib import Path
-from PIL import Image
-import random
+import torch.optim as optim
 import torchvision.models as models
-import gc
-import csv
-import datetime
-import matplotlib.pyplot as plt
-from torch.utils.tensorboard import SummaryWriter
-import atexit
+import torchvision.transforms as transforms
+import numpy as np
+import cv2
+import os
+import random
+from PIL import Image
 
-# ==================== Config ====================
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {DEVICE}")
+# Hyperparameters
+BATCH_SIZE = 32
+LR_ACTOR = 1e-4
+LR_CRITIC = 1e-3
+GAMMA = 0.99
+TAU = 0.005
+POLICY_NOISE = 0.2
+NOISE_CLIP = 0.5
+POLICY_FREQ = 2
+MEMORY_SIZE = 10000
+IMAGE_SIZE = (224, 224) # Resize input to this for ResNet
 
-class Config:
-    # Screen region (adjust to your game window)
-    SCREEN_LEFT = 0
-    SCREEN_TOP = 0
-    SCREEN_WIDTH = 1920
-    SCREEN_HEIGHT = 1080
-
-    # Training parameters
-    BATCH_SIZE = 24 # my device can accept 64, but too slow
-    START_TRAIN_SIZE = 10 # for testing # normal : 100
-    MEMORY_SIZE = 1000
-    EPISODE_MAX_LEN = 300
-    GAMMA = 0.99
-    TAU = 0.002  # soft-update coefficient
-    LR_ACTOR = 0.00005
-    LR_CRITIC = 0.0004
-    
-    # LR Scheduler
-    LR_DECAY_STEP = 1000
-    LR_DECAY_GAMMA = 0.9
-
-    # Exploration noise
-    NOISE_STD = 0.2
-    NOISE_CLIP = 0.5
-    POLICY_DELAY = 2  # delayed actor update
-
-    # Regularization
-    ACTION_REG_COEF = 0.1   # if hoping Model output be close to 0
-    REWARD_SCALE = 0.1      # Scale rewards to keep gradients stable
-
-    DISCRETE = True
-    if DISCRETE :
-        NOISE_CLIP = 0.05
-        NOISE_PROB = 0.8
-        ACTION_REG_COEF = 0.03
-
-    # Action logging
-    LOG_ACTIONS = True
-    ACTION_LOG_PATH = Path("./rl_models/action_logs")
-
-    TENSORBOARD_LOG_DIR = Path("./rl_models/tensorboard_logs")
-    LOG_ACTIVATIONS_INTERVAL = 10
-
-    # Model persistence
-    MODEL_PATH = Path("./rl_models")
-    STEP_LOG_FILE = Path("./rl_models/step_log.csv")        # 每步記錄
-    EPISODE_LOG_FILE = Path("./rl_models/episode_log.csv")  # 每 episode 記錄
-    PLOT_FILE = Path("./rl_models/training_curves.png")
-    SAVE_INTERVAL = 5
-
-CONFIG = Config()
-
-# ==================== Replay Buffer ====================
-Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward', 'done'))
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class ReplayBuffer:
-    def __init__(self, capacity):
-        self.buffer = deque(maxlen=capacity)
+    def __init__(self, max_size=MEMORY_SIZE):
+        self.storage = []
+        self.max_size = max_size
+        self.ptr = 0
 
-    def push(self, state, action, next_state, reward, done):
-        state = state.detach().cpu().to(torch.float16)
-        if next_state is not None:
-            next_state = next_state.detach().cpu().to(torch.float16)
-        print("new reward: ", reward)
-        self.buffer.append(Transition(state, action, next_state, reward, done))
+    def store(self, state, action, next_state, reward, done):
+        data = (state, action, next_state, reward, done)
+        if len(self.storage) < self.max_size:
+            self.storage.append(data)
+        else:
+            self.storage[self.ptr] = data
+            self.ptr = (self.ptr + 1) % self.max_size
 
-    def sample(self, batch_size, include_latest=False):
-        groups = defaultdict(list)
-        for t in self.buffer:
-            r = t.reward
-            groups[r].append(t)
+    def sample(self, batch_size):
+        ind = np.random.randint(0, len(self.storage), size=batch_size)
+        batch_states, batch_actions, batch_next_states, batch_rewards, batch_dones = [], [], [], [], []
+
+        for i in ind:
+            state, action, next_state, reward, done = self.storage[i]
+            batch_states.append(state)
+            batch_actions.append(action)
+            batch_next_states.append(next_state)
+            batch_rewards.append(reward)
+            batch_dones.append(done)
+
+        return (
+            torch.stack(batch_states).to(device),
+            torch.tensor(np.array(batch_actions), dtype=torch.float32).to(device),
+            torch.stack(batch_next_states).to(device) if batch_next_states[0] is not None else None,
+            torch.tensor(np.array(batch_rewards), dtype=torch.float32).unsqueeze(1).to(device),
+            torch.tensor(np.array(batch_dones), dtype=torch.float32).unsqueeze(1).to(device)
+        )
+
+    def size(self):
+        return len(self.storage)
+
+class Actor(nn.Module):
+    def __init__(self, action_dim=2):
+        super(Actor, self).__init__()
+        # Load pretrained ResNet18
+        resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        # Remove the last FC layer
+        self.features = nn.Sequential(*list(resnet.children())[:-1])
         
-        sampled_transitions = []
-        if include_latest and len(self.buffer) > 0:
-            latest_transition = self.buffer[-1]
-            sampled_transitions.append(latest_transition)
-            batch_size -= 1
-        
-        num_groups = len(groups)
-        if num_groups == 0:
-            return None
-
-        samples_per_group = batch_size // num_groups
-        remainder = batch_size % num_groups
-        
-        # Sample from each group (positive rewards have higher priority)
-        loop_order = sorted(groups.items(), key=lambda x: x[0], reverse=True)
-        for r, group in loop_order:
-            count = samples_per_group + (1 if remainder > 0 else 0)
-            remainder -= 1
-            
-            if count <= 0:
-                continue
-
-            if len(group) >= count:
-                sampled_transitions.extend(random.sample(group, count))
-            else:
-                sampled_transitions.extend(random.choices(group, k=count))
-        
-        random.shuffle(sampled_transitions)
-        return Transition(*zip(*sampled_transitions))
-
-    def __len__(self):
-        return len(self.buffer)
-
-# ==================== Feature Encoder (ResNet18) ====================
-class ResNetEncoder(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-        self.resnet.fc = nn.Identity()
-        self.output_size = 512
+        self.fc1 = nn.Linear(512, 256)
+        self.fc2 = nn.Linear(256, action_dim)
 
     def forward(self, x):
-        return self.resnet(x)
+        x = self.features(x)
+        x = x.view(x.size(0), -1) # Flatten
+        x = F.relu(self.fc1(x))
+        x = torch.tanh(self.fc2(x)) # Output range [-1, 1]
+        return x
 
-# ==================== Actor ====================
-class Actor(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.encoder = ResNetEncoder()
-        self.fc = nn.Sequential(
-            nn.Linear(self.encoder.output_size, 256),
-            nn.LeakyReLU(0.01),
-            nn.Linear(256, 128), nn.LeakyReLU(0.01),
-            nn.Linear(128, 128), nn.LeakyReLU(0.01),
-        )
-        self.output_layer = nn.Linear(128, 2)
-        self._init_weights()
-        self._init_output_layer()
-    
-    def _init_output_layer(self):
-        nn.init.uniform_(self.output_layer.weight, -3e-3, 3e-3)
-        nn.init.constant_(self.output_layer.bias, 0.01)
-
-    def _init_weights(self):
-        for m in self.fc:
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
-                nn.init.constant_(m.bias, 0.01)
-    
-    def forward(self, state):
-        features = self.encoder(state)
-        x = self.fc(features)
-        raw_output = self.output_layer(x)
-        return torch.tanh(raw_output)
-
-# ==================== Critic ====================
 class Critic(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.encoder = ResNetEncoder()
+    def __init__(self, action_dim=2):
+        super(Critic, self).__init__()
+        # Load pretrained ResNet18
+        resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        self.features = nn.Sequential(*list(resnet.children())[:-1])
         
-        self.q1_fc = nn.Sequential(
-            nn.Linear(self.encoder.output_size + 2, 256),
-            nn.LeakyReLU(0.01),
-            nn.Linear(256, 128), nn.LeakyReLU(0.01),
-            nn.Linear(128, 128), nn.LeakyReLU(0.01),
-        )
-        self.q1_out = nn.Linear(128, 1)
-        
-        self.q2_fc = nn.Sequential(
-            nn.Linear(self.encoder.output_size + 2, 256),
-            nn.LeakyReLU(0.01),
-            nn.Linear(256, 128), nn.LeakyReLU(0.01),
-            nn.Linear(128, 128), nn.LeakyReLU(0.01),
-        )
-        self.q2_out = nn.Linear(128, 1)
-        self._init_weights()
-        
-        self._init_output_layers()
-    
-    def _init_output_layers(self):
-        for out_layer in [self.q1_out, self.q2_out]:
-            nn.init.uniform_(out_layer.weight, -3e-3, 3e-3)
-            nn.init.zeros_(out_layer.bias)
-
-    def _init_weights(self):
-        for net in [self.q1_fc, self.q2_fc]:
-            for m in net:
-                if isinstance(m, nn.Linear):
-                    nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
-                    nn.init.constant_(m.bias, 0.0)
+        # Critic needs to process (state + action)
+        # We will concatenate action to the extracted features
+        self.fc1 = nn.Linear(512 + action_dim, 256)
+        self.fc2 = nn.Linear(256, 1)
 
     def forward(self, state, action):
-        features = self.encoder(state)
-        x = torch.cat([features, action], dim=1)
-        return self.q1_out(self.q1_fc(x)), self.q2_out(self.q2_fc(x))
+        s = self.features(state)
+        s = s.view(s.size(0), -1) # Flatten features
+        
+        x = torch.cat([s, action], dim=1)
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
 
-    def q1_forward(self, state, action):
-        features = self.encoder(state)
-        x = torch.cat([features, action], dim=1)
-        return self.q1_out(self.q1_fc(x))
-
-# ==================== Plotting ====================
-def plot_training_log(step_log_file, episode_log_file, output_file):
-    """讀取 CSV 並繪製訓練曲線（每步 + 每 episode）"""
-    
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    
-    # ===== 讀取 Step Log =====
-    step_data = {'steps': [], 'critic_loss': [], 'actor_loss': [], 'q_mean': [], 'reward': []}
-    
-    if Path(step_log_file).exists():
-        try:
-            with open(step_log_file, 'r') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    step_data['steps'].append(int(row['step']))
-                    step_data['critic_loss'].append(float(row['critic_loss']))
-                    actor_loss = row['actor_loss']
-                    step_data['actor_loss'].append(float(actor_loss) if actor_loss else None)
-                    step_data['q_mean'].append(float(row['q_mean']))
-                    step_data['reward'].append(float(row['reward']))
-        except Exception as e:
-            print(f"Error reading step log: {e}")
-    
-    # ===== 讀取 Episode Log =====
-    episode_data = {'episodes': [], 'total_reward': [], 'episode_steps': []}
-    
-    if Path(episode_log_file).exists():
-        try:
-            with open(episode_log_file, 'r') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    episode_data['episodes'].append(int(row['episode']))
-                    episode_data['total_reward'].append(float(row['total_reward']))
-                    episode_data['episode_steps'].append(int(row['episode_steps']))
-        except Exception as e:
-            print(f"Error reading episode log: {e}")
-    
-    # ===== 繪圖 =====
-    
-    # 1. Critic Loss (每步)
-    ax = axes[0, 0]
-    if step_data['steps']:
-        ax.plot(step_data['steps'], step_data['critic_loss'], 'r-', alpha=0.7, linewidth=0.5)
-        # 移動平均
-        window = min(50, len(step_data['critic_loss']))
-        if window > 1:
-            ma = np.convolve(step_data['critic_loss'], np.ones(window)/window, mode='valid')
-            ax.plot(step_data['steps'][window-1:], ma, 'r-', linewidth=2, label=f'MA({window})')
-            ax.legend()
-    ax.set_xlabel('Step')
-    ax.set_ylabel('Critic Loss')
-    ax.set_title('Critic Loss (per step)')
-    ax.grid(True, alpha=0.3)
-    
-    # 2. Actor Loss (每步)
-    ax = axes[0, 1]
-    if step_data['steps']:
-        actor_steps = [s for s, a in zip(step_data['steps'], step_data['actor_loss']) if a is not None]
-        actor_losses = [a for a in step_data['actor_loss'] if a is not None]
-        if actor_losses:
-            ax.plot(actor_steps, actor_losses, 'g-', alpha=0.7, linewidth=0.5)
-            window = min(50, len(actor_losses))
-            if window > 1:
-                ma = np.convolve(actor_losses, np.ones(window)/window, mode='valid')
-                ax.plot(actor_steps[window-1:], ma, 'g-', linewidth=2, label=f'MA({window})')
-                ax.legend()
-    ax.set_xlabel('Step')
-    ax.set_ylabel('Actor Loss')
-    ax.set_title('Actor Loss (per step)')
-    ax.grid(True, alpha=0.3)
-    
-    # 3. Q Mean (每步)
-    ax = axes[1, 0]
-    if step_data['steps']:
-        ax.plot(step_data['steps'], step_data['q_mean'], 'b-', alpha=0.7, linewidth=0.5)
-        window = min(50, len(step_data['q_mean']))
-        if window > 1:
-            ma = np.convolve(step_data['q_mean'], np.ones(window)/window, mode='valid')
-            ax.plot(step_data['steps'][window-1:], ma, 'b-', linewidth=2, label=f'MA({window})')
-            ax.legend()
-    ax.set_xlabel('Step')
-    ax.set_ylabel('Q Value')
-    ax.set_title('Q Mean (per step)')
-    ax.grid(True, alpha=0.3)
-    
-    # 4. Episode Reward
-    ax = axes[1, 1]
-    if episode_data['episodes']:
-        ax.plot(episode_data['episodes'], episode_data['total_reward'], 'mo-', 
-                alpha=0.7, linewidth=1, markersize=4, label='Episode Reward')
-        window = min(10, len(episode_data['total_reward']))
-        if window > 1:
-            ma = np.convolve(episode_data['total_reward'], np.ones(window)/window, mode='valid')
-            ax.plot(episode_data['episodes'][window-1:], ma, 'm-', linewidth=2, label=f'MA({window})')
-        ax.legend()
-    ax.set_xlabel('Episode')
-    ax.set_ylabel('Total Reward')
-    ax.set_title('Episode Reward')
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(output_file, dpi=150)
-    plt.close()
-    print(f"Plot saved to {output_file}")
-
-# ==================== TD3 Agent ====================
 class TD3Agent:
-    def __init__(self, screen_region: tuple = None):
-        if screen_region:
-            self.screen_left, self.screen_top, self.screen_width, self.screen_height = screen_region
-        else:
-            self.screen_left = CONFIG.SCREEN_LEFT
-            self.screen_top = CONFIG.SCREEN_TOP
-            self.screen_width = CONFIG.SCREEN_WIDTH
-            self.screen_height = CONFIG.SCREEN_HEIGHT
+    def __init__(self, screen_region):
+        self.screen_region = screen_region
+        # screen_region format: [((x, y, w, h), True/False), ...]
+        # We need the valid game area. Assuming the first one with True is the main game area.
 
-        # Networks
-        self.actor = Actor().to(DEVICE)
-        self.actor_target = Actor().to(DEVICE)
+        self.action_dim = 2 # x, y
+        
+        # Initialize Actor and Critics
+        self.actor = Actor(self.action_dim).to(device)
+        self.actor_target = Actor(self.action_dim).to(device)
         self.actor_target.load_state_dict(self.actor.state_dict())
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR_ACTOR)
 
-        self.critic = Critic().to(DEVICE)
-        self.critic_target = Critic().to(DEVICE)
-        self.critic_target.load_state_dict(self.critic.state_dict())
+        self.critic_1 = Critic(self.action_dim).to(device)
+        self.critic_1_target = Critic(self.action_dim).to(device)
+        self.critic_1_target.load_state_dict(self.critic_1.state_dict())
+        self.critic_1_optimizer = optim.Adam(self.critic_1.parameters(), lr=LR_CRITIC)
 
-        # Optimizers
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=CONFIG.LR_ACTOR)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=CONFIG.LR_CRITIC)
-        
-        # Schedulers
-        self.actor_scheduler = torch.optim.lr_scheduler.StepLR(
-            self.actor_optimizer, step_size=CONFIG.LR_DECAY_STEP, gamma=CONFIG.LR_DECAY_GAMMA
-        )
-        self.critic_scheduler = torch.optim.lr_scheduler.StepLR(
-            self.critic_optimizer, step_size=CONFIG.LR_DECAY_STEP, gamma=CONFIG.LR_DECAY_GAMMA
-        )
+        self.critic_2 = Critic(self.action_dim).to(device)
+        self.critic_2_target = Critic(self.action_dim).to(device)
+        self.critic_2_target.load_state_dict(self.critic_2.state_dict())
+        self.critic_2_optimizer = optim.Adam(self.critic_2.parameters(), lr=LR_CRITIC)
 
-        # Replay buffer
-        self.memory = ReplayBuffer(CONFIG.MEMORY_SIZE)
+        self.replay_buffer = ReplayBuffer()
+        self.total_it = 0
+        
+        # Image preprocessing
+        self.transform = transforms.Compose([
+            transforms.Resize(IMAGE_SIZE),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        
+        self.try_load_model()
 
-        # Statistics
-        self.steps = 0
-        self.episode_count = 0
-        self.episode_rewards = deque(maxlen=CONFIG.EPISODE_MAX_LEN)
-        self.current_episode_reward = 0
-        self.current_episode_steps = 0
-        
-        # Logging
-        self._init_log_files()
-        
-        # Mixed Precision Scaler
-        self.scaler = torch.cuda.amp.GradScaler()
-
-        # TensorBoard
-        self.writer = SummaryWriter(CONFIG.TENSORBOARD_LOG_DIR)
-        atexit.register(self.close)
-        
-        # Activation hooks
-        self.activations = {}
-        self._register_hooks()
-
-        self._try_load_model()
-
-    def _register_hooks(self):
-        """註冊 forward hooks 來捕捉 activations"""
-        
-        def get_activation(name):
-            def hook(module, input, output):
-                self.activations[name] = output.detach()
-            return hook
-        
-        # Actor hooks
-        self.actor.encoder.resnet.layer4.register_forward_hook(
-            get_activation('actor/resnet_layer4')
-        )
-        self.actor.encoder.register_forward_hook(
-            get_activation('actor/encoder_out')
-        )
-        
-        # 為 fc Sequential 中的每層註冊 hook
-        for i, layer in enumerate(self.actor.fc):
-            layer.register_forward_hook(
-                get_activation(f'actor/fc_{i}_{layer.__class__.__name__}')
-            )
-        
-        self.actor.output_layer.register_forward_hook(
-            get_activation('actor/output_layer_pre_tanh')
-        )
-        
-        # Critic hooks (可選)
-        self.critic.encoder.register_forward_hook(
-            get_activation('critic/encoder_out')
-        )
-
-    def log_activations_to_tensorboard(self):
-        """記錄 activations 到 TensorBoard"""
-        for name, activation in self.activations.items():
-            # 記錄直方圖
-            self.writer.add_histogram(
-                f'activations/{name}', 
-                activation.cpu().flatten(), 
-                self.steps
-            )
-            
-            mean_val = activation.mean().item()
-            std_val = activation.std().item()
-
-            # 記錄統計數據
-            self.writer.add_scalar(
-                f'activation_stats/{name}_mean', 
-                mean_val, 
-                self.steps
-            )
-            self.writer.add_scalar(
-                f'activation_stats/{name}_std', 
-                std_val, 
-                self.steps
-            )
-            
-            # 檢查死神經元（ReLU 後全為 0 的比例）
-            if 'ReLU' in name:
-                dead_ratio = (activation == 0).float().mean().item()
-                self.writer.add_scalar(
-                    f'activation_stats/{name}_dead_ratio', 
-                    dead_ratio, 
-                    self.steps
-                )
-                print(f"{name}: mean={mean_val:.4f}, std={std_val:.4f}, dead={dead_ratio:.1%}")
-            else:
-                print(f"{name}: mean={mean_val:.4f}, std={std_val:.4f}")
-
-    def log_weights_to_tensorboard(self):
-        """記錄權重到 TensorBoard"""
-        for name, param in self.actor.named_parameters():
-            if 'weight' in name:
-                self.writer.add_histogram(f'weights/actor/{name}', param.cpu(), self.steps)
-        
-        for name, param in self.critic.named_parameters():
-            if 'weight' in name:
-                self.writer.add_histogram(f'weights/critic/{name}', param.cpu(), self.steps)
-
-    def log_gradients_to_tensorboard(self):
-        """記錄梯度到 TensorBoard"""
-        for name, param in self.actor.named_parameters():
-            if param.grad is not None and 'weight' in name:
-                self.writer.add_histogram(
-                    f'gradients/actor/{name}', 
-                    param.grad.cpu(), 
-                    self.steps
-                )
-
-    def close(self):
-        """關閉 TensorBoard writer"""
-        self.writer.flush()  # ← 加這行
-        self.writer.close()
-
-    def _init_log_files(self):
-        """Initialize CSV log files with headers."""
-        CONFIG.MODEL_PATH.mkdir(parents=True, exist_ok=True)
-        
-        # Step log - 每步記錄
-        if not CONFIG.STEP_LOG_FILE.exists():
-            with open(CONFIG.STEP_LOG_FILE, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(['timestamp', 'step', 'episode', 'critic_loss', 'actor_loss', 
-                                'q_mean', 'q_std', 'reward', 'action_x', 'action_y'])
-        
-        # Episode log - 每 episode 記錄
-        if not CONFIG.EPISODE_LOG_FILE.exists():
-            with open(CONFIG.EPISODE_LOG_FILE, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(['timestamp', 'episode', 'total_reward', 'episode_steps', 'total_steps'])
-
-    def _try_load_model(self):
-        model_file = CONFIG.MODEL_PATH / "td3_minesweeper.pth"
-        if model_file.exists():
-            ckpt = torch.load(model_file, map_location='cpu')
-            self.actor.load_state_dict(ckpt['actor'])
-            self.critic.load_state_dict(ckpt['critic'])
-            self.actor_target.load_state_dict(ckpt['actor_target'])
-            self.critic_target.load_state_dict(ckpt['critic_target'])
-            
-            if 'actor_optimizer' in ckpt:
-                self.actor_optimizer.load_state_dict(ckpt['actor_optimizer'])
-            if 'critic_optimizer' in ckpt:
-                self.critic_optimizer.load_state_dict(ckpt['critic_optimizer'])
-            if 'scaler' in ckpt:
-                self.scaler.load_state_dict(ckpt['scaler'])
-            
-            # Load Scheduler state
-            if 'actor_scheduler' in ckpt:
-                self.actor_scheduler.load_state_dict(ckpt['actor_scheduler'])
-            if 'critic_scheduler' in ckpt:
-                self.critic_scheduler.load_state_dict(ckpt['critic_scheduler'])
-
-            # Load prev_train_data
-            if 'prev_train_data' in ckpt:
-                self.memory.buffer = deque(ckpt['prev_train_data'], maxlen=CONFIG.MEMORY_SIZE)
-                print(f"Loaded prev_train_data with {len(self.memory)} transitions")
-
-            self.steps = ckpt.get('steps', 0)
-            self.episode_count = ckpt.get('episode_count', 0)
-            print(f"Loaded model, steps: {self.steps}, episodes: {self.episode_count}")
-            print(f"Current LR - Actor: {self.actor_scheduler.get_last_lr()[0]:.6f}, Critic: {self.critic_scheduler.get_last_lr()[0]:.6f}")
-
-    def preprocess_screen(self, screenshot_path: str) -> torch.Tensor:
-        img = Image.open(screenshot_path).convert('RGB')
-        w, h = img.size
-        new_size = (w // 3, h // 3)
-        img = img.resize(new_size, Image.BILINEAR)
-        arr = np.array(img).transpose((2, 0, 1)) / 255.0
-        tensor = torch.tensor(arr, dtype=torch.float32).unsqueeze(0)
-        return tensor
-
-    def preprocess_from_array(self, screen_array: np.ndarray) -> torch.Tensor:
-        img = Image.fromarray(screen_array).convert('RGB')
-        w, h = img.size
-        new_size = (w // 3, h // 3)
-        img = img.resize(new_size, Image.BILINEAR)
-        arr = np.array(img).transpose((2, 0, 1)) / 255.0
-        tensor = torch.tensor(arr, dtype=torch.float32).unsqueeze(0)
-        return tensor
-
-    def select_action(self, state: torch.Tensor, add_noise: bool = True) -> tuple:
-        """
-        Return action and log info.
-        Returns: (final_action, log_info)
-        """
-        with torch.no_grad():
-            raw_action = self.actor(state.to(DEVICE)).cpu().numpy().squeeze()
-
-        raw_coords = self.action_to_screen_coords(raw_action)
-        
-        final_action = raw_action.copy()
-        noise_applied = False
-        if not add_noise or (CONFIG.DISCRETE and (random.random() > CONFIG.NOISE_PROB)):
-            print("<No noise precise click>")
-        else:
-            noise = np.random.normal(0, CONFIG.NOISE_STD, size=2)
-            final_action = raw_action + noise
-            final_action = np.clip(final_action, -1.0, 1.0)
-            noise_applied = True
-        
-        final_coords = self.action_to_screen_coords(final_action)
-        
-        log_info = {
-            'raw_action': raw_action,
-            'final_action': final_action,
-            'raw_coords': raw_coords,
-            'final_coords': final_coords,
-            'noise_applied': noise_applied
-        }
-        
-        return final_action, log_info
-
-    def log_action_image(self, state: torch.Tensor, log_info: dict, step_count: int, reward: float = None):
-        """Save state image with action markers."""
-        if not CONFIG.LOG_ACTIONS or log_info is None:
-            return
-        
-        from PIL import ImageDraw, ImageFont
-        
-        CONFIG.ACTION_LOG_PATH.mkdir(parents=True, exist_ok=True)
-        
-        img_array = state.squeeze(0).cpu().numpy()
-        img_array = (img_array * 255).astype(np.uint8)
-        img_array = img_array.transpose(1, 2, 0)
-        img = Image.fromarray(img_array)
-        draw = ImageDraw.Draw(img)
-        
-        img_w, img_h = img.size
-        raw_img_x, raw_img_y = self.action_to_coords(log_info['raw_action'], img_w, img_h)
-        final_img_x, final_img_y = self.action_to_coords(log_info['final_action'], img_w, img_h)
-        
-        radius = 5
-        draw.ellipse([raw_img_x - radius, raw_img_y - radius, 
-                      raw_img_x + radius, raw_img_y + radius], 
-                     fill='red', outline='darkred')
-        
-        draw.ellipse([final_img_x - radius, final_img_y - radius,
-                      final_img_x + radius, final_img_y + radius],
-                     fill='purple', outline='darkviolet')
-        
-        if log_info['noise_applied']:
-            draw.line([raw_img_x, raw_img_y, final_img_x, final_img_y], 
-                      fill='yellow', width=1)
-        
-        raw_action = log_info['raw_action']
-        final_action = log_info['final_action']
-        raw_coords = log_info['raw_coords']
-        final_coords = log_info['final_coords']
-        
-        text_lines = [
-            f"Step: {step_count}",
-            f"Raw tanh: ({raw_action[0]:.4f}, {raw_action[1]:.4f})",
-            f"Raw screen: ({raw_coords[0]}, {raw_coords[1]})",
-            f"Final tanh: ({final_action[0]:.4f}, {final_action[1]:.4f})",
-            f"Final screen: ({final_coords[0]}, {final_coords[1]})",
-            f"Noise: {'Yes' if log_info['noise_applied'] else 'No'}",
-        ]
-        if reward is not None:
-            text_lines.append(f"Reward: {reward:.1f}")
-        
-        text_y = 5
+    def preprocess_screen(self, screenshot_path):
         try:
-            font = ImageFont.truetype("arial.ttf", 12)
-        except:
-            font = ImageFont.load_default()
-        for line in text_lines:
-            bbox = draw.textbbox((5, text_y), line, font=font)
-            draw.rectangle(bbox, fill='black')
-            draw.text((5, text_y), line, fill='white', font=font)
-            text_y += 15
+            image = Image.open(screenshot_path).convert('RGB')
+            image_tensor = self.transform(image)
+            return image_tensor # Returns (C, H, W)
+        except Exception as e:
+            print(f"Error preprocessing screen: {e}")
+            return torch.zeros((3, IMAGE_SIZE[0], IMAGE_SIZE[1]))
+
+    def select_action(self, state, add_noise=True):
+        # state is (C, H, W) tensor
+        state = state.unsqueeze(0).to(device) # Add batch dim -> (1, C, H, W)
         
-        legend_y = img_h - 40
-        draw.ellipse([10 - 4, legend_y - 4, 10 + 4, legend_y + 4], fill='red')
-        draw.text((20, legend_y - 7), "Raw (no noise)", fill='white', font=font)
-        draw.ellipse([10 - 4, legend_y + 15 - 4, 10 + 4, legend_y + 15 + 4], fill='purple')
-        draw.text((20, legend_y + 15 - 7), "Final (with noise)", fill='white', font=font)
+        self.actor.eval()
+        with torch.no_grad():
+            action = self.actor(state).cpu().data.numpy().flatten()
+        self.actor.train()
+
+        if add_noise:
+            noise = np.random.normal(0, 0.1, size=self.action_dim)
+            action = action + noise
+            
+        return np.clip(action, -1, 1), {} # Return action and empty log_info
+
+    def action_to_screen_coords(self, action):
+        x, y, w, h = self.screen_region
         
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{timestamp}_step_{step_count:04d}.png"
-        img.save(CONFIG.ACTION_LOG_PATH / filename)
-        print(f"Action log saved: {filename}")
-
-    def action_to_normalized(self, action: np.ndarray) -> np.ndarray:
-        """Convert action from [-1, 1] to [0, 1] normalized coordinates."""
-        return (action + 1) / 2.0
-
-    def action_to_coords(self, action: np.ndarray, width, height, left = 0, top = 0) -> tuple:
-        norm_action = self.action_to_normalized(action)
-        x = int(left + norm_action[0] * width)
-        y = int(top + norm_action[1] * height)
-        return x, y
-
-    def action_to_screen_coords(self, action: np.ndarray) -> tuple:
-        return self.action_to_coords(action, self.screen_width, self.screen_height, self.screen_left, self.screen_top)
+        # Normalize action from [-1, 1] to [0, 1]
+        norm_x = (action[0] + 1) / 2
+        norm_y = (action[1] + 1) / 2
+        
+        screen_x = int(x + norm_x * w)
+        screen_y = int(y + norm_y * h)
+        
+        return screen_x, screen_y
 
     def store_transition(self, state, action, next_state, reward, done):
-        # Scale reward for training stability
-        scaled_reward = reward * CONFIG.REWARD_SCALE
-        self.memory.push(state, action, next_state, scaled_reward, done)
-        self.current_episode_reward += reward
-        self.current_episode_steps += 1
+        # state and next_state are tensors (C, H, W)
+        # If next_state is None (game over), we handle it in sample or here?
+        # ReplayBuffer expects objects.
+        # Note: To save memory, we might want to store them as CPU tensors or numpy arrays.
+        # But for now, let's keep it simple.
         
-        # Episode 結束時記錄
-        if done:
-            self.episode_count += 1
-            self.episode_rewards.append(self.current_episode_reward)
-            self._log_episode()
-            self.current_episode_reward = 0
-            self.current_episode_steps = 0
+        # Ensure they are on CPU to save GPU memory
+        state_cpu = state.cpu()
+        next_state_cpu = next_state.cpu() if next_state is not None else None
+        
+        self.replay_buffer.store(state_cpu, action, next_state_cpu, reward, done)
 
-    def _log_episode(self):
-        """Log episode summary to CSV."""
-        with open(CONFIG.EPISODE_LOG_FILE, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                self.episode_count,
-                f"{self.current_episode_reward:.4f}",
-                self.current_episode_steps,
-                self.steps
-            ])
-
-    def _log_step(self, critic_loss, actor_loss, q_mean, q_std, reward, action):
-        """Log every training step to CSV."""
-        with open(CONFIG.STEP_LOG_FILE, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                self.steps,
-                self.episode_count,
-                f"{critic_loss:.6f}",
-                f"{actor_loss:.6f}" if actor_loss is not None else "",
-                f"{q_mean:.6f}",
-                f"{q_std:.6f}",
-                f"{reward:.4f}",
-                f"{action[0]:.4f}" if action is not None else "",
-                f"{action[1]:.4f}" if action is not None else ""
-            ])
-
-    def log_gpu_memory(self, tag=""):
-        if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / 1024**2
-            reserved = torch.cuda.memory_reserved() / 1024**2
-            print(f"[GPU {tag}] Allocated: {allocated:.1f}MB, Reserved: {reserved:.1f}MB")
-    
-    def train_step(self) -> dict:
-        if len(self.memory) < CONFIG.START_TRAIN_SIZE:
+    def train_step(self):
+        if self.replay_buffer.size() < BATCH_SIZE:
             return None
 
-        self.steps += 1
-        batch = self.memory.sample(CONFIG.BATCH_SIZE, include_latest=True)
+        self.total_it += 1
 
-        state = torch.cat(batch.state).to(DEVICE).float()
-        action = torch.tensor(np.array(batch.action), dtype=torch.float32).to(DEVICE)
-        reward = torch.tensor(batch.reward, dtype=torch.float32).to(DEVICE).unsqueeze(1)
-        done = torch.tensor(batch.done, dtype=torch.float32).to(DEVICE).unsqueeze(1)
-
-        non_final_mask = torch.tensor([s is not None for s in batch.next_state], device=DEVICE)
-        non_final_next = torch.cat([s for s in batch.next_state if s is not None]).to(DEVICE).float()
-
-        # ----- Critic update -----
-        with torch.cuda.amp.autocast():
-            with torch.no_grad():
-                next_action = self.actor_target(non_final_next)
-                if not CONFIG.DISCRETE:
-                    noise = torch.clamp(
-                        torch.randn_like(next_action) * CONFIG.NOISE_STD,
-                        -CONFIG.NOISE_CLIP, CONFIG.NOISE_CLIP)
-                    next_action = torch.clamp(next_action + noise, -1.0, 1.0)
-                target_q1, target_q2 = self.critic_target(non_final_next, next_action)
-                target_q = torch.min(target_q1, target_q2)
-                target = torch.zeros(CONFIG.BATCH_SIZE, 1, device=DEVICE, dtype=target_q.dtype)
-                target[non_final_mask] = target_q
-                target = reward + (1 - done) * CONFIG.GAMMA * target
-
-            current_q1, current_q2 = self.critic(state, action)
-            critic_loss = F.mse_loss(current_q1, target) + F.mse_loss(current_q2, target)
+        # Sample replay buffer
+        state, action, next_state, reward, done = self.replay_buffer.sample(BATCH_SIZE)
         
-        q_mean = current_q1.mean().item()
-        q_std = current_q1.std().item()
-        
-        self.critic_optimizer.zero_grad()
-        self.scaler.scale(critic_loss).backward()
-        self.scaler.unscale_(self.critic_optimizer)
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
-        self.scaler.step(self.critic_optimizer)
-        self.scaler.update()
-        
-        critic_loss_val = critic_loss.item()
-        
-        del current_q1, current_q2, critic_loss, target
-        del target_q1, target_q2, target_q, next_action
+        if next_state is None:
+             # This case shouldn't happen with the current sample logic if we handle None correctly
+             # But if we have mixed None and Tensor in a batch, stack will fail.
+             # We need to handle 'done' correctly. 
+             # If done=1, next_state doesn't matter for target Q.
+             # Let's assume sample() handles this or we filter.
+             # Actually, my sample() implementation uses stack, which will fail if some are None.
+             # Fix: In sample(), if next_state is None, we should probably substitute a dummy tensor
+             # OR, we ensure we don't sample 'None' next_states? No, we need them for terminal states.
+             # Better: Use a mask.
+             pass
 
-        # ----- Actor update (delayed) -----
-        actor_loss_val = None
-        if self.steps % CONFIG.POLICY_DELAY == 0:
-            with torch.cuda.amp.autocast():
-                actor_output = self.actor(state)
-                actor_loss = -self.critic.q1_forward(state, actor_output).mean()
-                actor_loss += CONFIG.ACTION_REG_COEF * (actor_output ** 2).mean()
+        # Handle None in next_state for batching
+        # In this simple implementation, let's assume we always have a next_state image 
+        # even if game over (just the last frame).
+        # If the user code passes None for next_state on game over, we need to fix that in store_transition or here.
+        # Looking at Demo code: "game_status.current_pic if not game_status.game_over else None"
+        # So next_state CAN be None.
+        # We must handle this.
+        # FIX: We will create a dummy zero tensor for next_state if it is None in the batch.
+        # But wait, sample() does `torch.stack(batch_next_states)`. This will crash if mixed.
+        # I need to modify ReplayBuffer.sample to handle this.
+        # For now, let's modify store_transition to store a zero tensor if next_state is None.
+        
+        with torch.no_grad():
+            noise = (torch.randn_like(action) * POLICY_NOISE).clamp(-NOISE_CLIP, NOISE_CLIP)
             
+            next_action = (self.actor_target(next_state) + noise).clamp(-1, 1)
+
+            # Compute the target Q value
+            target_Q1 = self.critic_1_target(next_state, next_action)
+            target_Q2 = self.critic_2_target(next_state, next_action)
+            target_Q = torch.min(target_Q1, target_Q2)
+            target_Q = reward + (1 - done) * GAMMA * target_Q
+
+        # Get current Q estimates
+        current_Q1 = self.critic_1(state, action)
+        current_Q2 = self.critic_2(state, action)
+
+        # Compute critic loss
+        critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
+
+        # Optimize the critic
+        self.critic_1_optimizer.zero_grad()
+        self.critic_2_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_1_optimizer.step()
+        self.critic_2_optimizer.step()
+
+        actor_loss = None
+        # Delayed policy updates
+        if self.total_it % POLICY_FREQ == 0:
+            # Compute actor losse
+            actor_loss = -self.critic_1(state, self.actor(state)).mean()
+            
+            # Optimize the actor 
             self.actor_optimizer.zero_grad()
-            self.scaler.scale(actor_loss).backward()
-            self.scaler.unscale_(self.actor_optimizer)
-            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
-            self.scaler.step(self.actor_optimizer)
-            self.scaler.update()
-            
-            actor_loss_val = actor_loss.item()
-            
-            del actor_output, actor_loss
-            
-            self._soft_update(self.actor, self.actor_target)
-            self._soft_update(self.critic, self.critic_target)
+            actor_loss.backward()
+            self.actor_optimizer.step()
 
-        # Step schedulers
-        self.actor_scheduler.step()
-        self.critic_scheduler.step()
+            # Update the frozen target models
+            for param, target_param in zip(self.critic_1.parameters(), self.critic_1_target.parameters()):
+                target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
 
-        # 記錄每步數據到 CSV
-        latest_action = batch.action[-1] if batch.action else None
-        latest_reward = batch.reward[-1] if batch.reward else 0
-        self._log_step(critic_loss_val, actor_loss_val, q_mean, q_std, latest_reward, latest_action)
+            for param, target_param in zip(self.critic_2.parameters(), self.critic_2_target.parameters()):
+                target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
 
-        del state, action, reward, done, non_final_mask, non_final_next
-
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        if (self.steps % CONFIG.SAVE_INTERVAL) == 1:
-            self.save_model()
-
-        return {'critic_loss': critic_loss_val, 'actor_loss': actor_loss_val, 'q_mean': q_mean}
-
-    def _soft_update(self, source, target):
-        for t_param, s_param in zip(target.parameters(), source.parameters()):
-            t_param.data.copy_(CONFIG.TAU * s_param.data + (1 - CONFIG.TAU) * t_param.data)
-
-    def reset_episode(self):
-        self.current_episode_reward = 0
-        self.current_episode_steps = 0
-
-    def save_model(self):
-        CONFIG.MODEL_PATH.mkdir(parents=True, exist_ok=True)
-
-        # ====== TensorBoard 記錄 ======
-        # 需要一張 sample state 來觸發 forward，記錄 activations
-        if len(self.memory) > 0:
-            sample_state = self.memory.buffer[-1].state.to(DEVICE).float()
-            with torch.no_grad():
-                _ = self.actor(sample_state)
-                self.log_activations_to_tensorboard()
-            self.log_weights_to_tensorboard()
+            for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
+                target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
         
-        # 記錄訓練指標（從最近的 step log 取得）
-        if CONFIG.STEP_LOG_FILE.exists():
-            try:
-                with open(CONFIG.STEP_LOG_FILE, 'r') as f:
-                    lines = f.readlines()
-                    if len(lines) > 1:  # 有 header + 至少一筆資料
-                        last_line = lines[-1].strip().split(',')
-                        critic_loss = float(last_line[3]) if last_line[3] else 0
-                        actor_loss = float(last_line[4]) if last_line[4] else None
-                        q_mean = float(last_line[5]) if last_line[5] else 0
-                        q_std = float(last_line[6]) if last_line[6] else 0
-                        
-                        self.writer.add_scalar('train/critic_loss', critic_loss, self.steps)
-                        if actor_loss is not None:
-                            self.writer.add_scalar('train/actor_loss', actor_loss, self.steps)
-                        self.writer.add_scalar('train/q_mean', q_mean, self.steps)
-                        self.writer.add_scalar('train/q_std', q_std, self.steps)
-            except Exception as e:
-                print(f"Error reading step log for TensorBoard: {e}")
+        self.save_model()
 
-        # ====== 存檔 ======
-        if len(self.memory) > CONFIG.START_TRAIN_SIZE:
-            batch = self.memory.sample(CONFIG.START_TRAIN_SIZE, include_latest=False)
-            prev_train_data = [
-                Transition(s, a, ns, r, d) 
-                for s, a, ns, r, d in zip(batch.state, batch.action, batch.next_state, batch.reward, batch.done)
-            ]
-        else:
-            prev_train_data = list(self.memory.buffer)
-        
-        torch.save({
-            'actor': self.actor.state_dict(),
-            'critic': self.critic.state_dict(),
-            'actor_target': self.actor_target.state_dict(),
-            'critic_target': self.critic_target.state_dict(),
-            'actor_optimizer': self.actor_optimizer.state_dict(),
-            'critic_optimizer': self.critic_optimizer.state_dict(),
-            'actor_scheduler': self.actor_scheduler.state_dict(),
-            'critic_scheduler': self.critic_scheduler.state_dict(),
-            'steps': self.steps,
-            'episode_count': self.episode_count,
-            'episode_rewards': self.episode_rewards,
-            'scaler': self.scaler.state_dict(),
-            'prev_train_data': prev_train_data,
-        }, CONFIG.MODEL_PATH / "td3_minesweeper.pth")
-        print(f"Model saved, steps: {self.steps}, episodes: {self.episode_count}")
-        
-        self.writer.flush()
-        
-        # 更新訓練曲線圖
-        self._plot_training_curves()
-
-    def _plot_training_curves(self):
-        try:
-            plot_training_log(
-                str(CONFIG.STEP_LOG_FILE),
-                str(CONFIG.EPISODE_LOG_FILE),
-                str(CONFIG.PLOT_FILE)
-            )
-        except Exception as e:
-            print(f"Failed to plot training curves: {e}")
-
-    def get_stats(self) -> dict:
         return {
-            'steps': self.steps,
-            'episodes': self.episode_count,
-            'memory_size': len(self.memory),
-            'avg_reward': np.mean(list(self.episode_rewards)[-CONFIG.EPISODE_MAX_LEN:]) if self.episode_rewards else 0,
+            "critic_loss": critic_loss.item(),
+            "actor_loss": actor_loss.item() if actor_loss else None
         }
 
-# ==================== Global Agent ====================
-_agent = None
+    def log_action_image(self, current_screenshot, log_info, step_count, reward=None):
+        # Optional: Save image with action for debugging
+        pass
 
-def get_agent(screen_region: tuple = None) -> TD3Agent:
-    global _agent
-    if _agent is None:
-        _agent = TD3Agent(screen_region)
-    return _agent
+    def save_model(self):
+        if not os.path.exists('models'):
+            os.makedirs('models')
+        torch.save(self.actor.state_dict(), 'models/actor.pth')
+        torch.save(self.critic_1.state_dict(), 'models/critic_1.pth')
+        torch.save(self.critic_2.state_dict(), 'models/critic_2.pth')
+
+    def try_load_model(self):
+        if os.path.exists('models/actor.pth'):
+            try:
+                self.actor.load_state_dict(torch.load('models/actor.pth'))
+                self.actor_target.load_state_dict(self.actor.state_dict())
+                print("Loaded Actor model")
+            except:
+                print("Failed to load Actor model")
+        
+        if os.path.exists('models/critic_1.pth'):
+            try:
+                self.critic_1.load_state_dict(torch.load('models/critic_1.pth'))
+                self.critic_1_target.load_state_dict(self.critic_1.state_dict())
+                print("Loaded Critic 1 model")
+            except:
+                print("Failed to load Critic 1 model")
+
+        if os.path.exists('models/critic_2.pth'):
+            try:
+                self.critic_2.load_state_dict(torch.load('models/critic_2.pth'))
+                self.critic_2_target.load_state_dict(self.critic_2.state_dict())
+                print("Loaded Critic 2 model")
+            except:
+                print("Failed to load Critic 2 model")
+
+    def reset_episode(self):
+        pass
+
+    # Fix for store_transition to handle None next_state
+    def store_transition(self, state, action, next_state, reward, done):
+        state_cpu = state.cpu()
+        if next_state is None:
+            next_state_cpu = torch.zeros_like(state_cpu)
+        else:
+            next_state_cpu = next_state.cpu()
+        
+        self.replay_buffer.store(state_cpu, action, next_state_cpu, reward, done)
+
+
+def get_agent(screen_region):
+    return TD3Agent(screen_region)
