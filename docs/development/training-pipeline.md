@@ -33,27 +33,51 @@ On restart, `SACAgent.__init__()` → `try_load_model()` loads persistent 150 en
 - Training competes with inference for GPU resources
 - No way to batch train on collected data separately
 
-## Proposed Pipeline (Local + Cloud)
+## Two-Stage Training Pipeline
 
 > This is part of the new SAC design — not yet implemented.
 
-### Phase 1: Data Collection (Local, GTX 1050 Ti)
+### Stage 1: Discrete Pre-training (Local, GTX 1050 Ti)
 
-- Run game and agent in inference-only mode
-- Save experience tuples (screenshot, action, reward, next_screenshot, done) to disk
-- Format: Replay Buffer serialized to files
+- **Script**: `train_stage1.py` (standalone, does not touch `Demo_test_Minesweeper.py`)
+- Uses `MinesweeperLogic` API directly (no GUI, no screenshots)
+- Input: Grid state tensor `(12, 10, 10)` — one-hot encoded cell states
+- Pipeline: `GridEncoder → (128, 80, 80) → SpatialAttentionHead → (256) → SAC Actor/Critic`
+- Purpose: Validate SAC can learn Minesweeper; pre-train SpatialAttentionHead + SAC heads
+- Replay buffer: BUFFER_CAPACITY=300, SAVE_CAPACITY=150 (same as Stage 2, but ~2.4 KB/entry vs ~2.4 MB/entry)
+- Output: `models/stage1_weights.pth` (SpatialAttention + SAC heads only, for Stage 2 to load)
+- Lightweight — runs entirely on local GPU
 
-### Phase 2: Training (Cloud, GCP)
+### Stage 2: Visual Training (Local + Cloud)
+
+#### Phase 1: Data Collection (Local, GTX 1050 Ti)
+
+- Run game with GUI and agent in inference-only mode
+- Capture screenshots as state, execute mouse clicks as actions
+- Save experience tuples to replay buffer on disk
+
+#### Phase 2: Training (Cloud, GCP)
 
 - Upload replay buffer data to GCP
-- Run off-policy SAC training on high-compute instances
+- Load Stage 1 pre-trained weights for SpatialAttentionHead + SAC heads
+- Load COCO pretrained weights for YOLO11n backbone
+- Fine-tune entire pipeline end-to-end (nothing frozen)
 - Export trained weights
 
-### Phase 3: Deployment (Local, GTX 1050 Ti)
+#### Phase 3: Deployment (Local, GTX 1050 Ti)
 
 - Download trained weights
 - Optionally convert to TensorRT `.engine` format for faster inference
 - Run agent in inference mode with updated policy
+
+### Weight Transfer (Stage 1 → Stage 2)
+
+| Component | Source | Frozen? |
+|-----------|--------|---------|
+| GridEncoder | Discarded | — |
+| YOLO11nBackbone | COCO pretrained | No |
+| SpatialAttentionHead | Stage 1 pre-trained | No |
+| SAC Actor/Critic heads | Stage 1 pre-trained | No |
 
 ## Reward Design (Minesweeper)
 

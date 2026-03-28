@@ -152,6 +152,267 @@ The agent must be able to **fully resume training** from the last saved state. A
 - Runtime buffer pointer starts at 150, leaving room for 450 new transitions before circular overwrite
 - Optimizer state restoration ensures Adam momentum/variance continuity (without this, training effectively "restarts" even if weights are loaded)
 
+## Two-Stage Training Architecture
+
+The system uses a two-stage training approach: first pre-train on discrete grid state to validate that SAC can learn Minesweeper, then transfer weights to the visual pipeline.
+
+### Stage 1: Discrete Pre-training (Grid State → SAC)
+
+```
+Grid State (B, 12, 10, 10)
+       │
+       ▼
+┌─ GridEncoder (discarded after Stage 1) ────────┐
+│  ConvTranspose2d(12→64, k=4,s=2,p=1) + SiLU   │  10×10 → 20×20
+│  ConvTranspose2d(64→128, k=4,s=2,p=1) + SiLU   │  20×20 → 40×40
+│  ConvTranspose2d(128→128, k=4,s=2,p=1) + SiLU   │  40×40 → 80×80
+└────────────────────────────────────────────────┘
+       │
+       ▼
+    (B, 128, 80, 80)  ← same shape as YOLO output
+       │
+       ▼
+┌─ SpatialAttentionHead (weights transferred) ───┐
+│  attention_conv → attention map (B, 1, 80, 80) │
+│  softmax → weighted spatial pooling             │
+│  fc → embedding (B, 256)                        │
+└────────────────────────────────────────────────┘
+       │
+       ▼
+┌─ SAC Actor head (weights transferred) ─────────┐
+│  mean_head → (B, 2)                             │
+│  log_std_head → (B, 2)                          │
+└────────────────────────────────────────────────┘
+       │
+       ▼
+    action (x, y) ∈ [0, 1]
+```
+
+**Grid State Encoding** — 12-channel one-hot per cell:
+
+| Channel | Meaning |
+|---------|---------|
+| 0 | Unrevealed (未翻開) |
+| 1 | Flagged (已標旗) |
+| 2 | Revealed number 0 (空白) |
+| 3–9 | Revealed number 1–7 |
+| 10 | Revealed number 8 |
+| 11 | Mine (地雷, only visible on game over) |
+
+**Purpose**: Validate that SpatialAttentionHead + SAC Actor can learn Minesweeper spatial reasoning (e.g., inferring bomb locations from adjacent numbers — a natural fit for attention mechanisms).
+
+**Training environment**: Runs against `MinesweeperLogic` API directly (no screenshots, no GUI). Lightweight enough for local 1050 Ti.
+
+**Critic**: Also pre-trained in Stage 1 with its own GridEncoder + SpatialAttentionHead. Weights transferred to Stage 2.
+
+### Stage 2: Visual Training (Screenshot → SAC)
+
+```
+Screenshot (B, 3, 640, 640)
+       │
+       ▼
+┌─ YOLO11nBackbone (COCO pretrained) ───────────┐
+│  mid + last → fuse → channel_reduce            │
+└────────────────────────────────────────────────┘
+       │
+       ▼
+    (B, 128, 80, 80)  ← same shape
+       │
+       ▼
+┌─ SpatialAttentionHead (loaded from Stage 1) ──┐
+│  NOT frozen — continues fine-tuning            │
+└────────────────────────────────────────────────┘
+       │
+       ▼
+┌─ SAC Actor head (loaded from Stage 1) ────────┐
+│  NOT frozen — continues fine-tuning            │
+└────────────────────────────────────────────────┘
+       │
+       ▼
+    action (x, y) ∈ [0, 1]
+```
+
+### Weight Transfer (Stage 1 → Stage 2)
+
+| Component | Stage 1 source | Stage 2 initialization | Frozen? |
+|-----------|---------------|----------------------|---------|
+| GridEncoder | Trained | **Discarded** (replaced by YOLO) | — |
+| YOLO11nBackbone | — | COCO pretrained | No |
+| SpatialAttentionHead (Actor) | Trained | Loaded from Stage 1 | No |
+| SpatialAttentionHead (Critic) | Trained | Loaded from Stage 1 | No |
+| Actor mean_head / log_std_head | Trained | Loaded from Stage 1 | No |
+| Critic FC layers | Trained | Loaded from Stage 1 | No |
+| Entropy log_alpha | Trained | Loaded from Stage 1 | No |
+
+**Saved checkpoint** (end of Stage 1):
+
+```
+stage1_weights.pth = {
+    "actor_spatial_attention": state_dict,
+    "actor_mean_head": state_dict,
+    "actor_log_std_head": state_dict,
+    "critic_spatial_attention": state_dict,
+    "critic_fc_layers": state_dict,
+    "log_alpha": tensor,
+}
+```
+
+GridEncoder weights are NOT saved — they are Stage 1 only.
+
+### Why This Works
+
+The key insight: both GridEncoder and YOLO output **(B, 128, 80, 80)** feature maps. SpatialAttentionHead learns game-reasoning patterns (attention over grid cells) in Stage 1, then adapts to visual features in Stage 2. This is analogous to using YOLO's COCO pretrained weights — starting from a useful initialization rather than random.
+
+## Game Logic Separation (MinesweeperLogic)
+
+The Minesweeper game is split into two files to support both GUI play and headless pre-training:
+
+```
+Minesweeper/
+  ├── MinesweeperLogic.py    ← Pure game logic, no UI imports
+  ├── Minesweeper.py         ← UI layer, delegates to MinesweeperLogic
+  └── Minesweeper_manager.py ← Subprocess launcher (unchanged)
+```
+
+### MinesweeperLogic API
+
+```
+class MinesweeperLogic:
+
+    __init__(rows, cols, mines_count)
+
+    reset() → grid_state
+        # Reset game to initial state
+
+    click(row, col) → ClickResult
+        # Left-click a cell
+        # Returns: ClickResult(
+        #     changed: bool,           # board changed (valid click)
+        #     game_over: bool,         # hit a mine
+        #     win: bool,               # all safe cells revealed
+        #     revealed_cells: list,    # newly revealed [(r, c, number), ...]
+        #     hit_mine: tuple|None     # (r, c) of mine hit, or None
+        # )
+
+    flag(row, col) → FlagResult
+        # Right-click to toggle flag
+        # Returns: FlagResult(toggled: bool, is_flagged: bool)
+
+    get_grid_state() → 2D array
+        # Per-cell values: -1=unrevealed, -2=flagged, 0-8=revealed number
+
+    get_grid_state_tensor() → Tensor (12, rows, cols)
+        # One-hot encoding for Stage 1 pre-training input
+
+    Properties:
+        rows, cols, mines_count, game_over, is_win,
+        first_click, revealed, flags, mines, remaining_mines
+```
+
+### UI Layer (Minesweeper.py)
+
+**No visual changes** — only internal refactoring:
+- Replaces inline game state (`self.mines`, `self.revealed`, etc.) with `self.logic = MinesweeperLogic(...)`
+- UI methods read from `ClickResult`/`FlagResult` to update button appearance
+- All game rule logic (mine placement, reveal cascade, win check) moves to `MinesweeperLogic`
+
+## Stage 1 Pre-training Script (`train_stage1.py`)
+
+Standalone script for Stage 1 discrete pre-training. Does NOT modify `Demo_test_Minesweeper.py`.
+
+### File Location
+
+```
+autoTest_pytorch/
+  ├── Demo_test_Minesweeper.py    ← unchanged
+  ├── train_stage1.py             ← NEW: Stage 1 discrete pre-training
+  ├── RL_Agent.py                 ← needs new Stage1 classes
+  └── Minesweeper/
+        ├── MinesweeperLogic.py   ← NEW: pure game logic
+        ├── Minesweeper.py        ← refactored to use MinesweeperLogic
+        └── Minesweeper_manager.py
+```
+
+### train_stage1.py Responsibilities
+
+| Function | Description |
+|----------|-------------|
+| Create game | `MinesweeperLogic(10, 10, 10)` |
+| Create agent | `Stage1SACAgent` (GridEncoder + SpatialAttention + SAC) |
+| Training loop | Run N episodes, each step calls `logic.click()` |
+| Checkpoint | Every 50 episodes + on exit |
+| Output | `models/stage1_weights.pth` (for Stage 2 to load) |
+| Logging | Episode reward, win rate, loss per episode |
+
+### Main Flow
+
+```
+train_stage1.py
+│
+├── Init
+│   ├── MinesweeperLogic(rows=10, cols=10, mines=10)
+│   ├── Stage1SACAgent(state_channels=12, grid_size=10)
+│   └── Load previous checkpoint (if exists)
+│
+├── Training Loop (N episodes)
+│   ├── logic.reset()
+│   ├── while not done:
+│   │   ├── state = logic.get_grid_state_tensor()      # (12, 10, 10)
+│   │   ├── action = agent.select_action(state)         # (x, y) ∈ [0, 1]
+│   │   ├── row, col = action_to_grid(action, size=10)
+│   │   ├── result = logic.click(row, col)
+│   │   ├── reward = compute_reward(result)
+│   │   ├── next_state = logic.get_grid_state_tensor()
+│   │   ├── agent.store(state, action, reward, next_state, done)
+│   │   └── agent.train_step()
+│   ├── agent.on_episode_end()
+│   └── log(episode, total_reward, win/lose, steps)
+│
+├── Save
+│   └── models/stage1_weights.pth
+│
+└── Print summary (win rate, avg reward)
+```
+
+### New Classes Needed in RL_Agent.py
+
+| Class | Description |
+|-------|-------------|
+| `GridEncoder` | 3× ConvTranspose2d, maps (12, 10, 10) → (128, 80, 80) |
+| `Stage1ActorNetwork` | GridEncoder + SpatialAttentionHead + mean/log_std heads |
+| `Stage1CriticNetwork` | GridEncoder + SpatialAttentionHead + Q-value heads |
+| `Stage1SACAgent` | Uses Stage1Actor/Critic, manages training loop and checkpoints |
+| `save_stage1_weights()` | Saves only SpatialAttention + SAC heads (not GridEncoder) |
+
+### Stage 1 Replay Buffer
+
+Same two-tier design as Stage 2, but much smaller per-entry:
+
+| | Stage 1 | Stage 2 |
+|--|---------|---------|
+| State size per entry | 12×10×10 = 1,200 floats ≈ **2.4 KB** | 3×640×640 ≈ **2.4 MB** |
+| BUFFER_CAPACITY | 300 (≈ 720 KB RAM) | 300 (≈ 720 MB RAM) |
+| SAVE_CAPACITY | 150 (≈ 360 KB disk) | 150 (≈ 360 MB disk) |
+| Storage | All in RAM (tiny) | State images on disk as .pt files |
+
+Save triggers: Every 50 episodes + on program exit. Same stratified random sampling by reward.
+
+### Stage 1 Checkpoint Files
+
+```
+models/
+  ├── stage1_actor.pth           # Stage1ActorNetwork full state
+  ├── stage1_critic.pth          # Stage1CriticNetwork full state
+  ├── stage1_critic_target.pth   # Target network
+  ├── stage1_log_alpha.pth       # Entropy coefficient
+  ├── stage1_training_state.pth  # Optimizers, step counter, episode count, buffer index
+  ├── stage1_replay_buffer/      # Runtime buffer (tiny files)
+  ├── stage1_replay_buffer_save/ # Persistent save
+  └── stage1_weights.pth         # Transfer weights (SpatialAttention + SAC heads only)
+```
+
+`stage1_weights.pth` is the ONLY file Stage 2 needs. All other `stage1_*` files are for Stage 1 resume only.
+
 ## All Design Questions Resolved
 
 No open questions remain. Ready for implementation when authorized.
