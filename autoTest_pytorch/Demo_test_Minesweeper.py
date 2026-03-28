@@ -196,7 +196,7 @@ class Game_test_case(unittest.TestCase) :
             # if click position is out of game_region
             # really negitive reward and keep looping
             print("Model decided to click in invalid position")
-            game_status.reward = -12.0
+            game_status.reward = -1.0
             
             game_status.agent.log_action_image(
                 current_screenshot, 
@@ -208,12 +208,7 @@ class Game_test_case(unittest.TestCase) :
             self.update_model(game_status)
 
     def update_model(self, game_status):
-        if game_status.reward > 0 :
-            game_status.positive_reward += 1
-        elif game_status.reward < 0 :
-            game_status.negative_reward += 1
-        
-        # 6. 儲存經驗
+        # 儲存經驗
         if game_status.previous_pic is not None and game_status.previous_action is not None:
             game_status.agent.store_transition(
                 game_status.previous_pic,
@@ -222,15 +217,11 @@ class Game_test_case(unittest.TestCase) :
                 game_status.reward,
                 game_status.game_over
             )
-        
-        # 7. 訓練
+
+        # 訓練
         loss_info = game_status.agent.train_step()
         if loss_info:
-            print(f"Loss - Critic: {loss_info['critic_loss']:.4f}", end="")
-            if loss_info['actor_loss']:
-                print(f", Actor: {loss_info['actor_loss']:.4f}")
-            else:
-                print()
+            print(f"Loss - Critic: {loss_info['critic_loss']:.4f}, Actor: {loss_info['actor_loss']:.4f}")
 
     class Game_status():
         def __init__(self):
@@ -268,26 +259,15 @@ class Game_test_case(unittest.TestCase) :
         Tool_Main.glo_var.s_record_time()
         UI_waiting_time = 1
         game_status = Game_test_case.Game_status()
-        game_status.positive_reward = 0
-        game_status.negative_reward = 0
-        game_status.init_positive_reward = 8
-        if Tool_Main.glo_var.round_count > 30 and (random.random() > Tool_Main.glo_var.NOISE_PROB):
-            game_status.noise = False
-        else:
-            game_status.noise = True
+        game_status.valid_click_reward = 2  # escalating: starts at 2, +2 each valid click
+        game_status.noise = True  # SAC handles exploration via stochastic policy
         time.sleep(UI_waiting_time)
         self.decide_next_step_and_play(game_status)
         time.sleep(UI_waiting_time)
-        
+
         while True:
             check_pause()
             time.sleep(1)
-            if (game_status.game_over == 1) or Tool_Main.glo_var.fail_playing:
-                non_noise_prob = game_status.positive_reward / \
-                    (game_status.positive_reward + game_status.negative_reward)
-                non_noise_prob /= 2
-                Tool_Main.glo_var.NOISE_PROB = 1-non_noise_prob
-                print("Tool_Main.glo_var.NOISE_PROB :", Tool_Main.glo_var.NOISE_PROB)
             if game_status.game_over :
                 self.assertTrue(True, "game_over(really finish the game)")
                 break
@@ -297,26 +277,26 @@ class Game_test_case(unittest.TestCase) :
 
             last_pic_pos = f"grid_region_comp_{0+11}_{0}"
             # since a small change in the whole screen shot is tiny, the threshold should be very strick
-            if Tool_Main.compare_sim(last_pic_pos,sys._getframe().f_code.co_name, precise = True) < 0.9995 : 
+            if Tool_Main.compare_sim(last_pic_pos,sys._getframe().f_code.co_name, precise = True) < 0.9995 :
                 # case : something changed
                 # game status for valid click
                 game_status.step_count += 1
-                game_status.reward = game_status.init_positive_reward
-                game_status.init_positive_reward += 2
+                game_status.reward = game_status.valid_click_reward
+                game_status.valid_click_reward += 2
                 print("有效點擊！")
                 time.sleep(UI_waiting_time)
 
                 # 檢查輸了
                 if Tool_Main.compare_sim("lose", sys._getframe().f_code.co_name, precise=True) >= 0.9:
-                    game_status.reward = -8.0
+                    game_status.reward = -10.0
                     game_status.game_over = 1
-                    print("💥 踩到地雷！")
-                
+                    print("踩到地雷！")
+
                 # 檢查贏了
                 elif Tool_Main.compare_sim("win", sys._getframe().f_code.co_name, precise=True) >= 0.9:
-                    game_status.reward = 15.0
+                    game_status.reward = 20.0
                     game_status.game_over = 1
-                    print("🎉 獲勝！")
+                    print("獲勝！")
 
                 self.update_model(game_status)
                 if not game_status.game_over :
@@ -327,10 +307,10 @@ class Game_test_case(unittest.TestCase) :
                 if Tool_Main.compare_sim("buttons",sys._getframe().f_code.co_name, precise = True) < 0.99 :
                     # not sure what happens, so don't give reward to model
                     game_status.game_over = 1
-                
+
                 # case : nothing change after a period
                 game_status.step_count += 1
-                game_status.reward = -10.0
+                game_status.reward = -1.0
                 print("無效點擊（畫面無變化）")
                 self.update_model(game_status)
                 if game_status.step_count > game_status.max_steps:
@@ -402,7 +382,6 @@ if __name__=="__main__" :
         player_num = player_num,           # 玩家數量最大數量 通常是截圖看要截幾張
         round_count = round_count
     )
-    Tool_Main.glo_var.NOISE_PROB = 0.9
     print("開始初始化此遊戲必要變數")
     # 初始化這個遊戲才會用到的參數
     game_only_var = Game_only_var()

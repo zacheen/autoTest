@@ -6,3 +6,8 @@ pandas
 opencv-python
 pyautogui
 selenium
+torch
+torchvision
+ultralytics
+pynput
+numpy

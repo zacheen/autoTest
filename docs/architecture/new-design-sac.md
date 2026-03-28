@@ -85,16 +85,16 @@ SAC Actor Output (x, y) → Pixel Scaling → Mouse Click → State Verification
 
 | Event | Reward | Notes |
 |-------|--------|-------|
-| Valid click (board changes) | +1 | Flat reward, no escalation |
+| Valid click (board changes) | +2, +4, +6, ... (escalating by +2 each consecutive valid click) | Rewards sustained good play; resets each episode |
 | Invalid click (no screen change) | -1 | Includes clicking revealed cells, flagged cells, etc. |
 | Click outside game region | -1 | Treated same as invalid click |
 | Hit mine (lose) | -10 | Game over |
 | Win | +20 | Game over |
 
 Design principles:
-- Simple and flat — no escalating rewards that distort value estimation
+- Valid click reward escalates starting from +2, increasing by +2 each consecutive valid click per episode — incentivizes sustained good play
 - Invalid click and out-of-bounds are unified as -1 (both mean "nothing useful happened")
-- Lose penalty is 10× the step penalty, win reward is 20× the step reward — clear signal without being extreme
+- Lose penalty and win reward provide strong terminal signals
 
 ## All Design Questions Resolved
 
