@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import ast; ast.parse\\(open\\(''RL_Agent.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import ast; ast.parse\\(open\\(''RL_Agent.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")"
+    ]
+  }
+}
