@@ -38,12 +38,20 @@ YOLO_MID_CHANNELS = 128
 YOLO_LAST_CHANNELS = 128
 FUSED_CHANNELS = YOLO_MID_CHANNELS + YOLO_LAST_CHANNELS  # 256
 
+# Stage 1 預訓練參數
+GRID_STATE_CHANNELS = 12  # one-hot channel 數量 (MinesweeperLogic.NUM_CHANNELS)
+
 # Paths
 LOG_ACTIONS = True
 ACTION_LOG_PATH = Path("./models/action_logs")
 REPLAY_SAVE_PATH = Path("./models/replay_buffer")
 REPLAY_PERSISTENT_PATH = Path("./models/replay_buffer_save")
 MODEL_SAVE_PATH = Path("./models")
+
+# Stage 1 paths
+STAGE1_MODEL_PATH = Path("./models/stage1")
+STAGE1_REPLAY_PATH = Path("./models/stage1/replay_buffer")
+STAGE1_REPLAY_PERSISTENT_PATH = Path("./models/stage1/replay_buffer_save")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -283,6 +291,497 @@ class SACCriticNetwork(nn.Module):
         return self.q1(x), self.q2(x)
 
 
+# ============================================================
+# Stage 1 預訓練專用 (離散 grid state → SAC)
+# ============================================================
+
+class GridEncoder(nn.Module):
+    """將離散 grid state (12, 10, 10) 轉換為 (128, 80, 80) feature map。
+
+    使用 ConvTranspose2d 逐步放大: 10→20→40→80。
+    階段 2 時會被 YOLO11nBackbone 取代（權重不保留）。
+    """
+
+    def __init__(self, in_channels=GRID_STATE_CHANNELS, out_channels=128):
+        super().__init__()
+        self.layers = nn.Sequential(
+            # 10×10 → 20×20
+            nn.ConvTranspose2d(in_channels, 64, kernel_size=4, stride=2, padding=1),
+            nn.SiLU(inplace=True),
+            # 20×20 → 40×40
+            nn.ConvTranspose2d(64, 128, kernel_size=4, stride=2, padding=1),
+            nn.SiLU(inplace=True),
+            # 40×40 → 80×80
+            nn.ConvTranspose2d(128, out_channels, kernel_size=4, stride=2, padding=1),
+            nn.SiLU(inplace=True),
+        )
+
+    def forward(self, x):
+        """
+        Args:
+            x: (B, 12, 10, 10) one-hot grid state
+        Returns:
+            (B, 128, 80, 80) feature map
+        """
+        return self.layers(x)
+
+
+class Stage1ActorNetwork(nn.Module):
+    """Stage 1 Actor: grid state → Gaussian distribution over (x, y) actions.
+
+    GridEncoder + SpatialAttentionHead + mean/log_std heads。
+    SpatialAttentionHead 和 head 的權重會轉移到 Stage 2。
+    """
+
+    LOG_STD_MIN = -20
+    LOG_STD_MAX = 2
+
+    def __init__(self, embed_dim=256, action_dim=2):
+        super().__init__()
+        self.encoder = GridEncoder()
+        self.attention = SpatialAttentionHead(in_channels=128, embed_dim=embed_dim)
+        self.mean_head = nn.Linear(embed_dim, action_dim)
+        self.log_std_head = nn.Linear(embed_dim, action_dim)
+
+    def get_embedding(self, state):
+        """
+        Args:
+            state: (B, 12, 10, 10)
+        Returns:
+            (B, 256) embedding
+        """
+        features = self.encoder(state)
+        embedding = self.attention(features)
+        return embedding
+
+    def forward(self, state):
+        """
+        Args:
+            state: (B, 12, 10, 10)
+        Returns:
+            mean: (B, 2), log_std: (B, 2)
+        """
+        embedding = self.get_embedding(state)
+        mean = self.mean_head(embedding)
+        log_std = self.log_std_head(embedding)
+        log_std = torch.clamp(log_std, self.LOG_STD_MIN, self.LOG_STD_MAX)
+        return mean, log_std
+
+    def sample(self, state):
+        """跟 SACActorNetwork.sample 完全相同的邏輯。"""
+        mean, log_std = self.forward(state)
+        std = log_std.exp()
+        normal = torch.distributions.Normal(mean, std)
+        x_t = normal.rsample()
+        action = torch.tanh(x_t)
+        log_prob = normal.log_prob(x_t)
+        log_prob -= torch.log(1 - action.pow(2) + 1e-6)
+        log_prob = log_prob.sum(dim=-1, keepdim=True)
+        return action, log_prob, mean
+
+
+class Stage1CriticNetwork(nn.Module):
+    """Stage 1 Critic: grid state embedding + action → Q-value.
+
+    有自己的 GridEncoder 和 SpatialAttentionHead（不跟 Actor 共享）。
+    """
+
+    def __init__(self, embed_dim=256, action_dim=2):
+        super().__init__()
+        self.encoder = GridEncoder()
+        self.attention = SpatialAttentionHead(in_channels=128, embed_dim=embed_dim)
+
+        input_dim = embed_dim + action_dim
+        self.q1 = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.SiLU(inplace=True),
+            nn.Linear(256, 256),
+            nn.SiLU(inplace=True),
+            nn.Linear(256, 1)
+        )
+        self.q2 = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.SiLU(inplace=True),
+            nn.Linear(256, 256),
+            nn.SiLU(inplace=True),
+            nn.Linear(256, 1)
+        )
+
+    def get_embedding(self, state):
+        """
+        Args:
+            state: (B, 12, 10, 10)
+        Returns:
+            (B, 256) embedding
+        """
+        features = self.encoder(state)
+        embedding = self.attention(features)
+        return embedding
+
+    def forward(self, embedding, action):
+        """
+        Args:
+            embedding: (B, 256)
+            action: (B, 2)
+        Returns:
+            q1: (B, 1), q2: (B, 1)
+        """
+        x = torch.cat([embedding, action], dim=-1)
+        return self.q1(x), self.q2(x)
+
+
+class Stage1ReplayBuffer:
+    """Stage 1 用的 in-memory replay buffer (grid state 很小，不需要存磁碟)。"""
+
+    def __init__(self, max_size=BUFFER_CAPACITY):
+        self.max_size = max_size
+        self.buffer = []
+        self.ptr = 0
+        self.size_count = 0
+
+    def store(self, state, action, next_state, reward, done):
+        """
+        Args:
+            state: (12, 10, 10) tensor
+            action: numpy array (2,)
+            next_state: (12, 10, 10) tensor
+            reward: float
+            done: bool
+        """
+        entry = {
+            'state': state.cpu().clone(),
+            'action': action.copy() if isinstance(action, np.ndarray) else np.array(action),
+            'next_state': next_state.cpu().clone(),
+            'reward': float(reward),
+            'done': bool(done)
+        }
+
+        if len(self.buffer) < self.max_size:
+            self.buffer.append(entry)
+        else:
+            self.buffer[self.ptr] = entry
+
+        self.ptr = (self.ptr + 1) % self.max_size
+        self.size_count = min(self.size_count + 1, self.max_size)
+
+    def sample(self, batch_size):
+        indices = np.random.randint(0, self.size_count, size=batch_size)
+
+        states = torch.stack([self.buffer[i]['state'] for i in indices]).to(device)
+        actions = torch.tensor(
+            np.array([self.buffer[i]['action'] for i in indices]),
+            dtype=torch.float32
+        ).to(device)
+        next_states = torch.stack([self.buffer[i]['next_state'] for i in indices]).to(device)
+        rewards = torch.tensor(
+            [self.buffer[i]['reward'] for i in indices],
+            dtype=torch.float32
+        ).unsqueeze(1).to(device)
+        dones = torch.tensor(
+            [float(self.buffer[i]['done']) for i in indices],
+            dtype=torch.float32
+        ).unsqueeze(1).to(device)
+
+        return states, actions, next_states, rewards, dones
+
+    def size(self):
+        return self.size_count
+
+    def get_all_rewards(self):
+        """取得所有 entry 的 reward（供 stratified save 用）。"""
+        return [self.buffer[i]['reward'] for i in range(self.size_count)]
+
+
+class Stage1SACAgent:
+    """Stage 1 SAC Agent — 用離散 grid state 預訓練。
+
+    訓練完成後可以匯出 SpatialAttentionHead + SAC head 的權重，
+    供 Stage 2 的 SACAgent 載入。
+    """
+
+    def __init__(self):
+        self.action_dim = 2
+
+        # Actor
+        self.actor = Stage1ActorNetwork(embed_dim=256, action_dim=self.action_dim).to(device)
+
+        # Twin Critics + target
+        self.critic = Stage1CriticNetwork(embed_dim=256, action_dim=self.action_dim).to(device)
+        self.critic_target = Stage1CriticNetwork(embed_dim=256, action_dim=self.action_dim).to(device)
+        self.critic_target.load_state_dict(self.critic.state_dict())
+
+        # Optimizers
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR_ACTOR)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LR_CRITIC)
+
+        # Entropy tuning
+        self.target_entropy = TARGET_ENTROPY
+        self.log_alpha = torch.tensor(
+            np.log(INIT_ALPHA), dtype=torch.float32,
+            requires_grad=True, device=device
+        )
+        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR_ALPHA)
+
+        # Replay buffer (in-memory, grid state 很小)
+        self.replay_buffer = Stage1ReplayBuffer(max_size=BUFFER_CAPACITY)
+        self.total_it = 0
+        self.episode_count = 0
+
+        # 嘗試載入之前的 checkpoint
+        self.try_load_model()
+
+        # 程式結束時存檔
+        atexit.register(self.save_persistent)
+
+    def select_action(self, state, add_noise=True):
+        """根據 grid state 選擇動作。
+
+        Args:
+            state: (12, 10, 10) tensor
+            add_noise: True=探索模式, False=確定性模式
+        Returns:
+            action: numpy array (2,) in [-1, 1]
+        """
+        state_batch = state.unsqueeze(0).to(device)
+
+        self.actor.eval()
+        with torch.no_grad():
+            if add_noise:
+                action, _, _ = self.actor.sample(state_batch)
+            else:
+                mean, _ = self.actor(state_batch)
+                action = torch.tanh(mean)
+        self.actor.train()
+
+        return action.cpu().numpy().flatten()
+
+    def store_transition(self, state, action, next_state, reward, done):
+        self.replay_buffer.store(state, action, next_state, reward, done)
+
+    def train_step(self):
+        """執行一步 SAC 訓練。"""
+        if self.replay_buffer.size() < BATCH_SIZE:
+            return None
+
+        self.total_it += 1
+        state, action, next_state, reward, done = self.replay_buffer.sample(BATCH_SIZE)
+        alpha = self.log_alpha.exp().detach()
+
+        # --- Critic update ---
+        with torch.no_grad():
+            next_action, next_log_prob, _ = self.actor.sample(next_state)
+            # 用 critic_target 自己的 encoder (不是 actor 的)
+            next_embed = self.critic_target.get_embedding(next_state)
+            target_q1, target_q2 = self.critic_target(next_embed, next_action)
+            target_q = torch.min(target_q1, target_q2) - alpha * next_log_prob
+            target_q = reward + (1 - done) * GAMMA * target_q
+
+        current_embed = self.critic.get_embedding(state)
+        current_q1, current_q2 = self.critic(current_embed, action)
+        critic_loss = F.mse_loss(current_q1, target_q) + F.mse_loss(current_q2, target_q)
+
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_optimizer.step()
+
+        # --- Actor update ---
+        new_action, log_prob, _ = self.actor.sample(state)
+        # Critic 用自己的 encoder 算 embedding (不跟 actor 共享)
+        critic_embed = self.critic.get_embedding(state).detach()
+        q1, q2 = self.critic(critic_embed, new_action)
+        min_q = torch.min(q1, q2)
+        actor_loss = (alpha * log_prob - min_q).mean()
+
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+
+        # --- Alpha update ---
+        alpha_loss = -(self.log_alpha * (log_prob.detach() + self.target_entropy)).mean()
+        self.alpha_optimizer.zero_grad()
+        alpha_loss.backward()
+        self.alpha_optimizer.step()
+
+        # --- Soft update target ---
+        for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
+            target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
+
+        return {
+            "critic_loss": critic_loss.item(),
+            "actor_loss": actor_loss.item(),
+            "alpha": alpha.item(),
+        }
+
+    def on_episode_end(self):
+        """每個 episode 結束時呼叫。"""
+        self.episode_count += 1
+        # 每 episode 存一次 model 權重（而不是每個 train step）
+        self._save_model()
+        if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
+            print(f"[Stage1] Periodic save at episode {self.episode_count}")
+            self.save_persistent()
+
+    def _save_model(self):
+        """存 model 權重 (每步呼叫)。"""
+        STAGE1_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        torch.save(self.actor.state_dict(), STAGE1_MODEL_PATH / 'stage1_actor.pth')
+        torch.save(self.critic.state_dict(), STAGE1_MODEL_PATH / 'stage1_critic.pth')
+        torch.save(self.critic_target.state_dict(), STAGE1_MODEL_PATH / 'stage1_critic_target.pth')
+        torch.save(self.log_alpha, STAGE1_MODEL_PATH / 'stage1_log_alpha.pth')
+        torch.save({
+            'actor_optimizer': self.actor_optimizer.state_dict(),
+            'critic_optimizer': self.critic_optimizer.state_dict(),
+            'alpha_optimizer': self.alpha_optimizer.state_dict(),
+            'total_it': self.total_it,
+            'episode_count': self.episode_count,
+        }, STAGE1_MODEL_PATH / 'stage1_optimizer_state.pth')
+
+    def try_load_model(self):
+        """載入之前的 Stage 1 checkpoint。"""
+        actor_path = STAGE1_MODEL_PATH / 'stage1_actor.pth'
+        if actor_path.exists():
+            try:
+                self.actor.load_state_dict(torch.load(actor_path, map_location=device))
+                print("[Stage1] Loaded Actor")
+            except Exception as e:
+                print(f"[Stage1] Failed to load Actor: {e}")
+
+        critic_path = STAGE1_MODEL_PATH / 'stage1_critic.pth'
+        if critic_path.exists():
+            try:
+                self.critic.load_state_dict(torch.load(critic_path, map_location=device))
+                print("[Stage1] Loaded Critic")
+            except Exception as e:
+                print(f"[Stage1] Failed to load Critic: {e}")
+
+        critic_target_path = STAGE1_MODEL_PATH / 'stage1_critic_target.pth'
+        if critic_target_path.exists():
+            try:
+                self.critic_target.load_state_dict(torch.load(critic_target_path, map_location=device))
+                print("[Stage1] Loaded Critic Target")
+            except Exception as e:
+                print(f"[Stage1] Failed to load Critic Target: {e}")
+
+        alpha_path = STAGE1_MODEL_PATH / 'stage1_log_alpha.pth'
+        if alpha_path.exists():
+            try:
+                self.log_alpha = torch.load(alpha_path, map_location=device)
+                self.log_alpha.requires_grad_(True)
+                self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR_ALPHA)
+                print("[Stage1] Loaded log_alpha")
+            except Exception as e:
+                print(f"[Stage1] Failed to load log_alpha: {e}")
+
+        opt_path = STAGE1_MODEL_PATH / 'stage1_optimizer_state.pth'
+        if opt_path.exists():
+            try:
+                state = torch.load(opt_path, map_location=device, weights_only=False)
+                self.actor_optimizer.load_state_dict(state['actor_optimizer'])
+                self.critic_optimizer.load_state_dict(state['critic_optimizer'])
+                self.alpha_optimizer.load_state_dict(state['alpha_optimizer'])
+                self.total_it = state['total_it']
+                self.episode_count = state.get('episode_count', 0)
+                print(f"[Stage1] Loaded optimizer state: total_it={self.total_it}, episode={self.episode_count}")
+            except Exception as e:
+                print(f"[Stage1] Failed to load optimizer state: {e}")
+
+        # 載入 persistent replay buffer
+        training_state_path = STAGE1_MODEL_PATH / 'stage1_training_state.pth'
+        if training_state_path.exists():
+            try:
+                state = torch.load(training_state_path, map_location=device, weights_only=False)
+                persistent_entries = state.get('persistent_entries', [])
+                # 限制不超過 buffer 容量
+                persistent_entries = persistent_entries[:self.replay_buffer.max_size]
+                for entry in persistent_entries:
+                    self.replay_buffer.buffer.append(entry)
+                self.replay_buffer.ptr = len(persistent_entries) % self.replay_buffer.max_size
+                self.replay_buffer.size_count = len(persistent_entries)
+                print(f"[Stage1] Loaded {len(persistent_entries)} persistent buffer entries")
+            except Exception as e:
+                print(f"[Stage1] Failed to load persistent buffer: {e}")
+
+    def save_persistent(self):
+        """將 replay buffer 的 stratified random subset 存到磁碟。"""
+        buf = self.replay_buffer
+        if buf.size_count == 0:
+            print("[Stage1] Buffer empty, skipping persistent save")
+            return
+
+        # 按 reward 分組
+        reward_groups = defaultdict(list)
+        for i in range(buf.size_count):
+            reward_groups[buf.buffer[i]['reward']].append(i)
+
+        # Stratified sampling
+        total = buf.size_count
+        target = min(SAVE_CAPACITY, total)
+        selected_indices = []
+
+        remaining = target
+        groups = sorted(reward_groups.items(), key=lambda x: len(x[1]))
+        for i, (reward, indices) in enumerate(groups):
+            if i == len(groups) - 1:
+                count = remaining
+            else:
+                count = round(len(indices) / total * target)
+            count = min(count, len(indices), remaining)
+            selected = random.sample(indices, count)
+            selected_indices.extend(selected)
+            remaining -= count
+            if remaining <= 0:
+                break
+
+        # 收集選中的 entries
+        persistent_entries = [buf.buffer[i] for i in selected_indices]
+
+        # 存到磁碟
+        STAGE1_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        torch.save({
+            'actor_optimizer': self.actor_optimizer.state_dict(),
+            'critic_optimizer': self.critic_optimizer.state_dict(),
+            'alpha_optimizer': self.alpha_optimizer.state_dict(),
+            'total_it': self.total_it,
+            'episode_count': self.episode_count,
+            'persistent_entries': persistent_entries,
+        }, STAGE1_MODEL_PATH / 'stage1_training_state.pth')
+
+        # Log
+        saved_rewards = defaultdict(int)
+        for entry in persistent_entries:
+            saved_rewards[entry['reward']] += 1
+        print(f"[Stage1] Persistent save: {len(persistent_entries)} entries")
+        print(f"[Stage1] Reward distribution: {dict(saved_rewards)}")
+
+    def save_stage1_weights(self):
+        """匯出 Stage 1 的 transferable 權重（SpatialAttention + SAC heads）。
+
+        GridEncoder 權重不匯出 — Stage 2 用 YOLO 取代。
+        """
+        STAGE1_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        weights = {
+            # Actor
+            'actor_attention': self.actor.attention.state_dict(),
+            'actor_mean_head': self.actor.mean_head.state_dict(),
+            'actor_log_std_head': self.actor.log_std_head.state_dict(),
+            # Critic
+            'critic_attention': self.critic.attention.state_dict(),
+            'critic_q1': self.critic.q1.state_dict(),
+            'critic_q2': self.critic.q2.state_dict(),
+            # Entropy
+            'log_alpha': self.log_alpha.detach().cpu(),
+        }
+        path = STAGE1_MODEL_PATH / 'stage1_weights.pth'
+        torch.save(weights, path)
+        print(f"[Stage1] Transfer weights saved to {path}")
+        return path
+
+
+# ============================================================
+# Stage 2 (視覺訓練) — 以下是原有的 classes
+# ============================================================
+
+
 class ReplayBuffer:
     """Disk-backed replay buffer for GCP upload compatibility."""
 
@@ -518,8 +1017,8 @@ class SACAgent:
 
         # --- Actor update ---
         new_action, log_prob, _ = self.actor.sample(state)
-        embed = self.actor.get_embedding(state)
-        q1, q2 = self.critic(embed.detach(), new_action)
+        actor_embed = self.actor.get_embedding(state)
+        q1, q2 = self.critic(actor_embed.detach(), new_action)
         min_q = torch.min(q1, q2)
         actor_loss = (alpha * log_prob - min_q).mean()
 

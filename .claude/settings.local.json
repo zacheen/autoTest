@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import ast; ast.parse\\(open\\(''RL_Agent.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
-      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import ast; ast.parse\\(open\\(''RL_Agent.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")"
+      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import ast; ast.parse\\(open\\(''RL_Agent.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import py_compile; py_compile.compile\\(''Minesweeper/MinesweeperLogic.py'', doraise=True\\); print\\(''MinesweeperLogic.py OK''\\)\")",
+      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import py_compile; py_compile.compile\\(''Minesweeper/Minesweeper.py'', doraise=True\\); print\\(''Minesweeper.py OK''\\)\")",
+      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import py_compile; py_compile.compile\\(''train_stage1.py'', doraise=True\\); print\\(''train_stage1.py OK''\\)\")",
+      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import py_compile; py_compile.compile\\(''RL_Agent.py'', doraise=True\\); print\\(''RL_Agent.py OK''\\)\")"
     ]
   }
 }
