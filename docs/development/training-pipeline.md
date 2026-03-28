@@ -15,10 +15,22 @@ Game Play (1050 Ti)
     └── Train step (every step, if buffer has enough samples)
 ```
 
+### Checkpoint & Resume
+
+### Model Weights (saved every `train_step()`)
+- `actor.pth`, `critic.pth`, `critic_target.pth`, `log_alpha.pth`
+
+### Two-Tier Replay Buffer
+- **Runtime**: `replay_buffer/` — up to 600 entries (BUFFER_CAPACITY) in CPU RAM, circular overwrite
+- **Persistent**: `replay_buffer_save/` — 150 entries (SAVE_CAPACITY) on disk, stratified random by reward
+- **Save triggers**: Every 50 episodes + on program exit (`atexit`)
+- **Training state**: `training_state.pth` (optimizer states, step counter, episode counter, persistent buffer index)
+
+On restart, `SACAgent.__init__()` → `try_load_model()` loads persistent 150 entries into runtime buffer slots 0-149, then new data fills slots 150-599.
+
 ### Limitations
 
 - Training competes with inference for GPU resources
-- Replay buffer is in-memory only (lost on restart)
 - No way to batch train on collected data separately
 
 ## Proposed Pipeline (Local + Cloud)
@@ -45,10 +57,10 @@ Game Play (1050 Ti)
 
 ## Reward Design (Minesweeper)
 
-| Event | Current Reward | Notes |
-|-------|---------------|-------|
-| Valid click (board changes) | +8, +10, +12... | Escalates with consecutive valid clicks |
-| Click outside game region | -12 | Penalizes invalid positions |
-| No board change (timeout) | -10 | Penalizes ineffective clicks |
-| Hit mine (lose) | -8 | Game over |
-| Win | +15 | Game over |
+| Event | Reward | Notes |
+|-------|--------|-------|
+| Valid click (board changes) | +2, +4, +6... (escalating by +2) | Rewards sustained good play; resets each episode |
+| Invalid click (no screen change) | -1 | Includes clicking revealed cells, flagged cells |
+| Click outside game region | -1 | Treated same as invalid click |
+| Hit mine (lose) | -10 | Game over |
+| Win | +20 | Game over |

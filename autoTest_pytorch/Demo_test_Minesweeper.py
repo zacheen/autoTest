@@ -269,9 +269,11 @@ class Game_test_case(unittest.TestCase) :
             check_pause()
             time.sleep(1)
             if game_status.game_over :
+                game_status.agent.on_episode_end()
                 self.assertTrue(True, "game_over(really finish the game)")
                 break
             elif Tool_Main.glo_var.fail_playing :
+                game_status.agent.on_episode_end()
                 self.assertTrue(False, "time_out(reach max steps)")
                 break
 

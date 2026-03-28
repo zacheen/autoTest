@@ -77,7 +77,9 @@ SAC Actor Output (x, y) → Pixel Scaling → Mouse Click → State Verification
 | Spatial head architecture | Spatial attention mechanism | Learns to focus on relevant grid cells; more expressive than plain conv+flatten for a structured grid game |
 | Embedding dimension | 256 | Balances expressiveness vs. 1050 Ti inference speed. YOLO11n mid+last fusion ≈ 384 channels at 40×40 → attention compresses to 256-d vector. Large enough for SAC on 2D action space, small enough for real-time inference |
 | History mechanism | None — single frame only | Agent decides purely from current screenshot. Simplifies replay buffer, training, and inference. Minesweeper board state is fully observable from a single frame |
-| Replay buffer format | Raw images (640×640 PNG) + rewards on disk | Must store raw images since backbone is trainable (embeddings change as weights update). Saved to disk for upload to GCP |
+| Replay buffer format | Raw images (640×640 float16 tensors) + rewards on disk | Must store raw images since backbone is trainable (embeddings change as weights update). Saved to disk for upload to GCP |
+| Replay buffer (runtime) | BUFFER_CAPACITY = 600 entries (~1.44 GB RAM) | Circular buffer in CPU RAM. Training samples randomly from these 600 entries |
+| Replay buffer (persistent) | SAVE_CAPACITY = 150 entries (~360 MB disk) | Stratified random subset saved to disk every 50 episodes + on exit. Loaded into runtime buffer on next startup |
 | TensorRT export | Full inference path: YOLO + spatial attention + actor | Critic is not needed at inference time. Optimizing the complete forward pass (screenshot → click coordinates) gives maximum speedup on 1050 Ti |
 | Fine-tuning location | GCP only | 1050 Ti is for data collection (Phase 1) and inference (Phase 3) only. All training happens on GCP (Phase 2) |
 
@@ -95,6 +97,60 @@ Design principles:
 - Valid click reward escalates starting from +2, increasing by +2 each consecutive valid click per episode — incentivizes sustained good play
 - Invalid click and out-of-bounds are unified as -1 (both mean "nothing useful happened")
 - Lose penalty and win reward provide strong terminal signals
+
+## Two-Tier Replay Buffer
+
+The replay buffer has two layers:
+
+| Layer | Capacity | Location | Purpose |
+|-------|----------|----------|---------|
+| Runtime Buffer | 600 entries (~1.44 GB) | CPU RAM | Circular buffer for online training. `sample()` draws randomly from here |
+| Persistent Save | 150 entries (~360 MB) | Disk (`models/replay_buffer_save/`) | Saved subset loaded on next startup |
+
+### Save Strategy (Runtime → Persistent)
+
+- **Trigger**: Every 50 episodes + on program exit (`atexit`)
+- **Method**: Stratified random sampling by reward value
+  - Group all 600 buffer entries by their reward
+  - From each reward group, sample proportionally (e.g., if 30% of buffer has reward -1, then 30% of saved 150 = 45 entries with reward -1)
+  - Ensures balanced reward distribution in persistent storage
+
+### Load Strategy (Persistent → Runtime)
+
+- On startup, `try_load_model()` loads 150 persistent entries into runtime buffer slots 0-149
+- `replay_buffer.ptr = 150` → new transitions write to slots 150-599
+- Runtime buffer has room for 450 more before circular overwrite begins
+
+## Checkpoint & Resume
+
+The agent must be able to **fully resume training** from the last saved state. A complete checkpoint includes:
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| Actor weights | `models/actor.pth` | Policy network (YOLO backbone + spatial head + policy head) |
+| Critic weights | `models/critic.pth` | Twin Q-networks |
+| Critic target weights | `models/critic_target.pth` | Soft-updated target networks |
+| Entropy coefficient | `models/log_alpha.pth` | Learnable SAC temperature α |
+| Training state | `models/training_state.pth` | Optimizer states, step counter, replay buffer index |
+
+### training_state.pth contents
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `actor_optimizer` | state_dict | Adam momentum/variance for actor — without this, optimizer "forgets" learning dynamics on restart |
+| `critic_optimizer` | state_dict | Adam momentum/variance for critic |
+| `alpha_optimizer` | state_dict | Adam momentum/variance for α |
+| `total_it` | int | Total training steps completed — for logging and scheduling |
+| `episode_count` | int | Total episodes completed — for periodic save scheduling |
+| `persistent_index` | list[dict] | Metadata index for the 150 persistent entries (paths to `replay_buffer_save/` .pt files) |
+
+### Resume behavior
+
+- On `SACAgent.__init__()`, `try_load_model()` is called automatically
+- Each component loads independently with try/except — partial checkpoints are tolerated
+- Persistent buffer (150 entries in `models/replay_buffer_save/`) is copied into runtime buffer slots 0-149
+- Runtime buffer pointer starts at 150, leaving room for 450 new transitions before circular overwrite
+- Optimizer state restoration ensures Adam momentum/variance continuity (without this, training effectively "restarts" even if weights are loaded)
 
 ## All Design Questions Resolved
 

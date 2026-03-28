@@ -7,7 +7,10 @@ import numpy as np
 import cv2
 import os
 import random
+import shutil
+from collections import defaultdict
 from PIL import Image
+import atexit
 import datetime
 from pathlib import Path
 from ultralytics import YOLO
@@ -21,7 +24,9 @@ GAMMA = 0.99
 TAU = 0.005
 INIT_ALPHA = 0.2
 TARGET_ENTROPY = -2.0  # = -action_dim
-MEMORY_SIZE = 10000
+BUFFER_CAPACITY = 600   # Runtime circular buffer in CPU RAM (~1.44GB)
+SAVE_CAPACITY = 150     # Persistent save to disk (~360MB)
+SAVE_EVERY_N_EPISODES = 50
 IMAGE_SIZE = (640, 640)
 
 # YOLO11n layer indices (discovered via forward pass)
@@ -37,6 +42,7 @@ FUSED_CHANNELS = YOLO_MID_CHANNELS + YOLO_LAST_CHANNELS  # 256
 LOG_ACTIONS = True
 ACTION_LOG_PATH = Path("./models/action_logs")
 REPLAY_SAVE_PATH = Path("./models/replay_buffer")
+REPLAY_PERSISTENT_PATH = Path("./models/replay_buffer_save")
 MODEL_SAVE_PATH = Path("./models")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -280,7 +286,7 @@ class SACCriticNetwork(nn.Module):
 class ReplayBuffer:
     """Disk-backed replay buffer for GCP upload compatibility."""
 
-    def __init__(self, max_size=MEMORY_SIZE, save_dir=REPLAY_SAVE_PATH):
+    def __init__(self, max_size=BUFFER_CAPACITY, save_dir=REPLAY_SAVE_PATH):
         self.max_size = max_size
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -376,6 +382,7 @@ class SACAgent:
         # Replay buffer
         self.replay_buffer = ReplayBuffer()
         self.total_it = 0
+        self.episode_count = 0
 
         # Image preprocessing (YOLO expects [0,1] range, 640x640)
         self.transform = transforms.Compose([
@@ -384,6 +391,9 @@ class SACAgent:
         ])
 
         self.try_load_model()
+
+        # Register atexit handler for persistent save (once, in agent init)
+        atexit.register(self.save_persistent)
 
     def preprocess_screen(self, screenshot_path):
         """Load and preprocess a screenshot for the agent.
@@ -535,12 +545,21 @@ class SACAgent:
         }
 
     def save_model(self):
+        """Save model weights + optimizer state (called every train_step)."""
         print("Saving model")
         MODEL_SAVE_PATH.mkdir(parents=True, exist_ok=True)
         torch.save(self.actor.state_dict(), MODEL_SAVE_PATH / 'actor.pth')
         torch.save(self.critic.state_dict(), MODEL_SAVE_PATH / 'critic.pth')
         torch.save(self.critic_target.state_dict(), MODEL_SAVE_PATH / 'critic_target.pth')
         torch.save(self.log_alpha, MODEL_SAVE_PATH / 'log_alpha.pth')
+        # Save optimizer state for crash resilience (without replay buffer)
+        torch.save({
+            'actor_optimizer': self.actor_optimizer.state_dict(),
+            'critic_optimizer': self.critic_optimizer.state_dict(),
+            'alpha_optimizer': self.alpha_optimizer.state_dict(),
+            'total_it': self.total_it,
+            'episode_count': self.episode_count,
+        }, MODEL_SAVE_PATH / 'optimizer_state.pth')
 
     def try_load_model(self):
         actor_path = MODEL_SAVE_PATH / 'actor.pth'
@@ -577,8 +596,193 @@ class SACAgent:
             except Exception as e:
                 print(f"Failed to load log_alpha: {e}")
 
+        # 載入 optimizer states (from most recent save — optimizer_state or training_state)
+        optimizer_state_path = MODEL_SAVE_PATH / 'optimizer_state.pth'
+        training_state_path = MODEL_SAVE_PATH / 'training_state.pth'
+
+        # Prefer optimizer_state.pth (saved every train_step, more recent)
+        opt_state = None
+        if optimizer_state_path.exists():
+            try:
+                opt_state = torch.load(optimizer_state_path, map_location=device, weights_only=False)
+                self.actor_optimizer.load_state_dict(opt_state['actor_optimizer'])
+                self.critic_optimizer.load_state_dict(opt_state['critic_optimizer'])
+                self.alpha_optimizer.load_state_dict(opt_state['alpha_optimizer'])
+                self.total_it = opt_state['total_it']
+                self.episode_count = opt_state.get('episode_count', 0)
+                print(f"Loaded optimizer state: total_it={self.total_it}, episode={self.episode_count}")
+            except Exception as e:
+                print(f"Failed to load optimizer state: {e}")
+
+        # Load persistent replay buffer from training_state.pth
+        if training_state_path.exists():
+            try:
+                state = torch.load(training_state_path, map_location=device, weights_only=False)
+                # If optimizer_state wasn't loaded, use training_state for optimizers too
+                if opt_state is None:
+                    self.actor_optimizer.load_state_dict(state['actor_optimizer'])
+                    self.critic_optimizer.load_state_dict(state['critic_optimizer'])
+                    self.alpha_optimizer.load_state_dict(state['alpha_optimizer'])
+                    self.total_it = state['total_it']
+                    self.episode_count = state.get('episode_count', 0)
+
+                persistent_index = state.get('persistent_index', [])
+                if persistent_index:
+                    self._load_persistent_buffer(persistent_index)
+
+                print(f"Loaded training state: replay_size={self.replay_buffer.size_count}")
+            except Exception as e:
+                print(f"Failed to load training state: {e}")
+
+    def _load_persistent_buffer(self, persistent_index):
+        """Load persistent buffer entries into runtime replay buffer."""
+        REPLAY_SAVE_PATH.mkdir(parents=True, exist_ok=True)
+        # Clean old runtime buffer files
+        for f in REPLAY_SAVE_PATH.glob("*.pt"):
+            f.unlink()
+        # Guard: don't exceed buffer capacity
+        persistent_index = persistent_index[:self.replay_buffer.max_size]
+        loaded_count = 0
+
+        for entry in persistent_index:
+            # Copy .pt files from persistent to runtime directory (re-index by loaded_count)
+            old_state = Path(entry['state_path'])
+            if not old_state.exists():
+                print(f"Warning: persistent state file not found: {old_state}")
+                continue
+
+            new_state = REPLAY_SAVE_PATH / f"state_{loaded_count}.pt"
+            shutil.copy2(str(old_state), str(new_state))
+
+            new_next_state = None
+            if entry['next_state_path']:
+                old_next = Path(entry['next_state_path'])
+                if old_next.exists():
+                    new_next_state = REPLAY_SAVE_PATH / f"next_state_{loaded_count}.pt"
+                    shutil.copy2(str(old_next), str(new_next_state))
+
+            runtime_entry = {
+                'state_path': str(new_state),
+                'action': entry['action'].copy() if isinstance(entry['action'], np.ndarray) else np.array(entry['action']),
+                'next_state_path': str(new_next_state) if new_next_state else None,
+                'reward': entry['reward'],
+                'done': entry['done']
+            }
+            self.replay_buffer.index.append(runtime_entry)
+            loaded_count += 1
+
+        self.replay_buffer.ptr = loaded_count
+        self.replay_buffer.size_count = loaded_count
+        print(f"Loaded {loaded_count} entries from persistent buffer into runtime buffer")
+
     def reset_episode(self):
         pass
+
+    def on_episode_end(self):
+        """Called when an episode ends. Handles episode counting and periodic save."""
+        self.episode_count += 1
+        print(f"Episode {self.episode_count} ended")
+        if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
+            print(f"Periodic save triggered at episode {self.episode_count}")
+            self.save_persistent()
+
+    def save_persistent(self):
+        """Save a stratified random subset of the replay buffer to disk for next startup.
+
+        Stratified by reward: each reward value gets proportional representation.
+        Saves SAVE_CAPACITY entries from the current BUFFER_CAPACITY buffer.
+        """
+        buf = self.replay_buffer
+        if buf.size_count == 0:
+            print("Replay buffer empty, skipping persistent save")
+            return
+
+        # Group entries by reward
+        reward_groups = defaultdict(list)
+        for i in range(buf.size_count):
+            entry = buf.index[i]
+            reward_groups[entry['reward']].append(i)
+
+        # Calculate proportional counts per reward group
+        total = buf.size_count
+        target = min(SAVE_CAPACITY, total)
+        selected_indices = []
+
+        # Proportional sampling from each group (sorted by size, largest last for rounding remainder)
+        remaining = target
+        groups = sorted(reward_groups.items(), key=lambda x: len(x[1]))
+        for i, (reward, indices) in enumerate(groups):
+            if i == len(groups) - 1:
+                # Last group gets remaining count to avoid rounding errors
+                count = remaining
+            else:
+                count = round(len(indices) / total * target)
+            count = min(count, len(indices), remaining)
+            selected = random.sample(indices, count)
+            selected_indices.extend(selected)
+            remaining -= count
+            if remaining <= 0:
+                break
+
+        # Create persistent save directory
+        REPLAY_PERSISTENT_PATH.mkdir(parents=True, exist_ok=True)
+        # Clean old persistent data
+        for f in REPLAY_PERSISTENT_PATH.glob("*.pt"):
+            f.unlink()
+
+        # Copy selected entries with re-indexed paths
+        persistent_index = []
+        save_idx = 0
+        for old_idx in selected_indices:
+            old_entry = buf.index[old_idx]
+
+            # Copy state tensor — skip if missing
+            old_state = Path(old_entry['state_path'])
+            if not old_state.exists():
+                print(f"Warning: state file missing, skipping: {old_state}")
+                continue
+
+            new_state = REPLAY_PERSISTENT_PATH / f"state_{save_idx}.pt"
+            shutil.copy2(str(old_state), str(new_state))
+
+            # Copy next_state tensor
+            new_next_state = None
+            if old_entry['next_state_path']:
+                old_next = Path(old_entry['next_state_path'])
+                if old_next.exists():
+                    new_next_state = REPLAY_PERSISTENT_PATH / f"next_state_{save_idx}.pt"
+                    shutil.copy2(str(old_next), str(new_next_state))
+
+            persistent_index.append({
+                'state_path': str(new_state),
+                'action': old_entry['action'].copy() if isinstance(old_entry['action'], np.ndarray) else np.array(old_entry['action']),
+                'next_state_path': str(new_next_state) if new_next_state else None,
+                'reward': old_entry['reward'],
+                'done': old_entry['done']
+            })
+            save_idx += 1
+
+        # Save persistent index in training_state.pth
+        self._save_training_state(persistent_index)
+
+        # Log reward distribution
+        saved_rewards = defaultdict(int)
+        for entry in persistent_index:
+            saved_rewards[entry['reward']] += 1
+        print(f"Persistent save: {len(persistent_index)} entries saved to {REPLAY_PERSISTENT_PATH}")
+        print(f"Reward distribution: {dict(saved_rewards)}")
+
+    def _save_training_state(self, persistent_index):
+        """Save training state with persistent buffer index."""
+        MODEL_SAVE_PATH.mkdir(parents=True, exist_ok=True)
+        torch.save({
+            'actor_optimizer': self.actor_optimizer.state_dict(),
+            'critic_optimizer': self.critic_optimizer.state_dict(),
+            'alpha_optimizer': self.alpha_optimizer.state_dict(),
+            'total_it': self.total_it,
+            'episode_count': self.episode_count,
+            'persistent_index': persistent_index,
+        }, MODEL_SAVE_PATH / 'training_state.pth')
 
     def log_action_image(self, state, log_info, step_count, reward=None):
         """Save state image with action markers for debugging."""
