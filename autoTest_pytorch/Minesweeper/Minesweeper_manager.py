@@ -38,5 +38,5 @@ class Minesweeper_manager:
 if __name__ == "__main__":
     mine = Minesweeper_manager()
     mine.thread_start()
-    time.sleep(100)
+    time.sleep(300)
     mine.thread_stop()
