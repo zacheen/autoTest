@@ -1,47 +1,39 @@
-import tkinter as tk
-from Minesweeper import Minesweeper
-import inspect
-
-# Fix for import ambiguity when running from parent directory
-if inspect.ismodule(Minesweeper):
-    Minesweeper = Minesweeper.Minesweeper
-from multiprocessing import Process, Event
+import subprocess
+import sys
 import time
+import signal
+from pathlib import Path
 
-def run_game(stop_event):
-    """Standalone function to run the game in a separate process."""
-    root = tk.Tk()
-    game = Minesweeper(root, stop_event)
-    root.mainloop()
 
 class Minesweeper_manager:
     def __init__(self):
         self.process = None
-        self.stop_event = None
-    
+
     def thread_start(self):
         # Clean up existing process if it exists but is dead
-        if self.process and not self.process.is_alive():
-            self.process.join()
+        if self.process and self.process.poll() is not None:
             self.process = None
 
-        if self.process is None or not self.process.is_alive():
-            self.stop_event = Event()
-            self.process = Process(target=run_game, args=(self.stop_event,))
-            self.process.start()
-    
+        if self.process is None:
+            # Launch Minesweeper.py as a completely separate subprocess
+            # This avoids Windows multiprocessing spawn re-importing the caller
+            minesweeper_script = Path(__file__).parent / "Minesweeper.py"
+            self.process = subprocess.Popen(
+                [sys.executable, str(minesweeper_script)],
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+            print(f"Minesweeper started (PID: {self.process.pid})")
+
     def thread_stop(self):
-        if self.stop_event:
-            self.stop_event.set()
-        
         if self.process:
-            # Wait for the process to finish gracefully
-            self.process.join(timeout=3)
-            # If it's still alive, force terminate
-            if self.process.is_alive():
+            try:
                 self.process.terminate()
-                self.process.join()
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
             self.process = None
+
 
 if __name__ == "__main__":
     mine = Minesweeper_manager()

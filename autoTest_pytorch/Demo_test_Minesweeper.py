@@ -390,7 +390,7 @@ if __name__=="__main__" :
     if Game_envi == "Minesweeper_local_py" :
         game_only_var.mine = Minesweeper_manager()
         game_only_var.mine.thread_start()
-        print("open the game successfully")
+        print("open the Minesweeper successfully")
     else :
         print("打開遊戲網頁")
         Tool_Main.open_game_web()

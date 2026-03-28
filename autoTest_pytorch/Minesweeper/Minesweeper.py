@@ -386,3 +386,4 @@ class Minesweeper:
 if __name__ == "__main__":
     root = tk.Tk()
     Minesweeper(root, None)
+    root.mainloop()
