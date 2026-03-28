@@ -12,13 +12,15 @@ This file serves as a reference guide to navigate all project documentation.
 | Codebase Map | [development/codebase-map.md](development/codebase-map.md) | File-by-file breakdown of the source code |
 | Running the System | [development/running.md](development/running.md) | How to set up and run the project |
 | Training Pipeline | [development/training-pipeline.md](development/training-pipeline.md) | Data collection, training, and inference workflow |
+| Stage 1 Pre-training | [architecture/new-design-sac.md#stage-1-pre-training-script-train_stage1py](architecture/new-design-sac.md#stage-1-pre-training-script-train_stage1py) | Grid state pre-training script and instructions |
 | Lessons Learned | [LESSONS.md](LESSONS.md) | Pitfalls, debugging notes, and session history |
 
 ## Project Status
 
-- **Current state**: TD3 agent with ResNet18 backbone, targeting Minesweeper
-- **Next state**: SAC agent with YOLO11n backbone, generalized for any mouse-driven game
-- **Branch**: `test_discrete` (active development)
+- **Previous state**: TD3 agent with ResNet18 backbone, targeting Minesweeper (failed)
+- **Current state (Stage 1)**: SAC agent with GridEncoder + SpatialAttention, trained on discrete 10×10 grid state (implemented, ready for training)
+- **Next state (Stage 2)**: SAC agent with YOLO11n backbone, trained on visual screenshots, initialized with Stage 1 weights (design complete, code pending)
+- **Branch**: `understand-model-structure` (session work, ready for merge)
 
 ## Legacy Components
 
