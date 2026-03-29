@@ -56,33 +56,48 @@ def action_to_grid(action, rows, cols):
         rows: grid 列數
         cols: grid 行數
     Returns:
-        (row, col) 整數座標
+        (row, col, out_of_bounds)
+        - row, col: 整數座標（如果 out_of_bounds=True 則為 -1）
+        - out_of_bounds: bool, action 值超出 [0, 1] 範圍
     """
-    # ScaledSigmoid 輸出已經接近 [0, 1]，直接 clip 後映射
-    ax = np.clip(action[0], 0, 1)
-    ay = np.clip(action[1], 0, 1)
+    ax = action[0]
+    ay = action[1]
+
+    # 檢查是否超出有效範圍 [0, 1]
+    if ax < 0 or ax > 1 or ay < 0 or ay > 1:
+        return -1, -1, True
 
     col = int(np.clip(ax * cols, 0, cols - 1))
     row = int(np.clip(ay * rows, 0, rows - 1))
 
-    return row, col
+    return row, col, False
 
 
-def compute_reward(result):
+def compute_reward(result, out_of_bounds):
     """根據 ClickResult 計算 reward。
 
+    Reward 階層：
+        +20  贏
+        -10  踩雷
+        +1   有效點擊（翻開新格子）
+        -2   無效點擊（已翻開、已標旗）
+        -3   超出 grid 範圍
+
     Args:
-        result: MinesweeperLogic.ClickResult
+        result: MinesweeperLogic.ClickResult (如果 out_of_bounds=True 則為 None)
+        out_of_bounds: bool
     Returns:
         float: reward 值
     """
+    if out_of_bounds:
+        return -3.0
     if result.win:
         return 20.0
     if result.game_over:
-        return -10.0
+        return -3.0
     if result.changed:
-        return 1.0   # 有效點擊
-    return -1.0       # 無效點擊（已翻開、已標旗、超出範圍）
+        return 3.0    # 有效點擊
+    return -2.0        # 無效點擊（已翻開、已標旗）
 
 
 def run_episode(logic, agent, add_noise=True):
@@ -112,24 +127,30 @@ def run_episode(logic, agent, add_noise=True):
         action = agent.select_action(state, add_noise=add_noise)  # (2,) ≈ [-0.05, 1.05]
 
         # 轉換為 grid 座標
-        row, col = action_to_grid(action, GRID_ROWS, GRID_COLS)
+        row, col, out_of_bounds = action_to_grid(action, GRID_ROWS, GRID_COLS)
 
-        # 執行動作
-        result = logic.click(row, col)
+        # 執行動作（超出範圍則不執行）
+        if out_of_bounds:
+            result = None
+        else:
+            result = logic.click(row, col)
 
         # 計算 reward
-        reward = compute_reward(result)
+        reward = compute_reward(result, out_of_bounds)
         episode_reward += reward
 
         # 統計有效/無效點擊
-        if result.changed:
+        if out_of_bounds:
+            invalid_clicks += 1
+        elif result.changed:
             valid_clicks += 1
         else:
             invalid_clicks += 1
 
         # 取得 next state
-        done = result.game_over or result.win
-        is_win = result.win
+        if not out_of_bounds:
+            done = result.game_over or result.win
+            is_win = result.win
         next_state = logic.get_grid_state_tensor()
 
         # 存 transition + 訓練（只在 training 模式）

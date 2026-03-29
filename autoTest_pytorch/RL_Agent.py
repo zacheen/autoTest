@@ -460,14 +460,107 @@ class Stage1CriticNetwork(nn.Module):
         return self.q1(x), self.q2(x)
 
 
-class Stage1ReplayBuffer:
-    """Stage 1 用的 in-memory replay buffer (grid state 很小，不需要存磁碟)。"""
+class SumTree:
+    """Sum Tree 資料結構，用於 O(log n) 的優先級抽樣。
 
-    def __init__(self, max_size=BUFFER_CAPACITY):
+    葉節點存放 priority，內部節點存放子節點的 priority 總和。
+    """
+
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.tree = np.zeros(2 * capacity - 1, dtype=np.float64)
+        self.write_ptr = 0
+        self.size = 0
+
+    def _propagate(self, idx, change):
+        """從葉節點往上更新 parent 的總和。"""
+        parent = (idx - 1) // 2
+        self.tree[parent] += change
+        if parent != 0:
+            self._propagate(parent, change)
+
+    def _retrieve(self, idx, s):
+        """根據累積 sum 找到對應的葉節點。"""
+        left = 2 * idx + 1
+        right = left + 1
+
+        if left >= len(self.tree):
+            return idx
+
+        if s <= self.tree[left]:
+            return self._retrieve(left, s)
+        else:
+            return self._retrieve(right, s - self.tree[left])
+
+    def total(self):
+        return self.tree[0]
+
+    def update(self, data_idx, priority):
+        """更新某個 data index 的 priority。"""
+        tree_idx = data_idx + self.capacity - 1
+        change = priority - self.tree[tree_idx]
+        self.tree[tree_idx] = priority
+        self._propagate(tree_idx, change)
+
+    def add(self, priority):
+        """新增一筆 priority，回傳對應的 data index。"""
+        data_idx = self.write_ptr
+        self.update(data_idx, priority)
+        self.write_ptr = (self.write_ptr + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
+        return data_idx
+
+    def get(self, s):
+        """根據累積 sum 值 s 找到 (data_idx, priority)。"""
+        tree_idx = self._retrieve(0, s)
+        data_idx = tree_idx - self.capacity + 1
+        return data_idx, self.tree[tree_idx]
+
+    def max_priority(self):
+        """目前所有葉節點的最大 priority。"""
+        leaf_start = self.capacity - 1
+        leaf_end = leaf_start + self.size
+        if self.size == 0:
+            return 1.0
+        return max(self.tree[leaf_start:leaf_end])
+
+
+class Stage1ReplayBuffer:
+    """Stage 1 用的 Prioritized Experience Replay (PER) buffer。
+
+    使用 SumTree 做 O(log n) 的優先級抽樣。
+    Priority = |TD-error| + epsilon，TD-error 大的 transition 被抽中的機率更高。
+
+    Args:
+        max_size: buffer 容量
+        per_alpha: priority 的指數，0=uniform, 1=full prioritization (default: 0.6)
+        per_beta_start: importance sampling weight 的初始值 (default: 0.4)
+        per_beta_end: beta 最終值 (default: 1.0)
+        per_beta_steps: beta 從 start 線性增長到 end 的步數 (default: 100000)
+        per_epsilon: 防止 priority 為 0 的小常數 (default: 1e-5)
+    """
+
+    def __init__(self, max_size=BUFFER_CAPACITY,
+                 per_alpha=0.6, per_beta_start=0.4,
+                 per_beta_end=1.0, per_beta_steps=100000,
+                 per_epsilon=1e-5):
         self.max_size = max_size
-        self.buffer = []
-        self.ptr = 0
+        self.buffer = [None] * max_size
+        self.tree = SumTree(max_size)
         self.size_count = 0
+
+        # PER 超參數
+        self.alpha = per_alpha
+        self.beta_start = per_beta_start
+        self.beta_end = per_beta_end
+        self.beta_steps = per_beta_steps
+        self.epsilon = per_epsilon
+        self.sample_count = 0  # 用來計算 beta 的線性增長
+
+    def _get_beta(self):
+        """Beta 從 beta_start 線性增長到 beta_end。"""
+        fraction = min(self.sample_count / self.beta_steps, 1.0)
+        return self.beta_start + fraction * (self.beta_end - self.beta_start)
 
     def store(self, state, action, next_state, reward, done):
         """
@@ -486,17 +579,48 @@ class Stage1ReplayBuffer:
             'done': bool(done)
         }
 
-        if len(self.buffer) < self.max_size:
-            self.buffer.append(entry)
-        else:
-            self.buffer[self.ptr] = entry
+        # 新 transition 用最大 priority（確保至少被抽到一次）
+        max_p = self.tree.max_priority()
+        priority = max_p ** self.alpha if max_p > 0 else 1.0
 
-        self.ptr = (self.ptr + 1) % self.max_size
-        self.size_count = min(self.size_count + 1, self.max_size)
+        data_idx = self.tree.add(priority)
+        self.buffer[data_idx] = entry
+        self.size_count = self.tree.size
 
     def sample(self, batch_size):
-        indices = np.random.randint(0, self.size_count, size=batch_size)
+        """優先級抽樣，回傳 (states, actions, next_states, rewards, dones, indices, weights)。
 
+        weights 是 importance sampling 權重，用來修正 prioritized sampling 的 bias。
+        indices 用於之後 update_priorities() 更新 TD-error。
+        """
+        self.sample_count += 1
+        beta = self._get_beta()
+
+        indices = []
+        priorities = []
+        total = self.tree.total()
+
+        # 把 total priority 分成 batch_size 等份，每份隨機抽一個
+        segment = total / batch_size
+        for i in range(batch_size):
+            low = segment * i
+            high = segment * (i + 1)
+            s = np.random.uniform(low, high)
+            data_idx, priority = self.tree.get(s)
+            # 防止抽到空的 slot
+            data_idx = np.clip(data_idx, 0, self.size_count - 1)
+            indices.append(data_idx)
+            priorities.append(priority)
+
+        # 計算 importance sampling weights
+        priorities = np.array(priorities, dtype=np.float64)
+        sampling_probs = priorities / total
+        sampling_probs = np.clip(sampling_probs, 1e-10, None)  # 防止除以 0
+        weights = (self.size_count * sampling_probs) ** (-beta)
+        weights = weights / weights.max()  # normalize 到 [0, 1]
+        weights = torch.tensor(weights, dtype=torch.float32).unsqueeze(1).to(device)
+
+        # 組裝 batch
         states = torch.stack([self.buffer[i]['state'] for i in indices]).to(device)
         actions = torch.tensor(
             np.array([self.buffer[i]['action'] for i in indices]),
@@ -512,14 +636,25 @@ class Stage1ReplayBuffer:
             dtype=torch.float32
         ).unsqueeze(1).to(device)
 
-        return states, actions, next_states, rewards, dones
+        return states, actions, next_states, rewards, dones, indices, weights
+
+    def update_priorities(self, indices, td_errors):
+        """用新的 TD-error 更新 priority。
+
+        Args:
+            indices: list of buffer indices (from sample())
+            td_errors: numpy array of |TD-error| values
+        """
+        for idx, td_error in zip(indices, td_errors):
+            priority = (abs(td_error) + self.epsilon) ** self.alpha
+            self.tree.update(idx, priority)
 
     def size(self):
         return self.size_count
 
     def get_all_rewards(self):
         """取得所有 entry 的 reward（供 stratified save 用）。"""
-        return [self.buffer[i]['reward'] for i in range(self.size_count)]
+        return [self.buffer[i]['reward'] for i in range(self.size_count) if self.buffer[i] is not None]
 
 
 class Stage1SACAgent:
@@ -589,12 +724,13 @@ class Stage1SACAgent:
         self.replay_buffer.store(state, action, next_state, reward, done)
 
     def train_step(self):
-        """執行一步 SAC 訓練。"""
+        """執行一步 SAC 訓練（使用 PER）。"""
         if self.replay_buffer.size() < BATCH_SIZE:
             return None
 
         self.total_it += 1
-        state, action, next_state, reward, done = self.replay_buffer.sample(BATCH_SIZE)
+        state, action, next_state, reward, done, per_indices, per_weights = \
+            self.replay_buffer.sample(BATCH_SIZE)
         alpha = self.log_alpha.exp().detach()
 
         # --- Critic update ---
@@ -608,7 +744,16 @@ class Stage1SACAgent:
 
         current_embed = self.critic.get_embedding(state)
         current_q1, current_q2 = self.critic(current_embed, action)
-        critic_loss = F.mse_loss(current_q1, target_q) + F.mse_loss(current_q2, target_q)
+
+        # PER: 用 importance sampling weights 加權 loss
+        td_error1 = (current_q1 - target_q).detach()
+        td_error2 = (current_q2 - target_q).detach()
+        critic_loss = (per_weights * F.mse_loss(current_q1, target_q, reduction='none')).mean() + \
+                      (per_weights * F.mse_loss(current_q2, target_q, reduction='none')).mean()
+
+        # PER: 更新 priority（用兩個 critic 的平均 TD-error）
+        td_errors = ((td_error1.abs() + td_error2.abs()) / 2).cpu().numpy().flatten()
+        self.replay_buffer.update_priorities(per_indices, td_errors)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
@@ -724,9 +869,11 @@ class Stage1SACAgent:
                 # 限制不超過 buffer 容量
                 persistent_entries = persistent_entries[:self.replay_buffer.max_size]
                 for entry in persistent_entries:
-                    self.replay_buffer.buffer.append(entry)
-                self.replay_buffer.ptr = len(persistent_entries) % self.replay_buffer.max_size
-                self.replay_buffer.size_count = len(persistent_entries)
+                    # 用 store 來正確更新 SumTree 的 priority
+                    self.replay_buffer.store(
+                        entry['state'], entry['action'],
+                        entry['next_state'], entry['reward'], entry['done']
+                    )
                 print(f"[Stage1] Loaded {len(persistent_entries)} persistent buffer entries")
             except Exception as e:
                 print(f"[Stage1] Failed to load persistent buffer: {e}")
@@ -741,7 +888,8 @@ class Stage1SACAgent:
         # 按 reward 分組
         reward_groups = defaultdict(list)
         for i in range(buf.size_count):
-            reward_groups[buf.buffer[i]['reward']].append(i)
+            if buf.buffer[i] is not None:
+                reward_groups[buf.buffer[i]['reward']].append(i)
 
         # Stratified sampling
         total = buf.size_count

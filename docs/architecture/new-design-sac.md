@@ -89,13 +89,14 @@ SAC Actor Output (x, y) → Pixel Scaling → Mouse Click → State Verification
 
 | Event | Reward | Notes |
 |-------|--------|-------|
-| Valid click (board changes) | +1 | Effective click that reveals new cell(s) |
-| Invalid click (no screen change) | -1 | Includes clicking revealed cells, flagged cells, out-of-bounds (clipped) |
-| Hit mine (lose) | -10 | Game over |
+| Valid click (board changes) | +3 | Effective click that reveals new cell(s) |
+| Invalid click (already revealed/flagged) | -2 | Clicking a cell that's already open or flagged |
+| Click outside grid bounds | -3 | ScaledSigmoid output outside [0, 1] range |
+| Hit mine (lose) | -3 | Game over — kept low to encourage exploring inside the grid |
 | Win | +20 | Game over |
 
 Design principles:
-- Simple binary feedback: valid (+1) vs invalid (-1)
+- **Graduated penalties**: out-of-bounds (-3) > revealed cell (-2) > valid (+1). Agent learns to stay in bounds first, then click unrevealed cells.
 - Lose penalty and win reward provide strong terminal signals
 
 ## Two-Tier Replay Buffer
