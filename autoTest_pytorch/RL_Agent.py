@@ -15,6 +15,23 @@ import datetime
 from pathlib import Path
 from ultralytics import YOLO
 
+
+class ScaledSigmoid(nn.Module):
+    """ScaledSigmoid activation: out = scale * sigmoid(x) + shift.
+
+    Default: scale=1.1, shift=-0.05 → output range ≈ [-0.05, 1.05]
+    Values in [0, 1] map to valid grid coordinates.
+    Values outside [0, 1] are out-of-bounds.
+    """
+    def __init__(self, scale=1.1, shift=-0.05):
+        super().__init__()
+        self.scale = scale
+        self.shift = shift
+
+    def forward(self, x):
+        return self.scale * torch.sigmoid(x) + self.shift
+
+
 # Hyperparameters
 BATCH_SIZE = 32
 LR_ACTOR = 3e-4
@@ -330,6 +347,7 @@ class Stage1ActorNetwork(nn.Module):
     """Stage 1 Actor: grid state → Gaussian distribution over (x, y) actions.
 
     GridEncoder + SpatialAttentionHead + mean/log_std heads。
+    使用 ScaledSigmoid 取代 tanh，輸出約 [-0.05, 1.05]。
     SpatialAttentionHead 和 head 的權重會轉移到 Stage 2。
     """
 
@@ -342,6 +360,7 @@ class Stage1ActorNetwork(nn.Module):
         self.attention = SpatialAttentionHead(in_channels=128, embed_dim=embed_dim)
         self.mean_head = nn.Linear(embed_dim, action_dim)
         self.log_std_head = nn.Linear(embed_dim, action_dim)
+        self.scaled_sigmoid = ScaledSigmoid(scale=1.1, shift=-0.05)
 
     def get_embedding(self, state):
         """
@@ -368,15 +387,26 @@ class Stage1ActorNetwork(nn.Module):
         return mean, log_std
 
     def sample(self, state):
-        """跟 SACActorNetwork.sample 完全相同的邏輯。"""
+        """使用 ScaledSigmoid 取代 tanh 壓縮 action。
+
+        ScaledSigmoid 輸出約 [-0.05, 1.05]：
+        - [0, 1] 為有效 grid 範圍
+        - <0 或 >1 為超出範圍
+        """
         mean, log_std = self.forward(state)
         std = log_std.exp()
         normal = torch.distributions.Normal(mean, std)
         x_t = normal.rsample()
-        action = torch.tanh(x_t)
-        log_prob = normal.log_prob(x_t)
-        log_prob -= torch.log(1 - action.pow(2) + 1e-6)
+        action = self.scaled_sigmoid(x_t)
+
+        # Log-prob with ScaledSigmoid correction
+        # ScaledSigmoid(x) = scale * sigmoid(x) + shift
+        # d/dx ScaledSigmoid(x) = scale * sigmoid(x) * (1 - sigmoid(x))
+        sig = torch.sigmoid(x_t)
+        log_det = torch.log(self.scaled_sigmoid.scale * sig * (1 - sig) + 1e-6)
+        log_prob = normal.log_prob(x_t) - log_det
         log_prob = log_prob.sum(dim=-1, keepdim=True)
+
         return action, log_prob, mean
 
 
@@ -540,7 +570,7 @@ class Stage1SACAgent:
             state: (12, 10, 10) tensor
             add_noise: True=探索模式, False=確定性模式
         Returns:
-            action: numpy array (2,) in [-1, 1]
+            action: numpy array (2,) ≈ [-0.05, 1.05] (ScaledSigmoid output)
         """
         state_batch = state.unsqueeze(0).to(device)
 
@@ -550,7 +580,7 @@ class Stage1SACAgent:
                 action, _, _ = self.actor.sample(state_batch)
             else:
                 mean, _ = self.actor(state_batch)
-                action = torch.tanh(mean)
+                action = self.actor.scaled_sigmoid(mean)
         self.actor.train()
 
         return action.cpu().numpy().flatten()

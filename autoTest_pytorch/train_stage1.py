@@ -49,22 +49,21 @@ TXT_LOG_PATH = Path("./models/stage1/training_output.txt")
 
 
 def action_to_grid(action, rows, cols):
-    """將 action [-1, 1] 轉換為 grid 座標。
+    """將 ScaledSigmoid action ≈ [-0.05, 1.05] 轉換為 grid 座標。
 
     Args:
-        action: numpy array (2,) in [-1, 1]
+        action: numpy array (2,) ≈ [-0.05, 1.05] (ScaledSigmoid output)
         rows: grid 列數
         cols: grid 行數
     Returns:
         (row, col) 整數座標
     """
-    # [-1, 1] → [0, 1]
-    norm_x = (action[0] + 1) / 2.0
-    norm_y = (action[1] + 1) / 2.0
+    # ScaledSigmoid 輸出已經接近 [0, 1]，直接 clip 後映射
+    ax = np.clip(action[0], 0, 1)
+    ay = np.clip(action[1], 0, 1)
 
-    # [0, 1] → grid 座標，clamp 防止越界
-    col = int(np.clip(norm_x * cols, 0, cols - 1))
-    row = int(np.clip(norm_y * rows, 0, rows - 1))
+    col = int(np.clip(ax * cols, 0, cols - 1))
+    row = int(np.clip(ay * rows, 0, rows - 1))
 
     return row, col
 
@@ -110,7 +109,7 @@ def run_episode(logic, agent, add_noise=True):
         state = logic.get_grid_state_tensor()  # (12, 10, 10)
 
         # 選擇動作
-        action = agent.select_action(state, add_noise=add_noise)  # (2,) in [-1, 1]
+        action = agent.select_action(state, add_noise=add_noise)  # (2,) ≈ [-0.05, 1.05]
 
         # 轉換為 grid 座標
         row, col = action_to_grid(action, GRID_ROWS, GRID_COLS)

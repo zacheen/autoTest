@@ -35,9 +35,11 @@ The previous TD3 + ResNet18 implementation did not work. Key problems:
 ### 3. Action Space: Continuous (x, y)
 
 - Output: Two values representing normalized coordinates
-- Range: [0, 1] via Tanh activation (or sigmoid)
+- Activation: **ScaledSigmoid** (scale=1.1, shift=-0.05) — output range ≈ [-0.05, 1.05]
+  - Values in [0, 1] → valid grid coordinates
+  - Values < 0 or > 1 → out-of-bounds (penalized with -3 reward)
+  - Advantage over Tanh: output maps directly to [0, 1] grid space without extra normalization; boundary region provides a natural "out-of-bounds" signal
 - Scaled to game window resolution for mouse execution
-- Same concept as current implementation
 
 ### 4. Training Pipeline
 
@@ -87,15 +89,13 @@ SAC Actor Output (x, y) → Pixel Scaling → Mouse Click → State Verification
 
 | Event | Reward | Notes |
 |-------|--------|-------|
-| Valid click (board changes) | +2, +4, +6, ... (escalating by +2 each consecutive valid click) | Rewards sustained good play; resets each episode |
-| Invalid click (no screen change) | -1 | Includes clicking revealed cells, flagged cells, etc. |
-| Click outside game region | -1 | Treated same as invalid click |
+| Valid click (board changes) | +1 | Effective click that reveals new cell(s) |
+| Invalid click (no screen change) | -1 | Includes clicking revealed cells, flagged cells, out-of-bounds (clipped) |
 | Hit mine (lose) | -10 | Game over |
 | Win | +20 | Game over |
 
 Design principles:
-- Valid click reward escalates starting from +2, increasing by +2 each consecutive valid click per episode — incentivizes sustained good play
-- Invalid click and out-of-bounds are unified as -1 (both mean "nothing useful happened")
+- Simple binary feedback: valid (+1) vs invalid (-1)
 - Lose penalty and win reward provide strong terminal signals
 
 ## Two-Tier Replay Buffer
