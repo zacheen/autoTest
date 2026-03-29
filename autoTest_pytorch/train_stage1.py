@@ -17,8 +17,7 @@ Stage 1 預訓練腳本 — 用離散 grid state 訓練 SAC。
   runs/stage1/                        (TensorBoard logs)
 """
 
-import os
-import csv
+import sys
 import time
 import datetime
 import numpy as np
@@ -28,6 +27,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from Minesweeper.MinesweeperLogic import MinesweeperLogic
 from RL_Agent import Stage1SACAgent
+from training_logger import TeeOutput, CSVLogger
 
 # ---------- 訓練參數 ----------
 GRID_ROWS = 10
@@ -45,6 +45,7 @@ EVAL_EPISODES = 10           # 每次評估跑幾個 episode
 # ---------- 路徑 ----------
 TENSORBOARD_DIR = Path("./runs/stage1")
 CSV_LOG_PATH = Path("./models/stage1/training_log.csv")
+TXT_LOG_PATH = Path("./models/stage1/training_output.txt")
 
 
 def action_to_grid(action, rows, cols):
@@ -193,34 +194,11 @@ def run_evaluation(logic, agent):
     }
 
 
-class CSVLogger:
-    """CSV 格式的訓練日誌。"""
-
-    def __init__(self, path):
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.file = None
-        self.writer = None
-
-    def open(self, fieldnames):
-        """開啟 CSV 並寫 header（如果檔案不存在或為空）。"""
-        file_exists = self.path.exists() and self.path.stat().st_size > 0
-        self.file = open(self.path, 'a', newline='', encoding='utf-8')
-        self.writer = csv.DictWriter(self.file, fieldnames=fieldnames)
-        if not file_exists:
-            self.writer.writeheader()
-
-    def write(self, row):
-        """寫一行資料。"""
-        self.writer.writerow(row)
-        self.file.flush()
-
-    def close(self):
-        if self.file:
-            self.file.close()
-
-
 def main():
+    # ---------- Tee stdout to txt ----------
+    tee = TeeOutput(TXT_LOG_PATH)
+    sys.stdout = tee
+
     print("=" * 60)
     print("  Stage 1 Pre-training: Grid State → SAC")
     print("=" * 60)
@@ -392,8 +370,10 @@ def main():
         # 確保資源正確釋放（即使中途 crash 或 Ctrl+C）
         print(f"\nTensorBoard logs: {tb_dir}")
         print(f"CSV log: {CSV_LOG_PATH}")
+        print(f"TXT log: {TXT_LOG_PATH}")
         csv_logger.close()
         writer.close()
+        tee.close()
 
 
 if __name__ == "__main__":
