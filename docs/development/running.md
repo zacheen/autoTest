@@ -4,8 +4,9 @@
 
 - Python 3.10
 - CUDA-capable GPU (tested on GTX 1050 Ti)
-- Windows OS (uses pyautogui for screen interaction)
-- Display must be visible (not headless — the agent clicks on actual screen pixels)
+- Windows OS (uses pyautogui for screen interaction in Stage 2)
+- Display must be visible for Stage 2 (not headless — the agent clicks on actual screen pixels)
+- Stage 1 can run headless (no GUI required)
 
 ## Setup
 
@@ -13,20 +14,31 @@
    ```
    pip install -r requirements.txt
    ```
-   Note: `requirements.txt` currently lists legacy dependencies. For the RL agent, the actual requirements are:
-   - `torch` (with CUDA support)
-   - `torchvision`
-   - `pyautogui`
-   - `pynput`
-   - `opencv-python`
-   - `pillow`
-   - `numpy`
+   Key packages: `torch` (CUDA), `torchvision`, `ultralytics`, `pyautogui`, `pynput`, `opencv-python`, `pillow`, `numpy`
 
-2. Template images must exist in `user_change/game_pic/Minesweeper_pic/` with corresponding `.txt` coordinate files.
+2. YOLO11n pretrained weights (`yolo11n.pt`) must be in the project root (used by Stage 2).
 
-3. The game configuration is read from `user_change/Minesweeper_input.txt`.
+3. For Stage 2: template images must exist in `user_change/game_pic/Minesweeper_pic/` with corresponding `.txt` coordinate files. Game configuration is read from `user_change/Minesweeper_input.txt`.
 
-## Running
+## Running Stage 1 Pre-training (Headless)
+
+From the `autoTest_pytorch/` directory:
+
+```bash
+# Main experiment: GridEncoder + HierarchicalAttention + continuous SAC
+python train_stage1.py
+
+# Diagnostic: Simple MLP + discrete SAC (validates RL pipeline)
+python train_stage1_simple.py
+```
+
+Monitor with TensorBoard:
+```bash
+tensorboard --logdir runs/stage1/       # for train_stage1.py
+tensorboard --logdir runs/stage1_simple/ # for train_stage1_simple.py
+```
+
+## Running Stage 2 Visual Agent (GUI Required)
 
 From the `autoTest_pytorch/` directory:
 
@@ -43,14 +55,17 @@ This will:
 
 ## Controls
 
-- **End key**: Toggle pause/resume during gameplay
+- **End key**: Toggle pause/resume during gameplay (Stage 2)
 - The agent runs autonomously once started
 
 ## Outputs
 
 | Output | Location |
 |--------|----------|
-| Model weights | `models/actor.pth`, `models/critic_1.pth`, `models/critic_2.pth` |
+| Stage 1 model weights | `models/stage1/` or `models/stage1_simple/` |
+| Stage 1 transfer weights | `models/stage1/stage1_weights.pth` |
+| Stage 1 training logs | `runs/stage1/`, `models/stage1/training_log.csv` |
+| Stage 2 model weights | `models/actor.pth`, `models/critic.pth`, etc. |
 | Action logs | `models/action_logs/` (annotated screenshots) |
 | Test reports | `testreport/Report-*.html` |
 | Text logs | `testreport/<timestamp>/pipe_output.txt`, `cmd_output.txt`, `error.txt` |

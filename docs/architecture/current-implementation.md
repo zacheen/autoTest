@@ -1,54 +1,71 @@
-# Current Implementation (TD3 + ResNet18)
+# Current Implementation Status
 
-## RL Algorithm: TD3 (Twin Delayed DDPG)
+## Active Development Branch: `_test_replace_attention`
 
-The current agent (`RL_Agent.py`) uses **TD3** — a deterministic policy gradient method with:
+The project is iterating on Stage 1 pre-training to validate whether SAC can learn Minesweeper before investing in the full visual pipeline.
 
-- **Twin Critics**: Two Q-networks to reduce overestimation bias
-- **Delayed Policy Updates**: Actor updates every 2 critic updates (`POLICY_FREQ = 2`)
-- **Target Policy Smoothing**: Noise added to target actions (`POLICY_NOISE = 0.2`)
-- **Soft Target Updates**: Polyak averaging with `TAU = 0.005`
+## What Exists Today
 
-### Network Architecture
+### Three Agent Variants in `RL_Agent.py`
 
-| Component | Backbone | Head |
-|-----------|----------|------|
-| Actor | ResNet18 (pretrained, all layers) → 512-d | FC(512→256) → FC(256→2) → Tanh |
-| Critic (×2) | ResNet18 (pretrained, all layers) → 512-d | Concat(512+2) → FC(514→256) → FC(256→1) |
+| Agent | Architecture | Action Space | Status |
+|-------|-------------|-------------|--------|
+| `Stage1SACAgent` | GridEncoder + HierarchicalAttention + SAC | Continuous (x, y) via ScaledSigmoid | Iterating — testing attention architecture |
+| `SimpleDiscreteAgent` | Flatten → MLP (256→256→100) + SAC-Discrete | Discrete (100 cells) with action masking | Diagnostic — validates RL pipeline |
+| `SACAgent` | YOLO11n + HierarchicalAttention + SAC | Continuous (x, y) via Tanh | Stage 2 — code exists, waiting for Stage 1 success |
+
+### Stage 1 SAC (Continuous, with Attention)
+
+**RL Algorithm**: SAC (Soft Actor-Critic) with valid-rate-based alpha
+
+- **Actor**: GridEncoder → (128, 80, 80) → HierarchicalAttentionHead → 256-d → Gaussian policy → ScaledSigmoid → (x, y) ≈ [-0.05, 1.05]
+- **Critic**: Separate GridEncoder + HierarchicalAttentionHead → 256-d + action → twin Q-values
+- **Alpha**: Not auto-tuned; set by `ALPHA_MAX - (ALPHA_MAX - ALPHA_MIN) * avg_valid_rate` (sliding window of 50 episodes)
+- **Replay buffer**: Per-class circular buffer (`Stage1ReplayBuffer`) with balanced sampling across reward classes
+
+### Simple MLP (Discrete, No Attention)
+
+**RL Algorithm**: SAC-Discrete with auto-alpha (clamped)
+
+- **Actor**: Flatten(1200) → FC(256) → FC(256) → FC(100) → softmax (with action masking from state channel 0)
+- **Critic**: Same MLP architecture → 100 Q-values (twin)
+- **Alpha**: Auto-tuned with `target_entropy = 0.8 * ln(100) ≈ 3.7`, clamped to [0.05, 0.3]
+- **Replay buffer**: Same `Stage1ReplayBuffer` with per-class balanced sampling
 
 ### Hyperparameters
 
 | Parameter | Value |
 |-----------|-------|
 | Batch Size | 32 |
-| Actor LR | 1e-4 |
-| Critic LR | 1e-3 |
+| Actor LR | 3e-4 |
+| Critic LR | 3e-4 |
+| Alpha LR (discrete) | 1e-5 |
 | Gamma | 0.99 |
-| Replay Buffer | 10,000 |
-| Input Size | Variable (no resize — uses original screenshot dimensions) |
-| Exploration Noise | Gaussian, σ=0.1 |
+| TAU | 0.005 |
+| Buffer Capacity | 2000 per class |
+| Save Capacity | 150 |
+| Save Every N Episodes | 50 |
 
-## Known Issues
-
-1. **ResNet18 is NOT frozen** — all backbone parameters are trainable, making the model very large for the task and slow to converge.
-2. **Variable input size** — the transform pipeline has no resize step (commented out), which means different screenshot sizes will cause dimension mismatches in the FC layers.
-3. **Replay buffer stores full tensors on CPU** — memory-intensive for high-resolution screenshots.
-4. **No entropy regularization** — TD3 is a deterministic policy; exploration relies solely on additive Gaussian noise, which decays poorly.
-5. **`store_transition` defined twice** — duplicate method definition in `RL_Agent.py` (lines 193 and 330). The second definition overwrites the first.
-6. **Saving model every train step** — `save_model()` is called on every `train_step()`, causing heavy I/O.
-
-## Reward Structure (Minesweeper)
+### Reward Structure (Both Agents)
 
 | Event | Reward |
 |-------|--------|
-| Valid click (screen changed) | +8, +10, +12, ... (escalating) |
-| Invalid click (out of bounds) | -12 |
-| No screen change (timeout) | -10 |
-| Hit mine (lose) | -8 |
-| Win | +15 |
+| Valid click (board changes) | +3 |
+| Invalid click (already revealed/flagged) | -2 to -2.95 |
+| Click outside grid bounds | -3 (Stage1 only) |
+| Hit mine (lose) | -3 |
+| Win | +20 |
 
-## Noise Probability
+### Checkpoint & Resume
 
-Noise is applied probabilistically based on cumulative success:
-- Starts at 90% noise probability
-- After round 30, adjusts based on `positive_reward / (positive + negative)` ratio
+Both agents save on every episode end (`_save_model()`) and periodically save replay buffer (`save_persistent()`). Full resume on restart via `try_load_model()`.
+
+## Recent Iteration History
+
+1. **Initial**: SpatialAttentionHead (weighted pooling) — destroyed spatial info, policy collapsed after ~1200 episodes
+2. **Changed to**: HierarchicalAttentionHead (local + global attention) — preserves spatial reasoning
+3. **Added**: ScaledSigmoid activation for direct [0, 1] grid coordinate mapping
+4. **Added**: Per-class replay buffer for balanced training data
+5. **Added**: Simple MLP experiment to diagnose whether failure is in architecture vs RL pipeline
+6. **Current branch**: `_test_replace_attention` — testing discrete I/O to check if RL can learn at all
+7. **Latest fix**: Protect positive experiences in replay buffer from overwrite

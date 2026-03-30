@@ -9,6 +9,7 @@ autoTest_clau/
 ├── README.txt                         # Original readme (legacy)
 ├── requirements.txt                   # Python dependencies
 ├── env_note.txt                       # Environment notes
+├── yolo11n.pt                         # YOLO11n pretrained weights (COCO)
 ├── TF安裝步驟.txt                      # TensorFlow install steps (legacy)
 ├── 自動化檔案結構(不包括辨識).txt        # File structure doc (without detection)
 ├── 自動化檔案結構(包括辨識).txt          # File structure doc (with detection)
@@ -16,16 +17,20 @@ autoTest_clau/
 │
 ├── autoTest_pytorch/                  # *** Active source code ***
 │   ├── Demo_test_Minesweeper.py       # Main entry point — game loop, test cases, RL orchestration
-│   ├── RL_Agent.py                    # TD3 agent (Actor, Critic, ReplayBuffer, training logic)
+│   ├── RL_Agent.py                    # All RL agents and networks (SAC, Stage 1, Simple MLP)
+│   ├── train_stage1.py                # Stage 1 pre-training script (GridEncoder + Attention + SAC)
+│   ├── train_stage1_simple.py         # Simple MLP experiment (validates RL pipeline correctness)
+│   ├── training_logger.py             # Shared logging utilities (TeeOutput, CSVLogger)
 │   ├── Tool_Main.py                   # Core utilities — screenshot, comparison, clicking, game state
 │   ├── HTMLTestRun.py                 # HTML test report generator
 │   ├── Gf_Except.py                   # Custom exception (Game_fail_Exception)
-│   ├── Data.py                        # Label/class name mappings for detection
+│   ├── Data.py                        # Label/class name mappings for detection (legacy)
 │   ├── identify_for_import.py         # Object detection inference utilities (legacy TF)
 │   ├── Object_detection_image.py      # TensorFlow object detection demo (legacy)
 │   ├── train.py                       # TensorFlow training script (legacy)
 │   └── Minesweeper/
-│       ├── Minesweeper.py             # Tkinter Minesweeper game implementation
+│       ├── MinesweeperLogic.py        # Pure game logic (no UI dependencies)
+│       ├── Minesweeper.py             # Tkinter Minesweeper UI (delegates to MinesweeperLogic)
 │       └── Minesweeper_manager.py     # Process manager (start/stop game in subprocess)
 │
 ├── user_change/                       # User-configurable files
@@ -48,6 +53,58 @@ autoTest_clau/
 
 ## Key File Details
 
+### `RL_Agent.py` (All RL Agents and Networks)
+
+This is the largest source file (~1400 lines). Contains all neural network architectures and agent classes:
+
+**Perception & Attention layers:**
+- `YOLO11nBackbone` — YOLO11n feature extractor with mid+last layer fusion → (128, 80, 80)
+- `LocalAttentionLayer` — Windowed self-attention (8×8) for neighbor-level reasoning
+- `GlobalAttentionLayer` — Full self-attention (Flash Attention) for board-level strategy
+- `HierarchicalAttentionHead` — 3× Local + 1× Global + Conv Downsample → 256-dim embedding
+- `ScaledSigmoid` — Activation outputting ≈ [-0.05, 1.05] for direct grid coordinate mapping
+
+**Stage 2 (visual) agents:**
+- `SACActorNetwork` — YOLO11n backbone + HierarchicalAttention + Gaussian policy → (x, y)
+- `SACCriticNetwork` — Twin Q-networks (embedding + action → Q-value)
+- `ReplayBuffer` — Disk-backed buffer for large screenshot tensors
+- `SACAgent` — Full Stage 2 SAC agent (screen capture → mouse click)
+
+**Stage 1 (discrete) agents:**
+- `GridEncoder` — ConvTranspose2d upsampling: (12, 10, 10) → (128, 80, 80)
+- `Stage1ActorNetwork` — GridEncoder + HierarchicalAttention + ScaledSigmoid policy
+- `Stage1CriticNetwork` — Separate GridEncoder + HierarchicalAttention + twin Q-networks
+- `SumTree` — Priority-based data structure (used in replay buffer)
+- `Stage1ReplayBuffer` — Per-class circular buffer with balanced sampling
+- `Stage1SACAgent` — Stage 1 SAC agent with valid-rate-based alpha
+
+**Simple MLP experiment:**
+- `SimpleActorNetwork` — Flatten → MLP → 100 discrete action probabilities (with action masking)
+- `SimpleCriticNetwork` — Flatten → MLP → 100 Q-values (twin)
+- `SimpleDiscreteAgent` — SAC-Discrete with auto-alpha + clamp, validates RL pipeline
+
+### `train_stage1.py` (Stage 1 Pre-training)
+
+Standalone training script for Stage 1 continuous SAC on discrete grid state. Uses `MinesweeperLogic` API directly (no GUI). Outputs: TensorBoard logs, CSV training data, transfer weights (`stage1_weights.pth`).
+
+### `train_stage1_simple.py` (Simple MLP Experiment)
+
+Diagnostic experiment to isolate whether learning failures come from the RL pipeline (reward, buffer, SAC formula) or the network architecture (GridEncoder + Attention). Uses `SimpleDiscreteAgent` with 100 discrete actions.
+
+### `training_logger.py` (Logging Utilities)
+
+- `TeeOutput` — Dual output to console + text file (replaces sys.stdout)
+- `CSVLogger` — Per-episode CSV logging with append mode
+
+### `MinesweeperLogic.py` (Game Logic)
+
+Pure Python Minesweeper implementation. No UI dependencies. Provides:
+- `click(row, col)` → `ClickResult` (changed, game_over, win, revealed_cells, hit_mine)
+- `flag(row, col)` → `FlagResult` (toggled, is_flagged)
+- `get_grid_state_tensor()` → (12, 10, 10) one-hot tensor for Stage 1 input
+- First-click safety guarantee (mines placed after first click)
+- Recursive flood-fill for blank cells
+
 ### `Demo_test_Minesweeper.py` (Entry Point)
 
 - Contains `Game_test_case` (unittest.TestCase) with the full game lifecycle
@@ -56,15 +113,6 @@ autoTest_clau/
 - `update_model()` — store transition and trigger training
 - `test_RL()` — outer RL loop with win/lose/timeout detection
 - Main block starts Minesweeper process, initializes globals, runs infinite game loop
-
-### `RL_Agent.py` (RL Agent)
-
-- `TD3Agent` — full TD3 implementation with Actor, twin Critics, target networks
-- `ReplayBuffer` — simple list-based circular buffer
-- `select_action()` — forward pass + optional Gaussian noise
-- `action_to_screen_coords()` — maps [-1,1] to pixel coordinates
-- `log_action_image()` — saves annotated screenshots for debugging
-- `get_agent()` — singleton pattern for agent access
 
 ### `Tool_Main.py` (Utilities)
 
@@ -75,11 +123,9 @@ autoTest_clau/
 - `cal_time_out()` — timeout checking for game steps
 - Reads config from `user_change/` directory
 
-### `Minesweeper.py` (Game)
+### `Minesweeper.py` (Game UI)
 
-- Full Minesweeper implementation in tkinter
-- Beginner/Intermediate/Expert difficulty levels
-- Runs in a separate process via `Minesweeper_manager`
+Full Minesweeper implementation in tkinter. Beginner/Intermediate/Expert difficulty levels. Delegates game logic to `MinesweeperLogic`. Runs in a separate process via `Minesweeper_manager`.
 
 ## Legacy Files (Not Active)
 

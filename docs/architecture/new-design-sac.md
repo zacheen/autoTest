@@ -90,8 +90,9 @@ SAC Actor Output (x, y) → Pixel Scaling → Mouse Click → State Verification
 | Embedding dimension | 256 | Balances expressiveness vs. 1050 Ti inference speed. YOLO11n mid+last fusion ≈ 384 channels at 40×40 → attention compresses to 256-d vector. Large enough for SAC on 2D action space, small enough for real-time inference |
 | History mechanism | None — single frame only | Agent decides purely from current screenshot. Simplifies replay buffer, training, and inference. Minesweeper board state is fully observable from a single frame |
 | Replay buffer format | Raw images (640×640 float16 tensors) + rewards on disk | Must store raw images since backbone is trainable (embeddings change as weights update). Saved to disk for upload to GCP |
-| Replay buffer (runtime) | BUFFER_CAPACITY = 600 entries (~1.44 GB RAM) | Circular buffer in CPU RAM. Training samples randomly from these 600 entries |
-| Replay buffer (persistent) | SAVE_CAPACITY = 150 entries (~360 MB disk) | Stratified random subset saved to disk every 50 episodes + on exit. Loaded into runtime buffer on next startup |
+| Replay buffer design | Per-class circular buffers | Each reward value gets its own circular buffer (max_per_class entries each). Sampling draws equally from each class → guaranteed balanced training data. Eliminates PER, SumTree, protected buffer complexity. Previous single circular buffer failed because rare experiences (mine hits, wins) were overwritten by common ones (valid/invalid clicks). |
+| Replay buffer (persistent) | SAVE_CAPACITY = 150 entries (~360 MB disk) | Balanced subset saved to disk every 50 episodes + on exit. Each class gets SAVE_CAPACITY/num_classes entries. |
+| Action masking (Stage 1) | Hard mask from state channel 0 (unrevealed cells) | Without masking, agent repeatedly clicks revealed cells → state unchanged → policy collapse. Masking ensures only unrevealed cells can be clicked. Uses -1e8 (not -inf) to avoid 0×(-inf)=NaN in actor loss. |
 | TensorRT export | Full inference path: YOLO + HierarchicalAttention + actor | Critic is not needed at inference time. Optimizing the complete forward pass (screenshot → click coordinates) gives maximum speedup on 1050 Ti |
 | Fine-tuning location | GCP only | 1050 Ti is for data collection (Phase 1) and inference (Phase 3) only. All training happens on GCP (Phase 2) |
 
