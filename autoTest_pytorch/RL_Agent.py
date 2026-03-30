@@ -1169,8 +1169,17 @@ class SimpleDiscreteAgent:
         self.total_it = 0
         self.episode_count = 0
 
+        # Train I/O log
+        SIMPLE_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        self._io_log = open(SIMPLE_MODEL_PATH / 'train_io_log.txt', 'a', encoding='utf-8')
+        self._io_log.write(f"\n{'='*60}\n")
+        self._io_log.write(f"Session started: {datetime.datetime.now().isoformat()}\n")
+        self._io_log.write(f"{'='*60}\n")
+        self._io_log.flush()
+
         self.try_load_model()
         atexit.register(self.save_persistent)
+        atexit.register(self._close_io_log)
 
     def select_action(self, state, add_noise=True):
         """選擇一個 grid cell（不做 hard mask，model 自行學會避開已翻開格子）。
@@ -1253,12 +1262,31 @@ class SimpleDiscreteAgent:
         for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
             target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
 
+        # --- I/O log ---
+        new_alpha = self.log_alpha.exp().item()
+        mean_q = (probs.detach() * min_q).sum(dim=-1).mean().item()
+        reward_counts = defaultdict(int)
+        for r in reward.squeeze(-1).tolist():
+            reward_counts[r] += 1
+        self._io_log.write(
+            f"[Step {self.total_it}] {datetime.datetime.now().strftime('%H:%M:%S')}\n"
+            f"  Input:  batch_rewards={dict(reward_counts)} | alpha={alpha.item():.4f}\n"
+            f"  Output: critic_loss={critic_loss.item():.4f} | actor_loss={actor_loss.item():.4f}"
+            f" | alpha={new_alpha:.4f} | entropy={entropy.item():.4f} | mean_q={mean_q:.4f}\n"
+            f"---\n"
+        )
+        self._io_log.flush()
+
         return {
             "critic_loss": critic_loss.item(),
             "actor_loss": actor_loss.item(),
             "alpha": alpha.item(),
             "entropy": entropy.item(),
         }
+
+    def _close_io_log(self):
+        if self._io_log and not self._io_log.closed:
+            self._io_log.close()
 
     def on_episode_end(self):
         self.episode_count += 1
