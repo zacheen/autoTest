@@ -1102,6 +1102,318 @@ class Stage1SACAgent:
 
 
 # ============================================================
+# Simple MLP 實驗 — 驗證 RL pipeline 是否正常
+# ============================================================
+
+SIMPLE_MODEL_PATH = Path('./models/stage1_simple')
+
+
+class SimpleActorNetwork(nn.Module):
+    """極簡 Actor: grid state flatten → MLP → 100 action probabilities."""
+
+    def __init__(self, grid_channels=GRID_STATE_CHANNELS, grid_h=10, grid_w=10, num_actions=100):
+        super().__init__()
+        input_dim = grid_channels * grid_h * grid_w  # 12*10*10 = 1200
+        self.net = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(input_dim, 256),
+            nn.SiLU(inplace=True),
+            nn.Linear(256, 256),
+            nn.SiLU(inplace=True),
+            nn.Linear(256, num_actions),
+        )
+
+    def forward(self, state):
+        """
+        Args:
+            state: (B, 12, 10, 10)
+        Returns:
+            probs: (B, 100), log_probs: (B, 100)
+        """
+        logits = self.net(state)
+        probs = F.softmax(logits, dim=-1)
+        log_probs = F.log_softmax(logits, dim=-1)
+        return probs, log_probs
+
+
+class SimpleCriticNetwork(nn.Module):
+    """極簡 Critic: grid state flatten → MLP → 100 Q-values (twin)."""
+
+    def __init__(self, grid_channels=GRID_STATE_CHANNELS, grid_h=10, grid_w=10, num_actions=100):
+        super().__init__()
+        input_dim = grid_channels * grid_h * grid_w  # 1200
+
+        self.q1 = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(input_dim, 256),
+            nn.SiLU(inplace=True),
+            nn.Linear(256, 256),
+            nn.SiLU(inplace=True),
+            nn.Linear(256, num_actions),
+        )
+        self.q2 = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(input_dim, 256),
+            nn.SiLU(inplace=True),
+            nn.Linear(256, 256),
+            nn.SiLU(inplace=True),
+            nn.Linear(256, num_actions),
+        )
+
+    def forward(self, state):
+        """
+        Args:
+            state: (B, 12, 10, 10)
+        Returns:
+            q1: (B, 100), q2: (B, 100)
+        """
+        return self.q1(state), self.q2(state)
+
+
+class SimpleDiscreteAgent:
+    """極簡 SAC-Discrete agent — 純 MLP，無 attention，無 GridEncoder。
+
+    用來驗證 RL pipeline（reward、buffer、SAC 公式）是否正確。
+    """
+
+    def __init__(self):
+        self.num_actions = 100
+
+        self.actor = SimpleActorNetwork().to(device)
+        self.critic = SimpleCriticNetwork().to(device)
+        self.critic_target = SimpleCriticNetwork().to(device)
+        self.critic_target.load_state_dict(self.critic.state_dict())
+
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR_ACTOR)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LR_CRITIC)
+
+        # Alpha based on valid click rate
+        self.alpha = ALPHA_MAX
+        self.recent_valid_rates = deque(maxlen=50)
+
+        # Replay buffer
+        self.replay_buffer = Stage1ReplayBuffer(max_size=BUFFER_CAPACITY)
+        self.total_it = 0
+        self.episode_count = 0
+
+        self.try_load_model()
+        atexit.register(self.save_persistent)
+
+    def select_action(self, state, add_noise=True):
+        """選擇一個 grid cell。
+
+        Returns:
+            action: int [0, 99]
+        """
+        state_batch = state.unsqueeze(0).to(device)
+
+        self.actor.eval()
+        with torch.no_grad():
+            probs, _ = self.actor(state_batch)
+            if add_noise:
+                dist = torch.distributions.Categorical(probs)
+                action = dist.sample().item()
+            else:
+                action = probs.argmax(dim=-1).item()
+        self.actor.train()
+
+        return action
+
+    def store_transition(self, state, action, next_state, reward, done):
+        self.replay_buffer.store(state, action, next_state, reward, done)
+
+    def update_alpha(self, valid_rate):
+        self.recent_valid_rates.append(valid_rate)
+        avg_valid_rate = np.mean(self.recent_valid_rates)
+        self.alpha = ALPHA_MAX - (ALPHA_MAX - ALPHA_MIN) * avg_valid_rate
+
+    def train_step(self):
+        if self.replay_buffer.size() < BATCH_SIZE:
+            return None
+
+        self.total_it += 1
+        state, action, next_state, reward, done, per_indices, per_weights = \
+            self.replay_buffer.sample(BATCH_SIZE)
+        alpha = self.alpha
+
+        # action → long index
+        if isinstance(action, torch.Tensor) and action.dim() > 1:
+            action_idx = action.squeeze(-1).long()
+        else:
+            action_idx = action.long()
+
+        # --- Critic update ---
+        with torch.no_grad():
+            next_probs, next_log_probs = self.actor(next_state)
+            next_q1, next_q2 = self.critic_target(next_state)
+            next_q = torch.min(next_q1, next_q2)
+            next_v = (next_probs * (next_q - alpha * next_log_probs)).sum(dim=-1, keepdim=True)
+            target_q = reward + (1 - done) * GAMMA * next_v
+
+        q1_all, q2_all = self.critic(state)
+        q1 = q1_all.gather(1, action_idx.unsqueeze(-1))
+        q2 = q2_all.gather(1, action_idx.unsqueeze(-1))
+
+        td_error1 = (q1 - target_q).detach()
+        td_error2 = (q2 - target_q).detach()
+        critic_loss = (per_weights * F.mse_loss(q1, target_q, reduction='none')).mean() + \
+                      (per_weights * F.mse_loss(q2, target_q, reduction='none')).mean()
+
+        td_errors = ((td_error1.abs() + td_error2.abs()) / 2).cpu().numpy().flatten()
+        self.replay_buffer.update_priorities(per_indices, td_errors)
+
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_optimizer.step()
+
+        # --- Actor update ---
+        probs, log_probs = self.actor(state)
+        with torch.no_grad():
+            q1_all, q2_all = self.critic(state)
+            min_q = torch.min(q1_all, q2_all)
+
+        actor_loss = (probs * (alpha * log_probs - min_q)).sum(dim=-1).mean()
+
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+
+        # --- Soft update target ---
+        for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
+            target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
+
+        entropy = -(probs * log_probs).sum(dim=-1).mean().item()
+
+        return {
+            "critic_loss": critic_loss.item(),
+            "actor_loss": actor_loss.item(),
+            "alpha": alpha,
+            "entropy": entropy,
+        }
+
+    def on_episode_end(self):
+        self.episode_count += 1
+        self._save_model()
+        if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
+            print(f"[Simple] Periodic save at episode {self.episode_count}")
+            self.save_persistent()
+
+    def _save_model(self):
+        SIMPLE_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        torch.save(self.actor.state_dict(), SIMPLE_MODEL_PATH / 'actor.pth')
+        torch.save(self.critic.state_dict(), SIMPLE_MODEL_PATH / 'critic.pth')
+        torch.save(self.critic_target.state_dict(), SIMPLE_MODEL_PATH / 'critic_target.pth')
+        torch.save({
+            'actor_optimizer': self.actor_optimizer.state_dict(),
+            'critic_optimizer': self.critic_optimizer.state_dict(),
+            'total_it': self.total_it,
+            'episode_count': self.episode_count,
+            'recent_valid_rates': list(self.recent_valid_rates),
+        }, SIMPLE_MODEL_PATH / 'optimizer_state.pth')
+
+    def save_persistent(self):
+        buf = self.replay_buffer
+        total = buf.size()
+        if total == 0:
+            return
+
+        reward_groups = defaultdict(list)
+        for i in range(total):
+            r = buf.buffer[i]['reward']
+            reward_groups[r].append(i)
+
+        target = min(SAVE_CAPACITY, total)
+        selected_indices = []
+        remaining = target
+        groups = sorted(reward_groups.items(), key=lambda x: len(x[1]))
+        for i, (rwd, indices) in enumerate(groups):
+            if i == len(groups) - 1:
+                count = remaining
+            else:
+                count = round(len(indices) / total * target)
+            count = min(count, len(indices), remaining)
+            selected = random.sample(indices, count)
+            selected_indices.extend(selected)
+            remaining -= count
+            if remaining <= 0:
+                break
+
+        persistent_entries = [buf.buffer[i] for i in selected_indices]
+        SIMPLE_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        torch.save({
+            'persistent_entries': persistent_entries,
+            'total_it': self.total_it,
+            'episode_count': self.episode_count,
+            'recent_valid_rates': list(self.recent_valid_rates),
+        }, SIMPLE_MODEL_PATH / 'training_state.pth')
+
+        saved_rewards = defaultdict(int)
+        for entry in persistent_entries:
+            saved_rewards[entry['reward']] += 1
+        print(f"[Simple] Persistent save: {len(persistent_entries)} entries")
+        print(f"[Simple] Reward distribution: {dict(saved_rewards)}")
+
+    def try_load_model(self):
+        actor_path = SIMPLE_MODEL_PATH / 'actor.pth'
+        if actor_path.exists():
+            try:
+                self.actor.load_state_dict(torch.load(actor_path, map_location=device))
+                print("[Simple] Loaded Actor")
+            except Exception as e:
+                print(f"[Simple] Failed to load Actor: {e}")
+
+        critic_path = SIMPLE_MODEL_PATH / 'critic.pth'
+        if critic_path.exists():
+            try:
+                self.critic.load_state_dict(torch.load(critic_path, map_location=device))
+                print("[Simple] Loaded Critic")
+            except Exception as e:
+                print(f"[Simple] Failed to load Critic: {e}")
+
+        critic_target_path = SIMPLE_MODEL_PATH / 'critic_target.pth'
+        if critic_target_path.exists():
+            try:
+                self.critic_target.load_state_dict(torch.load(critic_target_path, map_location=device))
+                print("[Simple] Loaded Critic Target")
+            except Exception as e:
+                print(f"[Simple] Failed to load Critic Target: {e}")
+
+        opt_path = SIMPLE_MODEL_PATH / 'optimizer_state.pth'
+        if opt_path.exists():
+            try:
+                state = torch.load(opt_path, map_location=device, weights_only=False)
+                self.actor_optimizer.load_state_dict(state['actor_optimizer'])
+                self.critic_optimizer.load_state_dict(state['critic_optimizer'])
+                self.total_it = state['total_it']
+                self.episode_count = state.get('episode_count', 0)
+                saved_rates = state.get('recent_valid_rates', [])
+                if saved_rates:
+                    self.recent_valid_rates = deque(saved_rates, maxlen=50)
+                    avg_valid_rate = np.mean(self.recent_valid_rates)
+                    self.alpha = ALPHA_MAX - (ALPHA_MAX - ALPHA_MIN) * avg_valid_rate
+                print(f"[Simple] Loaded optimizer: total_it={self.total_it}, episode={self.episode_count}, alpha={self.alpha:.4f}")
+            except Exception as e:
+                print(f"[Simple] Failed to load optimizer state: {e}")
+
+        training_state_path = SIMPLE_MODEL_PATH / 'training_state.pth'
+        if training_state_path.exists():
+            try:
+                state = torch.load(training_state_path, map_location=device, weights_only=False)
+                persistent_entries = state.get('persistent_entries', [])
+                loaded = min(len(persistent_entries), BUFFER_CAPACITY)
+                for i in range(loaded):
+                    entry = persistent_entries[i]
+                    self.replay_buffer.store(
+                        entry['state'], entry['action'],
+                        entry['next_state'], entry['reward'], entry['done']
+                    )
+                if loaded > 0:
+                    print(f"[Simple] Loaded {loaded} replay buffer entries")
+            except Exception as e:
+                print(f"[Simple] Failed to load replay buffer: {e}")
+
+
+# ============================================================
 # Stage 2 (視覺訓練) — 以下是原有的 classes
 # ============================================================
 
