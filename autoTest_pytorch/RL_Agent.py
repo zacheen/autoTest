@@ -802,7 +802,7 @@ class Stage1SACAgent:
         self.recent_valid_rates = deque(maxlen=50)
 
         # Replay buffer (in-memory, grid state 很小)
-        self.replay_buffer = Stage1ReplayBuffer(max_size=BUFFER_CAPACITY)
+        self.replay_buffer = Stage1ReplayBuffer(max_per_class=BUFFER_CAPACITY)
         self.total_it = 0
         self.episode_count = 0
 
@@ -1165,7 +1165,7 @@ class SimpleDiscreteAgent:
         self.target_entropy = DISCRETE_TARGET_ENTROPY
 
         # Replay buffer
-        self.replay_buffer = Stage1ReplayBuffer(max_size=BUFFER_CAPACITY)
+        self.replay_buffer = Stage1ReplayBuffer(max_per_class=BUFFER_CAPACITY)
         self.total_it = 0
         self.episode_count = 0
 
