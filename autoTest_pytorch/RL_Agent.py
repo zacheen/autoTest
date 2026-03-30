@@ -679,59 +679,20 @@ class SumTree:
 
 
 class Stage1ReplayBuffer:
-    """Stage 1 用的 Prioritized Experience Replay (PER) buffer。
+    """Stage 1 用的 per-class circular buffer。
 
-    使用 SumTree 做 O(log n) 的優先級抽樣。
-    Priority = |TD-error| + epsilon，TD-error 大的 transition 被抽中的機率更高。
-
-    Args:
-        max_size: buffer 容量
-        per_alpha: priority 的指數，0=uniform, 1=full prioritization (default: 0.6)
-        per_beta_start: importance sampling weight 的初始值 (default: 0.4)
-        per_beta_end: beta 最終值 (default: 1.0)
-        per_beta_steps: beta 從 start 線性增長到 end 的步數 (default: 100000)
-        per_epsilon: 防止 priority 為 0 的小常數 (default: 1e-5)
+    每個 reward class 有獨立的 circular buffer，互不干擾。
+    Sample 時從每個 class 抽相同數量，保證訓練 data 平衡。
     """
 
-    def __init__(self, max_size=BUFFER_CAPACITY,
-                 per_alpha=0.6, per_beta_start=0.4,
-                 per_beta_end=1.0, per_beta_steps=100000,
-                 per_epsilon=1e-5):
-        self.max_size = max_size
-        self.buffer = [None] * max_size
-        self.tree = SumTree(max_size)
-        self.size_count = 0
-
-        # PER 超參數
-        self.alpha = per_alpha
-        self.beta_start = per_beta_start
-        self.beta_end = per_beta_end
-        self.beta_steps = per_beta_steps
-        self.epsilon = per_epsilon
-        self.sample_count = 0  # 用來計算 beta 的線性增長
-
-        # Reward group tracking（用於 balanced sampling）
-        self.reward_groups = defaultdict(set)  # reward_value → set of buffer indices
-
-    def _get_beta(self):
-        """Beta 從 beta_start 線性增長到 beta_end。"""
-        fraction = min(self.sample_count / self.beta_steps, 1.0)
-        return self.beta_start + fraction * (self.beta_end - self.beta_start)
-
-    def _is_positive(self, reward):
-        """判斷是否為正面經驗（需要保護不被覆蓋）。"""
-        return reward > 0
+    def __init__(self, max_per_class=BUFFER_CAPACITY):
+        self.max_per_class = max_per_class
+        self.class_buffers = {}   # reward → list of entries (circular)
+        self.class_ptrs = {}      # reward → write pointer
+        self.class_sizes = {}     # reward → current size
 
     def store(self, state, action, next_state, reward, done):
-        """存 transition。Positive 經驗會被保護不被覆蓋。
-
-        Args:
-            state: (12, 10, 10) tensor
-            action: numpy array or int
-            next_state: (12, 10, 10) tensor
-            reward: float
-            done: bool
-        """
+        """存 transition 到對應 reward class 的 buffer。"""
         entry = {
             'state': state.cpu().clone(),
             'action': action.copy() if isinstance(action, np.ndarray) else np.array(action),
@@ -740,137 +701,78 @@ class Stage1ReplayBuffer:
             'done': bool(done)
         }
 
-        # 新 transition 用最大 priority（確保至少被抽到一次）
-        max_p = self.tree.max_priority()
-        priority = max_p ** self.alpha if max_p > 0 else 1.0
+        r = float(reward)
+        if r not in self.class_buffers:
+            self.class_buffers[r] = [None] * self.max_per_class
+            self.class_ptrs[r] = 0
+            self.class_sizes[r] = 0
 
-        # 保護 positive 經驗：如果要覆蓋的位置是 positive，跳到下一個非 positive 位置
-        # SumTree.add() 內部用 write_ptr，我們需要檢查並跳過
-        original_ptr = self.tree.write_ptr
-        attempts = 0
-        while attempts < self.max_size:
-            candidate_idx = self.tree.write_ptr
-            old_entry = self.buffer[candidate_idx]
-            if old_entry is not None and self._is_positive(old_entry['reward']):
-                # 這個位置是 positive 經驗，跳過
-                self.tree.write_ptr = (self.tree.write_ptr + 1) % self.max_size
-                attempts += 1
-            else:
-                break  # 找到可以覆蓋的位置
-
-        if attempts >= self.max_size:
-            # Buffer 全是 positive（極端情況），允許覆蓋最舊的 positive
-            self.tree.write_ptr = original_ptr
-
-        data_idx = self.tree.add(priority)
-
-        # 更新 reward group tracking
-        old_entry = self.buffer[data_idx]
-        if old_entry is not None:
-            old_reward = old_entry['reward']
-            self.reward_groups[old_reward].discard(data_idx)
-            if not self.reward_groups[old_reward]:
-                del self.reward_groups[old_reward]
-
-        self.buffer[data_idx] = entry
-        self.reward_groups[float(reward)].add(data_idx)
-        self.size_count = self.tree.size
+        buf = self.class_buffers[r]
+        ptr = self.class_ptrs[r]
+        buf[ptr] = entry
+        self.class_ptrs[r] = (ptr + 1) % self.max_per_class
+        self.class_sizes[r] = min(self.class_sizes[r] + 1, self.max_per_class)
 
     def sample(self, batch_size):
-        """Reward-balanced 抽樣：每個 reward group 抽相同數量的 samples。
+        """每個 reward class 抽相同數量的 samples。
 
-        在每個 group 內使用 PER priority 決定抽哪些。
-        回傳 (states, actions, next_states, rewards, dones, indices, weights)。
+        回傳 (states, actions, next_states, rewards, dones)。
         """
-        self.sample_count += 1
-        beta = self._get_beta()
+        active_classes = {r: s for r, s in self.class_sizes.items() if s > 0}
+        num_classes = len(active_classes)
 
-        # 取得有效的 reward groups
-        active_groups = {r: list(idxs) for r, idxs in self.reward_groups.items() if idxs}
-        num_groups = len(active_groups)
-
-        if num_groups == 0:
+        if num_classes == 0:
             raise RuntimeError("Replay buffer is empty")
 
-        # 每個 group 分配的 sample 數量
-        base_count = batch_size // num_groups
-        remainder = batch_size % num_groups
-        group_counts = {}
-        for i, reward in enumerate(sorted(active_groups.keys())):
-            group_counts[reward] = base_count + (1 if i < remainder else 0)
+        # 每個 class 分配的 sample 數量
+        base_count = batch_size // num_classes
+        remainder = batch_size % num_classes
+        class_counts = {}
+        for i, r in enumerate(sorted(active_classes.keys())):
+            class_counts[r] = base_count + (1 if i < remainder else 0)
 
-        # 從每個 group 中 PER-weighted 抽樣
-        indices = []
-        priorities = []
-        total = self.tree.total()
-
-        for reward, count in group_counts.items():
-            group_indices = active_groups[reward]
-
-            if len(group_indices) <= count:
-                # Group 太小，全部拿（with replacement 補齊）
-                selected = group_indices.copy()
-                while len(selected) < count:
-                    selected.append(random.choice(group_indices))
-            else:
-                # 用 PER priority 從 group 中抽
-                group_priorities = np.array(
-                    [self.tree.tree[idx + self.tree.capacity - 1] for idx in group_indices],
-                    dtype=np.float64
-                )
-                group_priorities = np.clip(group_priorities, 1e-10, None)
-                probs = group_priorities / group_priorities.sum()
-                selected_idx = np.random.choice(len(group_indices), size=count, replace=False, p=probs)
-                selected = [group_indices[i] for i in selected_idx]
-
-            for idx in selected:
-                indices.append(idx)
-                p = self.tree.tree[idx + self.tree.capacity - 1]
-                priorities.append(max(p, 1e-10))
-
-        # 計算 importance sampling weights
-        priorities = np.array(priorities, dtype=np.float64)
-        sampling_probs = priorities / total
-        sampling_probs = np.clip(sampling_probs, 1e-10, None)
-        weights = (self.size_count * sampling_probs) ** (-beta)
-        weights = weights / weights.max()
-        weights = torch.tensor(weights, dtype=torch.float32).unsqueeze(1).to(device)
+        # 從每個 class 隨機抽
+        all_entries = []
+        for r, count in class_counts.items():
+            buf = self.class_buffers[r]
+            size = self.class_sizes[r]
+            indices = np.random.randint(0, size, size=count)
+            for idx in indices:
+                all_entries.append(buf[idx])
 
         # 組裝 batch
-        states = torch.stack([self.buffer[i]['state'] for i in indices]).to(device)
+        states = torch.stack([e['state'] for e in all_entries]).to(device)
         actions = torch.tensor(
-            np.array([self.buffer[i]['action'] for i in indices]),
+            np.array([e['action'] for e in all_entries]),
             dtype=torch.float32
         ).to(device)
-        next_states = torch.stack([self.buffer[i]['next_state'] for i in indices]).to(device)
+        next_states = torch.stack([e['next_state'] for e in all_entries]).to(device)
         rewards = torch.tensor(
-            [self.buffer[i]['reward'] for i in indices],
+            [e['reward'] for e in all_entries],
             dtype=torch.float32
         ).unsqueeze(1).to(device)
         dones = torch.tensor(
-            [float(self.buffer[i]['done']) for i in indices],
+            [float(e['done']) for e in all_entries],
             dtype=torch.float32
         ).unsqueeze(1).to(device)
 
-        return states, actions, next_states, rewards, dones, indices, weights
-
-    def update_priorities(self, indices, td_errors):
-        """用新的 TD-error 更新 priority。
-
-        Args:
-            indices: list of buffer indices (from sample())
-            td_errors: numpy array of |TD-error| values
-        """
-        for idx, td_error in zip(indices, td_errors):
-            priority = (abs(td_error) + self.epsilon) ** self.alpha
-            self.tree.update(idx, priority)
+        return states, actions, next_states, rewards, dones
 
     def size(self):
-        return self.size_count
+        return sum(self.class_sizes.values())
 
-    def get_all_rewards(self):
-        """取得所有 entry 的 reward（供 stratified save 用）。"""
-        return [self.buffer[i]['reward'] for i in range(self.size_count) if self.buffer[i] is not None]
+    def get_class_distribution(self):
+        """取得每個 class 的數量（用於 logging）。"""
+        return {r: s for r, s in self.class_sizes.items() if s > 0}
+
+    def get_all_entries(self):
+        """取得所有 entries（用於 persistent save）。"""
+        entries = []
+        for r, size in self.class_sizes.items():
+            buf = self.class_buffers[r]
+            for i in range(size):
+                entries.append(buf[i])
+        return entries
 
 
 class Stage1SACAgent:
@@ -936,19 +838,17 @@ class Stage1SACAgent:
         self.replay_buffer.store(state, action, next_state, reward, done)
 
     def train_step(self):
-        """執行一步 SAC 訓練（使用 PER）。"""
+        """執行一步 SAC 訓練。"""
         if self.replay_buffer.size() < BATCH_SIZE:
             return None
 
         self.total_it += 1
-        state, action, next_state, reward, done, per_indices, per_weights = \
-            self.replay_buffer.sample(BATCH_SIZE)
+        state, action, next_state, reward, done = self.replay_buffer.sample(BATCH_SIZE)
         alpha = self.alpha
 
         # --- Critic update ---
         with torch.no_grad():
             next_action, next_log_prob, _ = self.actor.sample(next_state)
-            # 用 critic_target 自己的 encoder (不是 actor 的)
             next_embed = self.critic_target.get_embedding(next_state)
             target_q1, target_q2 = self.critic_target(next_embed, next_action)
             target_q = torch.min(target_q1, target_q2) - alpha * next_log_prob
@@ -957,15 +857,7 @@ class Stage1SACAgent:
         current_embed = self.critic.get_embedding(state)
         current_q1, current_q2 = self.critic(current_embed, action)
 
-        # PER: 用 importance sampling weights 加權 loss
-        td_error1 = (current_q1 - target_q).detach()
-        td_error2 = (current_q2 - target_q).detach()
-        critic_loss = (per_weights * F.mse_loss(current_q1, target_q, reduction='none')).mean() + \
-                      (per_weights * F.mse_loss(current_q2, target_q, reduction='none')).mean()
-
-        # PER: 更新 priority（用兩個 critic 的平均 TD-error）
-        td_errors = ((td_error1.abs() + td_error2.abs()) / 2).cpu().numpy().flatten()
-        self.replay_buffer.update_priorities(per_indices, td_errors)
+        critic_loss = F.mse_loss(current_q1, target_q) + F.mse_loss(current_q2, target_q)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
@@ -1196,11 +1088,18 @@ class SimpleActorNetwork(nn.Module):
         """
         Args:
             state: (B, 12, 10, 10)
-                   channel 0 = 未翻開 (model 應自行學會利用此資訊避開已翻開格子)
+                   channel 0 = 未翻開 → 用來做 action masking
         Returns:
             probs: (B, 100), log_probs: (B, 100)
         """
         logits = self.net(state)
+
+        # Action masking：從 state channel 0 取得未翻開 mask
+        # channel 0 = 1.0 表示未翻開（可點擊），0.0 表示已翻開（不可點擊）
+        # 用 -1e8 而非 -inf，避免 softmax 後 0 × log(0) = NaN 導致梯度爆炸
+        mask = state[:, 0].reshape(state.size(0), -1).bool()  # (B, 100)
+        logits = logits.masked_fill(~mask, -1e8)
+
         probs = F.softmax(logits, dim=-1)
         log_probs = F.log_softmax(logits, dim=-1)
         return probs, log_probs
@@ -1301,8 +1200,7 @@ class SimpleDiscreteAgent:
             return None
 
         self.total_it += 1
-        state, action, next_state, reward, done, per_indices, per_weights = \
-            self.replay_buffer.sample(BATCH_SIZE)
+        state, action, next_state, reward, done = self.replay_buffer.sample(BATCH_SIZE)
         alpha = self.log_alpha.exp().detach()
 
         # action → long index
@@ -1323,13 +1221,7 @@ class SimpleDiscreteAgent:
         q1 = q1_all.gather(1, action_idx.unsqueeze(-1))
         q2 = q2_all.gather(1, action_idx.unsqueeze(-1))
 
-        td_error1 = (q1 - target_q).detach()
-        td_error2 = (q2 - target_q).detach()
-        critic_loss = (per_weights * F.mse_loss(q1, target_q, reduction='none')).mean() + \
-                      (per_weights * F.mse_loss(q2, target_q, reduction='none')).mean()
-
-        td_errors = ((td_error1.abs() + td_error2.abs()) / 2).cpu().numpy().flatten()
-        self.replay_buffer.update_priorities(per_indices, td_errors)
+        critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
@@ -1390,44 +1282,37 @@ class SimpleDiscreteAgent:
         }, SIMPLE_MODEL_PATH / 'optimizer_state.pth')
 
     def save_persistent(self):
+        """儲存 replay buffer 到磁碟（每個 class 各存一些）。"""
         buf = self.replay_buffer
         total = buf.size()
         if total == 0:
             return
 
-        reward_groups = defaultdict(list)
-        for i in range(total):
-            r = buf.buffer[i]['reward']
-            reward_groups[r].append(i)
+        all_entries = buf.get_all_entries()
+        # 限制總數
+        if len(all_entries) > SAVE_CAPACITY:
+            # 每個 class 平均分配
+            dist = buf.get_class_distribution()
+            per_class = max(1, SAVE_CAPACITY // len(dist))
+            selected = []
+            for r, size in dist.items():
+                class_entries = [e for e in all_entries if e['reward'] == r]
+                if len(class_entries) > per_class:
+                    class_entries = random.sample(class_entries, per_class)
+                selected.extend(class_entries)
+            all_entries = selected[:SAVE_CAPACITY]
 
-        target = min(SAVE_CAPACITY, total)
-        selected_indices = []
-        remaining = target
-        groups = sorted(reward_groups.items(), key=lambda x: len(x[1]))
-        for i, (rwd, indices) in enumerate(groups):
-            if i == len(groups) - 1:
-                count = remaining
-            else:
-                count = round(len(indices) / total * target)
-            count = min(count, len(indices), remaining)
-            selected = random.sample(indices, count)
-            selected_indices.extend(selected)
-            remaining -= count
-            if remaining <= 0:
-                break
-
-        persistent_entries = [buf.buffer[i] for i in selected_indices]
         SIMPLE_MODEL_PATH.mkdir(parents=True, exist_ok=True)
         torch.save({
-            'persistent_entries': persistent_entries,
+            'persistent_entries': all_entries,
             'total_it': self.total_it,
             'episode_count': self.episode_count,
         }, SIMPLE_MODEL_PATH / 'training_state.pth')
 
         saved_rewards = defaultdict(int)
-        for entry in persistent_entries:
+        for entry in all_entries:
             saved_rewards[entry['reward']] += 1
-        print(f"[Simple] Persistent save: {len(persistent_entries)} entries")
+        print(f"[Simple] Persistent save: {len(all_entries)} entries")
         print(f"[Simple] Reward distribution: {dict(saved_rewards)}")
 
     def try_load_model(self):
