@@ -1,17 +1,14 @@
 """
-Stage 1 Simple MLP 實驗 — 驗證 RL pipeline 是否正常。
+Stage 1 Transformer 實驗 — 用 self-attention 學習 Minesweeper 空間推理。
 
-極簡架構：grid state (12,10,10) → flatten → MLP → 100 actions
-沒有 GridEncoder，沒有 80×80，沒有 Attention。
-
-如果這個學得會 → 問題在 GridEncoder + Attention 架構
-如果這個也學不會 → 問題在 RL 設定（reward、hyperparameters、buffer）
+架構：grid state (12,10,10) → 100 tokens × 12-d + 2D pos encoding
+     → 4-layer Transformer (d=64, h=4) → per-token logit → 100 actions
 
 執行方式：
   python train_stage1_simple.py
 
 監控方式：
-  tensorboard --logdir runs/stage1_simple/
+  tensorboard --logdir runs/stage1_transformer/
 """
 
 import os
@@ -24,7 +21,7 @@ from pathlib import Path
 from torch.utils.tensorboard import SummaryWriter
 
 from Minesweeper.MinesweeperLogic import MinesweeperLogic
-from RL_Agent import SimpleDiscreteAgent
+from RL_Agent import TransformerDiscreteAgent
 
 # ---------- 訓練參數 ----------
 GRID_ROWS = 10
@@ -40,8 +37,8 @@ EVAL_INTERVAL = 100
 EVAL_EPISODES = 10
 
 # ---------- 路徑 ----------
-TENSORBOARD_DIR = Path("./runs/stage1_simple")
-CSV_LOG_PATH = Path("./models/stage1_simple/training_log.csv")
+TENSORBOARD_DIR = Path("./runs/stage1_transformer")
+CSV_LOG_PATH = Path("./models/stage1_transformer/training_log.csv")
 
 
 def action_to_grid(action, rows, cols):
@@ -171,15 +168,15 @@ class CSVLogger:
 
 def main():
     print("=" * 60)
-    print("  Stage 1 SIMPLE MLP: Grid State → MLP → 100 actions")
+    print("  Stage 1 Transformer: Grid State → Self-Attention → 100 actions")
     print("=" * 60)
     print(f"Grid: {GRID_ROWS}x{GRID_COLS}, Mines: {GRID_MINES}")
-    print(f"Architecture: Flatten(1200) → FC(256) → FC(256) → FC(100)")
+    print(f"Architecture: 100 tokens × 12-d → Transformer(d=64, h=4, L=4) → per-token logit")
     print(f"Max episodes: {MAX_EPISODES}")
     print()
 
     logic = MinesweeperLogic(rows=GRID_ROWS, cols=GRID_COLS, mines_count=GRID_MINES)
-    agent = SimpleDiscreteAgent()
+    agent = TransformerDiscreteAgent()
 
     # TensorBoard
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")

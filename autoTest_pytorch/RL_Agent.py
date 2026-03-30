@@ -1441,6 +1441,436 @@ class SimpleDiscreteAgent:
 
 
 # ============================================================
+# Transformer 實驗 — 用 self-attention 學習 Minesweeper 空間推理
+# ============================================================
+
+TRANSFORMER_MODEL_PATH = Path('./models/stage1_transformer')
+
+
+class TransformerActorNetwork(nn.Module):
+    """Transformer Actor: grid state → per-token logits → action distribution.
+
+    每個 cell 是一個 token (12-d one-hot)，經過 Transformer 後
+    每個 token 輸出一個 logit 表示「該不該點這格」。
+    """
+
+    def __init__(self, grid_channels=GRID_STATE_CHANNELS, grid_h=10, grid_w=10,
+                 d_model=64, nhead=4, num_layers=4, dim_feedforward=256, dropout=0.1):
+        super().__init__()
+        self.grid_h = grid_h
+        self.grid_w = grid_w
+        self.num_tokens = grid_h * grid_w  # 100
+
+        # Token embedding: 12-d one-hot → d_model
+        self.token_embed = nn.Linear(grid_channels, d_model)
+
+        # Learned 2D positional encoding
+        self.row_embed = nn.Embedding(grid_h, d_model // 2)
+        self.col_embed = nn.Embedding(grid_w, d_model // 2)
+
+        # Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # Per-token output head → 1 logit per token
+        self.output_head = nn.Linear(d_model, 1)
+
+        # 預先計算 position indices
+        rows = torch.arange(grid_h).unsqueeze(1).expand(grid_h, grid_w).reshape(-1)
+        cols = torch.arange(grid_w).unsqueeze(0).expand(grid_h, grid_w).reshape(-1)
+        self.register_buffer('row_indices', rows)
+        self.register_buffer('col_indices', cols)
+
+    def _embed(self, state):
+        """State → token embeddings with positional encoding.
+
+        Args:
+            state: (B, 12, 10, 10)
+        Returns:
+            (B, 100, d_model)
+        """
+        B = state.size(0)
+        # (B, 12, 10, 10) → (B, 100, 12)
+        tokens = state.permute(0, 2, 3, 1).reshape(B, self.num_tokens, -1)
+
+        # Token embedding
+        x = self.token_embed(tokens)  # (B, 100, d_model)
+
+        # Positional encoding: row_embed(32) cat col_embed(32) → (100, 64)
+        pos = torch.cat([
+            self.row_embed(self.row_indices),
+            self.col_embed(self.col_indices),
+        ], dim=-1)  # (100, d_model)
+
+        x = x + pos.unsqueeze(0)  # broadcast over batch
+        return x
+
+    def forward(self, state):
+        """
+        Args:
+            state: (B, 12, 10, 10)
+        Returns:
+            probs: (B, 100), log_probs: (B, 100)
+        """
+        x = self._embed(state)                  # (B, 100, d_model)
+        x = self.transformer(x)                  # (B, 100, d_model)
+        logits = self.output_head(x).squeeze(-1)  # (B, 100)
+
+        # Action masking: channel 0 = 未翻開 (可點擊)
+        mask = state[:, 0].reshape(state.size(0), -1).bool()  # (B, 100)
+        logits = logits.masked_fill(~mask, -1e8)
+
+        probs = F.softmax(logits, dim=-1)
+        log_probs = F.log_softmax(logits, dim=-1)
+        return probs, log_probs
+
+
+class TransformerCriticNetwork(nn.Module):
+    """Transformer Critic: grid state → per-token Q-values (twin).
+
+    Q1 和 Q2 各自有獨立的 embedding + Transformer encoder + output head，
+    確保 twin-Q 估計足夠獨立以有效降低 overestimation bias。
+    """
+
+    def __init__(self, grid_channels=GRID_STATE_CHANNELS, grid_h=10, grid_w=10,
+                 d_model=64, nhead=4, num_layers=4, dim_feedforward=256, dropout=0.1):
+        super().__init__()
+        self.grid_h = grid_h
+        self.grid_w = grid_w
+        self.num_tokens = grid_h * grid_w
+
+        def _make_branch():
+            token_embed = nn.Linear(grid_channels, d_model)
+            row_embed = nn.Embedding(grid_h, d_model // 2)
+            col_embed = nn.Embedding(grid_w, d_model // 2)
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                activation='gelu',
+                batch_first=True,
+            )
+            transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+            head = nn.Linear(d_model, 1)
+            return nn.ModuleDict({
+                'token_embed': token_embed,
+                'row_embed': row_embed,
+                'col_embed': col_embed,
+                'transformer': transformer,
+                'head': head,
+            })
+
+        self.q1 = _make_branch()
+        self.q2 = _make_branch()
+
+        # 預先計算 position indices
+        rows = torch.arange(grid_h).unsqueeze(1).expand(grid_h, grid_w).reshape(-1)
+        cols = torch.arange(grid_w).unsqueeze(0).expand(grid_h, grid_w).reshape(-1)
+        self.register_buffer('row_indices', rows)
+        self.register_buffer('col_indices', cols)
+
+    def _forward_branch(self, branch, state):
+        B = state.size(0)
+        tokens = state.permute(0, 2, 3, 1).reshape(B, self.num_tokens, -1)
+        x = branch['token_embed'](tokens)
+        pos = torch.cat([
+            branch['row_embed'](self.row_indices),
+            branch['col_embed'](self.col_indices),
+        ], dim=-1)
+        x = x + pos.unsqueeze(0)
+        x = branch['transformer'](x)
+        return branch['head'](x).squeeze(-1)  # (B, 100)
+
+    def forward(self, state):
+        """
+        Args:
+            state: (B, 12, 10, 10)
+        Returns:
+            q1: (B, 100), q2: (B, 100)
+        """
+        return self._forward_branch(self.q1, state), self._forward_branch(self.q2, state)
+
+
+class TransformerDiscreteAgent:
+    """Transformer SAC-Discrete agent — 用 self-attention 學習空間推理。
+
+    架構: per-cell token + 2D pos encoding → Transformer → per-token logit → action
+    SAC 訓練邏輯跟 SimpleDiscreteAgent 完全相同。
+    """
+
+    def __init__(self):
+        self.num_actions = 100
+
+        self.actor = TransformerActorNetwork().to(device)
+        self.critic = TransformerCriticNetwork().to(device)
+        self.critic_target = TransformerCriticNetwork().to(device)
+        self.critic_target.load_state_dict(self.critic.state_dict())
+
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR_ACTOR)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LR_CRITIC)
+
+        # Auto-alpha with clamp
+        self.log_alpha = torch.tensor(
+            np.log(INIT_ALPHA), dtype=torch.float32,
+            requires_grad=True, device=device
+        )
+        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR_ALPHA_DISCRETE)
+        self.target_entropy = DISCRETE_TARGET_ENTROPY
+
+        # Replay buffer
+        self.replay_buffer = Stage1ReplayBuffer(max_per_class=BUFFER_CAPACITY)
+        self.total_it = 0
+        self.episode_count = 0
+
+        # Train I/O log
+        TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        self._io_log = open(TRANSFORMER_MODEL_PATH / 'train_io_log.txt', 'a', encoding='utf-8')
+        self._io_log.write(f"\n{'='*60}\n")
+        self._io_log.write(f"Session started: {datetime.datetime.now().isoformat()}\n")
+        self._io_log.write(f"{'='*60}\n")
+        self._io_log.flush()
+
+        self.try_load_model()
+        atexit.register(self.save_persistent)
+        atexit.register(self._close_io_log)
+
+    def select_action(self, state, add_noise=True):
+        """選擇一個 grid cell。
+
+        Returns:
+            action: int [0, 99]
+        """
+        state_batch = state.unsqueeze(0).to(device)
+
+        self.actor.eval()
+        with torch.no_grad():
+            probs, _ = self.actor(state_batch)
+            if add_noise:
+                dist = torch.distributions.Categorical(probs)
+                action = dist.sample().item()
+            else:
+                action = probs.argmax(dim=-1).item()
+        self.actor.train()
+
+        return action
+
+    def store_transition(self, state, action, next_state, reward, done):
+        self.replay_buffer.store(state, action, next_state, reward, done)
+
+    def train_step(self):
+        if self.replay_buffer.size() < BATCH_SIZE:
+            return None
+
+        self.total_it += 1
+        state, action, next_state, reward, done = self.replay_buffer.sample(BATCH_SIZE)
+        alpha = self.log_alpha.exp().detach()
+
+        # action → long index
+        if isinstance(action, torch.Tensor) and action.dim() > 1:
+            action_idx = action.squeeze(-1).long()
+        else:
+            action_idx = action.long()
+
+        # --- Critic update ---
+        with torch.no_grad():
+            next_probs, next_log_probs = self.actor(next_state)
+            next_q1, next_q2 = self.critic_target(next_state)
+            next_q = torch.min(next_q1, next_q2)
+            next_v = (next_probs * (next_q - alpha * next_log_probs)).sum(dim=-1, keepdim=True)
+            target_q = reward + (1 - done) * GAMMA * next_v
+
+        q1_all, q2_all = self.critic(state)
+        q1 = q1_all.gather(1, action_idx.unsqueeze(-1))
+        q2 = q2_all.gather(1, action_idx.unsqueeze(-1))
+
+        critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
+
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_optimizer.step()
+
+        # --- Actor update ---
+        probs, log_probs = self.actor(state)
+        with torch.no_grad():
+            q1_all, q2_all = self.critic(state)
+            min_q = torch.min(q1_all, q2_all)
+
+        actor_loss = (probs * (alpha * log_probs - min_q)).sum(dim=-1).mean()
+
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+
+        # --- Alpha update (auto-alpha with clamp) ---
+        entropy = -(probs * log_probs).sum(dim=-1).mean()
+        alpha_loss = -(self.log_alpha * (entropy.detach() - self.target_entropy))
+        self.alpha_optimizer.zero_grad()
+        alpha_loss.backward()
+        self.alpha_optimizer.step()
+        with torch.no_grad():
+            self.log_alpha.data.clamp_(np.log(ALPHA_MIN), np.log(ALPHA_MAX))
+
+        # --- Soft update target ---
+        for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
+            target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
+
+        # --- I/O log ---
+        new_alpha = self.log_alpha.exp().item()
+        mean_q = (probs.detach() * min_q).sum(dim=-1).mean().item()
+        reward_counts = defaultdict(int)
+        for r in reward.squeeze(-1).tolist():
+            reward_counts[r] += 1
+        self._io_log.write(
+            f"[Step {self.total_it}] {datetime.datetime.now().strftime('%H:%M:%S')}\n"
+            f"  Input:  batch_rewards={dict(reward_counts)} | alpha={alpha.item():.4f}\n"
+            f"  Output: critic_loss={critic_loss.item():.4f} | actor_loss={actor_loss.item():.4f}"
+            f" | alpha={new_alpha:.4f} | entropy={entropy.item():.4f} | mean_q={mean_q:.4f}\n"
+            f"---\n"
+        )
+        self._io_log.flush()
+
+        return {
+            "critic_loss": critic_loss.item(),
+            "actor_loss": actor_loss.item(),
+            "alpha": alpha.item(),
+            "entropy": entropy.item(),
+        }
+
+    def _close_io_log(self):
+        if self._io_log and not self._io_log.closed:
+            self._io_log.close()
+
+    def on_episode_end(self):
+        self.episode_count += 1
+        self._save_model()
+        if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
+            print(f"[Transformer] Periodic save at episode {self.episode_count}")
+            self.save_persistent()
+
+    def _save_model(self):
+        TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        torch.save(self.actor.state_dict(), TRANSFORMER_MODEL_PATH / 'actor.pth')
+        torch.save(self.critic.state_dict(), TRANSFORMER_MODEL_PATH / 'critic.pth')
+        torch.save(self.critic_target.state_dict(), TRANSFORMER_MODEL_PATH / 'critic_target.pth')
+        torch.save(self.log_alpha, TRANSFORMER_MODEL_PATH / 'log_alpha.pth')
+        torch.save({
+            'actor_optimizer': self.actor_optimizer.state_dict(),
+            'critic_optimizer': self.critic_optimizer.state_dict(),
+            'alpha_optimizer': self.alpha_optimizer.state_dict(),
+            'total_it': self.total_it,
+            'episode_count': self.episode_count,
+        }, TRANSFORMER_MODEL_PATH / 'optimizer_state.pth')
+
+    def save_persistent(self):
+        """儲存 replay buffer 到磁碟。"""
+        buf = self.replay_buffer
+        total = buf.size()
+        if total == 0:
+            return
+
+        all_entries = buf.get_all_entries()
+        if len(all_entries) > SAVE_CAPACITY:
+            dist = buf.get_class_distribution()
+            per_class = max(1, SAVE_CAPACITY // len(dist))
+            selected = []
+            for r, size in dist.items():
+                class_entries = [e for e in all_entries if e['reward'] == r]
+                if len(class_entries) > per_class:
+                    class_entries = random.sample(class_entries, per_class)
+                selected.extend(class_entries)
+            all_entries = selected[:SAVE_CAPACITY]
+
+        TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        torch.save({
+            'persistent_entries': all_entries,
+            'total_it': self.total_it,
+            'episode_count': self.episode_count,
+        }, TRANSFORMER_MODEL_PATH / 'training_state.pth')
+
+        saved_rewards = defaultdict(int)
+        for entry in all_entries:
+            saved_rewards[entry['reward']] += 1
+        print(f"--- save info ---------------")
+        print(f"[Transformer] Persistent save: {len(all_entries)} entries")
+        print(f"[Transformer] Reward distribution: {dict(saved_rewards)}")
+        print(f"--- save end ---------------")
+
+    def try_load_model(self):
+        actor_path = TRANSFORMER_MODEL_PATH / 'actor.pth'
+        if actor_path.exists():
+            try:
+                self.actor.load_state_dict(torch.load(actor_path, map_location=device))
+                print("[Transformer] Loaded Actor")
+            except Exception as e:
+                print(f"[Transformer] Failed to load Actor: {e}")
+
+        critic_path = TRANSFORMER_MODEL_PATH / 'critic.pth'
+        if critic_path.exists():
+            try:
+                self.critic.load_state_dict(torch.load(critic_path, map_location=device))
+                print("[Transformer] Loaded Critic")
+            except Exception as e:
+                print(f"[Transformer] Failed to load Critic: {e}")
+
+        critic_target_path = TRANSFORMER_MODEL_PATH / 'critic_target.pth'
+        if critic_target_path.exists():
+            try:
+                self.critic_target.load_state_dict(torch.load(critic_target_path, map_location=device))
+                print("[Transformer] Loaded Critic Target")
+            except Exception as e:
+                print(f"[Transformer] Failed to load Critic Target: {e}")
+
+        alpha_path = TRANSFORMER_MODEL_PATH / 'log_alpha.pth'
+        if alpha_path.exists():
+            try:
+                self.log_alpha = torch.load(alpha_path, map_location=device)
+                self.log_alpha.requires_grad_(True)
+                self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR_ALPHA_DISCRETE)
+                print(f"[Transformer] Loaded log_alpha: alpha={self.log_alpha.exp().item():.4f}")
+            except Exception as e:
+                print(f"[Transformer] Failed to load log_alpha: {e}")
+
+        opt_path = TRANSFORMER_MODEL_PATH / 'optimizer_state.pth'
+        if opt_path.exists():
+            try:
+                state = torch.load(opt_path, map_location=device, weights_only=False)
+                self.actor_optimizer.load_state_dict(state['actor_optimizer'])
+                self.critic_optimizer.load_state_dict(state['critic_optimizer'])
+                if 'alpha_optimizer' in state:
+                    self.alpha_optimizer.load_state_dict(state['alpha_optimizer'])
+                self.total_it = state['total_it']
+                self.episode_count = state.get('episode_count', 0)
+                print(f"[Transformer] Loaded optimizer: total_it={self.total_it}, episode={self.episode_count}")
+            except Exception as e:
+                print(f"[Transformer] Failed to load optimizer state: {e}")
+
+        training_state_path = TRANSFORMER_MODEL_PATH / 'training_state.pth'
+        if training_state_path.exists():
+            try:
+                state = torch.load(training_state_path, map_location=device, weights_only=False)
+                persistent_entries = state.get('persistent_entries', [])
+                loaded = min(len(persistent_entries), BUFFER_CAPACITY)
+                for i in range(loaded):
+                    entry = persistent_entries[i]
+                    self.replay_buffer.store(
+                        entry['state'], entry['action'],
+                        entry['next_state'], entry['reward'], entry['done']
+                    )
+                if loaded > 0:
+                    print(f"[Transformer] Loaded {loaded} replay buffer entries")
+            except Exception as e:
+                print(f"[Transformer] Failed to load replay buffer: {e}")
+
+
+# ============================================================
 # Stage 2 (視覺訓練) — 以下是原有的 classes
 # ============================================================
 
