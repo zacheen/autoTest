@@ -40,8 +40,9 @@ LR_ALPHA = 3e-4
 GAMMA = 0.99
 TAU = 0.005
 INIT_ALPHA = 0.2
-TARGET_ENTROPY = -2.0  # = -action_dim
-# Valid-rate-based alpha (Stage 1)
+TARGET_ENTROPY = -2.0  # = -action_dim (for continuous SAC)
+DISCRETE_TARGET_ENTROPY = 0.8 * np.log(100)  # ≈ 3.7 (80% of max discrete entropy ln(100)=4.6)
+LR_ALPHA_DISCRETE = 1e-5  # 比 continuous 慢 30 倍，避免 alpha 降太快
 ALPHA_MAX = 0.3
 ALPHA_MIN = 0.05
 BUFFER_CAPACITY = 2000   # Runtime circular buffer in CPU RAM (~1.44GB)
@@ -1227,9 +1228,13 @@ class SimpleDiscreteAgent:
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR_ACTOR)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LR_CRITIC)
 
-        # Alpha based on valid click rate
-        self.alpha = ALPHA_MAX
-        self.recent_valid_rates = deque(maxlen=50)
+        # Auto-alpha with clamp (correct target for discrete)
+        self.log_alpha = torch.tensor(
+            np.log(INIT_ALPHA), dtype=torch.float32,
+            requires_grad=True, device=device
+        )
+        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR_ALPHA_DISCRETE)
+        self.target_entropy = DISCRETE_TARGET_ENTROPY
 
         # Replay buffer
         self.replay_buffer = Stage1ReplayBuffer(max_size=BUFFER_CAPACITY)
@@ -1262,11 +1267,6 @@ class SimpleDiscreteAgent:
     def store_transition(self, state, action, next_state, reward, done):
         self.replay_buffer.store(state, action, next_state, reward, done)
 
-    def update_alpha(self, valid_rate):
-        self.recent_valid_rates.append(valid_rate)
-        avg_valid_rate = np.mean(self.recent_valid_rates)
-        self.alpha = ALPHA_MAX - (ALPHA_MAX - ALPHA_MIN) * avg_valid_rate
-
     def train_step(self):
         if self.replay_buffer.size() < BATCH_SIZE:
             return None
@@ -1274,7 +1274,7 @@ class SimpleDiscreteAgent:
         self.total_it += 1
         state, action, next_state, reward, done, per_indices, per_weights = \
             self.replay_buffer.sample(BATCH_SIZE)
-        alpha = self.alpha
+        alpha = self.log_alpha.exp().detach()
 
         # action → long index
         if isinstance(action, torch.Tensor) and action.dim() > 1:
@@ -1318,17 +1318,25 @@ class SimpleDiscreteAgent:
         actor_loss.backward()
         self.actor_optimizer.step()
 
+        # --- Alpha update (auto-alpha with clamp) ---
+        entropy = -(probs * log_probs).sum(dim=-1).mean()
+        alpha_loss = -(self.log_alpha * (entropy.detach() - self.target_entropy))
+        self.alpha_optimizer.zero_grad()
+        alpha_loss.backward()
+        self.alpha_optimizer.step()
+        # Clamp alpha to [ALPHA_MIN, ALPHA_MAX]
+        with torch.no_grad():
+            self.log_alpha.data.clamp_(np.log(ALPHA_MIN), np.log(ALPHA_MAX))
+
         # --- Soft update target ---
         for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
             target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
 
-        entropy = -(probs * log_probs).sum(dim=-1).mean().item()
-
         return {
             "critic_loss": critic_loss.item(),
             "actor_loss": actor_loss.item(),
-            "alpha": alpha,
-            "entropy": entropy,
+            "alpha": alpha.item(),
+            "entropy": entropy.item(),
         }
 
     def on_episode_end(self):
@@ -1343,12 +1351,13 @@ class SimpleDiscreteAgent:
         torch.save(self.actor.state_dict(), SIMPLE_MODEL_PATH / 'actor.pth')
         torch.save(self.critic.state_dict(), SIMPLE_MODEL_PATH / 'critic.pth')
         torch.save(self.critic_target.state_dict(), SIMPLE_MODEL_PATH / 'critic_target.pth')
+        torch.save(self.log_alpha, SIMPLE_MODEL_PATH / 'log_alpha.pth')
         torch.save({
             'actor_optimizer': self.actor_optimizer.state_dict(),
             'critic_optimizer': self.critic_optimizer.state_dict(),
+            'alpha_optimizer': self.alpha_optimizer.state_dict(),
             'total_it': self.total_it,
             'episode_count': self.episode_count,
-            'recent_valid_rates': list(self.recent_valid_rates),
         }, SIMPLE_MODEL_PATH / 'optimizer_state.pth')
 
     def save_persistent(self):
@@ -1384,7 +1393,6 @@ class SimpleDiscreteAgent:
             'persistent_entries': persistent_entries,
             'total_it': self.total_it,
             'episode_count': self.episode_count,
-            'recent_valid_rates': list(self.recent_valid_rates),
         }, SIMPLE_MODEL_PATH / 'training_state.pth')
 
         saved_rewards = defaultdict(int)
@@ -1418,20 +1426,27 @@ class SimpleDiscreteAgent:
             except Exception as e:
                 print(f"[Simple] Failed to load Critic Target: {e}")
 
+        alpha_path = SIMPLE_MODEL_PATH / 'log_alpha.pth'
+        if alpha_path.exists():
+            try:
+                self.log_alpha = torch.load(alpha_path, map_location=device)
+                self.log_alpha.requires_grad_(True)
+                self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR_ALPHA_DISCRETE)
+                print(f"[Simple] Loaded log_alpha: alpha={self.log_alpha.exp().item():.4f}")
+            except Exception as e:
+                print(f"[Simple] Failed to load log_alpha: {e}")
+
         opt_path = SIMPLE_MODEL_PATH / 'optimizer_state.pth'
         if opt_path.exists():
             try:
                 state = torch.load(opt_path, map_location=device, weights_only=False)
                 self.actor_optimizer.load_state_dict(state['actor_optimizer'])
                 self.critic_optimizer.load_state_dict(state['critic_optimizer'])
+                if 'alpha_optimizer' in state:
+                    self.alpha_optimizer.load_state_dict(state['alpha_optimizer'])
                 self.total_it = state['total_it']
                 self.episode_count = state.get('episode_count', 0)
-                saved_rates = state.get('recent_valid_rates', [])
-                if saved_rates:
-                    self.recent_valid_rates = deque(saved_rates, maxlen=50)
-                    avg_valid_rate = np.mean(self.recent_valid_rates)
-                    self.alpha = ALPHA_MAX - (ALPHA_MAX - ALPHA_MIN) * avg_valid_rate
-                print(f"[Simple] Loaded optimizer: total_it={self.total_it}, episode={self.episode_count}, alpha={self.alpha:.4f}")
+                print(f"[Simple] Loaded optimizer: total_it={self.total_it}, episode={self.episode_count}")
             except Exception as e:
                 print(f"[Simple] Failed to load optimizer state: {e}")
 

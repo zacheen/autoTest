@@ -29,8 +29,12 @@ The previous TD3 + ResNet18 implementation did not work. Key problems:
 
 ### 2. Decision Engine: SAC (Soft Actor-Critic)
 
-- **Algorithm**: SAC with valid-rate-based alpha (Stage 1) / automatic entropy tuning (Stage 2)
-- **Alpha (Stage 1)**: `alpha = ALPHA_MAX - (ALPHA_MAX - ALPHA_MIN) * avg_valid_rate` where `avg_valid_rate` is the sliding average of valid click rate over last 50 episodes. ALPHA_MAX=0.3, ALPHA_MIN=0.05. This ensures exploration stays high when the agent hasn't learned to click valid cells, and decreases as accuracy improves.
+- **Algorithm**: SAC with auto-alpha (clamped) for both Stage 1 and Stage 2
+- **Alpha tuning**: Standard SAC auto-alpha with correct target entropy + clamps:
+  - Discrete (Stage 1): `target_entropy = 0.5 * ln(100) ≈ 2.3` (50% of max categorical entropy)
+  - Continuous (Stage 2): `target_entropy = -action_dim = -2.0`
+  - Clamp: `alpha ∈ [ALPHA_MIN=0.05, ALPHA_MAX=0.3]` prevents both entropy collapse and over-exploration
+  - Previous valid-rate-based alpha was removed because it didn't respond to entropy collapse (alpha stayed at 0.27 while entropy dropped to 0)
 - **State**: Latent embedding vector + optional normalized history
 - **Key advantages over TD3**:
   - Stochastic policy (Gaussian) — natural exploration without additive noise
@@ -82,7 +86,7 @@ SAC Actor Output (x, y) → Pixel Scaling → Mouse Click → State Verification
 | Spatial encoding | HierarchicalAttentionHead (no GAP) | Grid position is essential for click targeting in Minesweeper. Previous SpatialAttentionHead (weighted pooling) failed — destroyed spatial info, causing policy collapse after 1200 episodes |
 | Feature layer selection | Mid-layer + last layer fusion | Mid-layer provides spatial detail for cell positioning; last layer provides semantic understanding of cell contents (digits, states) |
 | Spatial head architecture | HierarchicalAttention: 3× Local Attn (8×8 window, 128→64→32→32) + 1× Global Self-Attn (Flash Attn, 32→16) + Conv Downsample → 256 | Local attention reasons about neighbors (like Minesweeper rules); global attention captures board-level strategy; ~503K params, ~1.9GB VRAM (batch=32) |
-| Alpha tuning (Stage 1) | Valid-rate-based: `alpha = 0.3 - 0.25 * avg_valid_rate` (50-ep sliding avg) | Previous auto-alpha dropped to 0.0157 before agent learned anything → policy collapse. New design keeps exploration proportional to performance. ALPHA_MAX=0.3, ALPHA_MIN=0.05 |
+| Alpha tuning | Auto-alpha with clamp: target_entropy=2.3 (discrete) / -2.0 (continuous), alpha ∈ [0.05, 0.3] | Previous auto-alpha had wrong target (-2.0 for discrete), valid-rate-based alpha didn't respond to entropy collapse. Clamped auto-alpha with correct discrete target prevents both issues |
 | Embedding dimension | 256 | Balances expressiveness vs. 1050 Ti inference speed. YOLO11n mid+last fusion ≈ 384 channels at 40×40 → attention compresses to 256-d vector. Large enough for SAC on 2D action space, small enough for real-time inference |
 | History mechanism | None — single frame only | Agent decides purely from current screenshot. Simplifies replay buffer, training, and inference. Minesweeper board state is fully observable from a single frame |
 | Replay buffer format | Raw images (640×640 float16 tensors) + rewards on disk | Must store raw images since backbone is trainable (embeddings change as weights update). Saved to disk for upload to GCP |

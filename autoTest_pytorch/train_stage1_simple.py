@@ -88,10 +88,12 @@ def run_episode(logic, agent, add_noise=True):
         next_state = logic.get_grid_state_tensor()
 
         if add_noise:
-            agent.store_transition(state, action, next_state, reward, done)
-            train_info = agent.train_step()
-            if train_info is not None:
-                train_info_list.append(train_info)
+            # 跳過第一步：第一次點擊一定有效，沒有學習價值，會稀釋 valid group
+            if episode_steps > 0:
+                agent.store_transition(state, action, next_state, reward, done)
+                train_info = agent.train_step()
+                if train_info is not None:
+                    train_info_list.append(train_info)
 
         episode_steps += 1
 
@@ -208,9 +210,6 @@ def main():
         for episode in range(1, MAX_EPISODES + 1):
             stats = run_episode(logic, agent, add_noise=True)
 
-            valid_rate = stats['valid_clicks'] / (stats['valid_clicks'] + stats['invalid_clicks']) \
-                if (stats['valid_clicks'] + stats['invalid_clicks']) > 0 else 0.0
-            agent.update_alpha(valid_rate)
             agent.on_episode_end()
 
             if stats['is_win']:
@@ -288,7 +287,7 @@ def main():
                       f"Avg Steps: {avg_steps:>5.1f} | "
                       f"Total Wins: {total_wins} | "
                       f"Speed: {eps_per_sec:.1f} ep/s | "
-                      f"Alpha: {agent.alpha:.4f}")
+                      f"Alpha: {agent.log_alpha.exp().item():.4f}")
 
             if episode % SAVE_INTERVAL == 0:
                 agent._save_model()
