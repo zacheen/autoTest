@@ -1,6 +1,6 @@
 # New Design: SAC + YOLO11n
 
-> **STATUS: DESIGN PHASE** — No code has been written for this design yet.
+> **STATUS: IMPLEMENTATION** — Stage 1 code implemented and iterating.
 
 This document captures the proposed redesign as specified by the project owner.
 
@@ -18,14 +18,19 @@ The previous TD3 + ResNet18 implementation did not work. Key problems:
 - **Model**: YOLO11n (Nano variant) — initialized from pretrained weights (COCO), then **fine-tuned end-to-end** with SAC training
 - **Input**: Screen captures resized to **640 × 640**
 - **Feature Layers**: Extract from **mid-layer** (~40×40, spatial detail) and **last layer** (~20×20, semantic understanding), then fuse
-- **Processing**: Dual feature maps → Upsample/align → Concatenate → Trainable Spatial Head → Spatial-aware embedding
-- **Spatial Head**: Spatial attention mechanism on top of fused feature maps — learns to focus on relevant grid cells while preserving positional information (no GAP — grid position matters for click targeting)
+- **Processing**: Dual feature maps → Upsample/align → Concatenate → HierarchicalAttentionHead → 256-dim embedding
+- **Attention Architecture**: Hierarchical attention replaces the old SpatialAttentionHead (which collapsed spatial info via weighted pooling). New design:
+  - **3× Local Attention** (8×8 window): Each position attends to its 8×8 neighborhood. Channel reduction 128→64→32→32. Learns neighbor-level reasoning (e.g., "this cell is 1, one neighbor unrevealed").
+  - **1× Global Self-Attention** (Flash Attention, 6400 positions): All positions attend to each other. Channel 32→16. Learns board-level strategy.
+  - **Conv Downsample**: (16,80,80) → stride-4 convs → (64,5,5) → flatten → FC → 256-dim embedding.
+  - Total parameters: ~493K. VRAM: ~1.9GB (batch=32) on 1050 Ti (fits in 4GB).
 - **Why transfer learning**: Training from scratch is too slow/unstable; pretrained weights provide good low-level features (edges, textures, colors) as a starting point. Fine-tuning adapts them to game-specific patterns (digits, cell states, grid structure).
 - **Why no GAP**: Minesweeper is a grid game — the agent must know *where* a number is, not just *that* a number exists. GAP collapses all spatial info into a single vector, making it impossible to target specific cells.
 
 ### 2. Decision Engine: SAC (Soft Actor-Critic)
 
-- **Algorithm**: SAC with automatic entropy tuning
+- **Algorithm**: SAC with valid-rate-based alpha (Stage 1) / automatic entropy tuning (Stage 2)
+- **Alpha (Stage 1)**: `alpha = ALPHA_MAX - (ALPHA_MAX - ALPHA_MIN) * avg_valid_rate` where `avg_valid_rate` is the sliding average of valid click rate over last 50 episodes. ALPHA_MAX=0.3, ALPHA_MIN=0.05. This ensures exploration stays high when the agent hasn't learned to click valid cells, and decreases as accuracy improves.
 - **State**: Latent embedding vector + optional normalized history
 - **Key advantages over TD3**:
   - Stochastic policy (Gaussian) — natural exploration without additive noise
@@ -52,7 +57,7 @@ The previous TD3 + ResNet18 implementation did not work. Key problems:
 ### 5. Operational Flow
 
 ```
-Capture Screenshot → YOLO11n Feature Maps → Spatial Head → Spatial Embedding →
+Capture Screenshot → YOLO11n Feature Maps → HierarchicalAttention → Embedding →
 SAC Actor Output (x, y) → Pixel Scaling → Mouse Click → State Verification
 ```
 
@@ -74,15 +79,16 @@ SAC Actor Output (x, y) → Pixel Scaling → Mouse Click → State Verification
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Backbone training | Transfer learning (fine-tune from pretrained) | Training from scratch is too slow; frozen backbone can't learn game-specific features |
-| Spatial encoding | Spatial head (no GAP) | Grid position is essential for click targeting in Minesweeper |
+| Spatial encoding | HierarchicalAttentionHead (no GAP) | Grid position is essential for click targeting in Minesweeper. Previous SpatialAttentionHead (weighted pooling) failed — destroyed spatial info, causing policy collapse after 1200 episodes |
 | Feature layer selection | Mid-layer + last layer fusion | Mid-layer provides spatial detail for cell positioning; last layer provides semantic understanding of cell contents (digits, states) |
-| Spatial head architecture | Spatial attention mechanism | Learns to focus on relevant grid cells; more expressive than plain conv+flatten for a structured grid game |
+| Spatial head architecture | HierarchicalAttention: 3× Local Attn (8×8 window, 128→64→32→32) + 1× Global Self-Attn (Flash Attn, 32→16) + Conv Downsample → 256 | Local attention reasons about neighbors (like Minesweeper rules); global attention captures board-level strategy; ~503K params, ~1.9GB VRAM (batch=32) |
+| Alpha tuning (Stage 1) | Valid-rate-based: `alpha = 0.3 - 0.25 * avg_valid_rate` (50-ep sliding avg) | Previous auto-alpha dropped to 0.0157 before agent learned anything → policy collapse. New design keeps exploration proportional to performance. ALPHA_MAX=0.3, ALPHA_MIN=0.05 |
 | Embedding dimension | 256 | Balances expressiveness vs. 1050 Ti inference speed. YOLO11n mid+last fusion ≈ 384 channels at 40×40 → attention compresses to 256-d vector. Large enough for SAC on 2D action space, small enough for real-time inference |
 | History mechanism | None — single frame only | Agent decides purely from current screenshot. Simplifies replay buffer, training, and inference. Minesweeper board state is fully observable from a single frame |
 | Replay buffer format | Raw images (640×640 float16 tensors) + rewards on disk | Must store raw images since backbone is trainable (embeddings change as weights update). Saved to disk for upload to GCP |
 | Replay buffer (runtime) | BUFFER_CAPACITY = 600 entries (~1.44 GB RAM) | Circular buffer in CPU RAM. Training samples randomly from these 600 entries |
 | Replay buffer (persistent) | SAVE_CAPACITY = 150 entries (~360 MB disk) | Stratified random subset saved to disk every 50 episodes + on exit. Loaded into runtime buffer on next startup |
-| TensorRT export | Full inference path: YOLO + spatial attention + actor | Critic is not needed at inference time. Optimizing the complete forward pass (screenshot → click coordinates) gives maximum speedup on 1050 Ti |
+| TensorRT export | Full inference path: YOLO + HierarchicalAttention + actor | Critic is not needed at inference time. Optimizing the complete forward pass (screenshot → click coordinates) gives maximum speedup on 1050 Ti |
 | Fine-tuning location | GCP only | 1050 Ti is for data collection (Phase 1) and inference (Phase 3) only. All training happens on GCP (Phase 2) |
 
 ## Reward Design
@@ -173,11 +179,13 @@ Grid State (B, 12, 10, 10)
     (B, 128, 80, 80)  ← same shape as YOLO output
        │
        ▼
-┌─ SpatialAttentionHead (weights transferred) ───┐
-│  attention_conv → attention map (B, 1, 80, 80) │
-│  softmax → weighted spatial pooling             │
-│  fc → embedding (B, 256)                        │
-└────────────────────────────────────────────────┘
+┌─ HierarchicalAttentionHead (weights transferred) ┐
+│  Local Attn L1 (8×8): 128→64                     │
+│  Local Attn L2 (8×8): 64→32                      │
+│  Local Attn L3 (8×8): 32→32 (residual)           │
+│  Global Self-Attn (Flash): 32→16                  │
+│  Conv Downsample → FC → embedding (B, 256)        │
+└───────────────────────────────────────────────────┘
        │
        ▼
 ┌─ SAC Actor head (weights transferred) ─────────┐
@@ -200,11 +208,11 @@ Grid State (B, 12, 10, 10)
 | 10 | Revealed number 8 |
 | 11 | Mine (地雷, only visible on game over) |
 
-**Purpose**: Validate that SpatialAttentionHead + SAC Actor can learn Minesweeper spatial reasoning (e.g., inferring bomb locations from adjacent numbers — a natural fit for attention mechanisms).
+**Purpose**: Validate that HierarchicalAttentionHead + SAC Actor can learn Minesweeper spatial reasoning (e.g., inferring bomb locations from adjacent numbers — local attention reasons about neighbors, global attention reasons about the full board).
 
 **Training environment**: Runs against `MinesweeperLogic` API directly (no screenshots, no GUI). Lightweight enough for local 1050 Ti.
 
-**Critic**: Also pre-trained in Stage 1 with its own GridEncoder + SpatialAttentionHead. Weights transferred to Stage 2.
+**Critic**: Also pre-trained in Stage 1 with its own GridEncoder + HierarchicalAttentionHead. Weights transferred to Stage 2.
 
 ### Stage 2: Visual Training (Screenshot → SAC)
 
@@ -220,9 +228,9 @@ Screenshot (B, 3, 640, 640)
     (B, 128, 80, 80)  ← same shape
        │
        ▼
-┌─ SpatialAttentionHead (loaded from Stage 1) ──┐
-│  NOT frozen — continues fine-tuning            │
-└────────────────────────────────────────────────┘
+┌─ HierarchicalAttentionHead (loaded from Stage 1) ┐
+│  NOT frozen — continues fine-tuning               │
+└───────────────────────────────────────────────────┘
        │
        ▼
 ┌─ SAC Actor head (loaded from Stage 1) ────────┐
@@ -239,22 +247,22 @@ Screenshot (B, 3, 640, 640)
 |-----------|---------------|----------------------|---------|
 | GridEncoder | Trained | **Discarded** (replaced by YOLO) | — |
 | YOLO11nBackbone | — | COCO pretrained | No |
-| SpatialAttentionHead (Actor) | Trained | Loaded from Stage 1 | No |
-| SpatialAttentionHead (Critic) | Trained | Loaded from Stage 1 | No |
+| HierarchicalAttentionHead (Actor) | Trained | Loaded from Stage 1 | No |
+| HierarchicalAttentionHead (Critic) | Trained | Loaded from Stage 1 | No |
 | Actor mean_head / log_std_head | Trained | Loaded from Stage 1 | No |
 | Critic FC layers | Trained | Loaded from Stage 1 | No |
-| Entropy log_alpha | Trained | Loaded from Stage 1 | No |
+| Alpha | Valid-rate-based (not saved) | Stage 2 uses auto-tuning (separate mechanism) | — |
 
 **Saved checkpoint** (end of Stage 1):
 
 ```
 stage1_weights.pth = {
-    "actor_spatial_attention": state_dict,
+    "actor_attention": state_dict,      # HierarchicalAttentionHead
     "actor_mean_head": state_dict,
     "actor_log_std_head": state_dict,
-    "critic_spatial_attention": state_dict,
-    "critic_fc_layers": state_dict,
-    "log_alpha": tensor,
+    "critic_attention": state_dict,     # HierarchicalAttentionHead
+    "critic_q1": state_dict,
+    "critic_q2": state_dict,
 }
 ```
 
@@ -262,7 +270,7 @@ GridEncoder weights are NOT saved — they are Stage 1 only.
 
 ### Why This Works
 
-The key insight: both GridEncoder and YOLO output **(B, 128, 80, 80)** feature maps. SpatialAttentionHead learns game-reasoning patterns (attention over grid cells) in Stage 1, then adapts to visual features in Stage 2. This is analogous to using YOLO's COCO pretrained weights — starting from a useful initialization rather than random.
+The key insight: both GridEncoder and YOLO output **(B, 128, 80, 80)** feature maps. HierarchicalAttentionHead learns game-reasoning patterns (local neighbor reasoning + global board strategy) in Stage 1, then adapts to visual features in Stage 2. This is analogous to using YOLO's COCO pretrained weights — starting from a useful initialization rather than random.
 
 ## Game Logic Separation (MinesweeperLogic)
 
@@ -339,7 +347,7 @@ autoTest_pytorch/
 | Function | Description |
 |----------|-------------|
 | Create game | `MinesweeperLogic(10, 10, 10)` |
-| Create agent | `Stage1SACAgent` (GridEncoder + SpatialAttention + SAC) |
+| Create agent | `Stage1SACAgent` (GridEncoder + HierarchicalAttention + SAC) |
 | Training loop | Run N episodes, each step calls `logic.click()` |
 | Checkpoint | Every 50 episodes + on exit |
 | Output | `models/stage1_weights.pth` (for Stage 2 to load) |
@@ -380,10 +388,10 @@ train_stage1.py
 | Class | Description |
 |-------|-------------|
 | `GridEncoder` | 3× ConvTranspose2d, maps (12, 10, 10) → (128, 80, 80) |
-| `Stage1ActorNetwork` | GridEncoder + SpatialAttentionHead + mean/log_std heads |
-| `Stage1CriticNetwork` | GridEncoder + SpatialAttentionHead + Q-value heads |
+| `Stage1ActorNetwork` | GridEncoder + HierarchicalAttentionHead + mean/log_std heads |
+| `Stage1CriticNetwork` | GridEncoder + HierarchicalAttentionHead + Q-value heads |
 | `Stage1SACAgent` | Uses Stage1Actor/Critic, manages training loop and checkpoints |
-| `save_stage1_weights()` | Saves only SpatialAttention + SAC heads (not GridEncoder) |
+| `save_stage1_weights()` | Saves only HierarchicalAttention + SAC heads (not GridEncoder) |
 
 ### Stage 1 Replay Buffer
 
@@ -409,7 +417,7 @@ models/
   ├── stage1_training_state.pth  # Optimizers, step counter, episode count, buffer index
   ├── stage1_replay_buffer/      # Runtime buffer (tiny files)
   ├── stage1_replay_buffer_save/ # Persistent save
-  └── stage1_weights.pth         # Transfer weights (SpatialAttention + SAC heads only)
+  └── stage1_weights.pth         # Transfer weights (HierarchicalAttention + SAC heads only)
 ```
 
 `stage1_weights.pth` is the ONLY file Stage 2 needs. All other `stage1_*` files are for Stage 1 resume only.

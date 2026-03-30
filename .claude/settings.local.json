@@ -11,7 +11,8 @@
       "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"from torch.utils.tensorboard import SummaryWriter; print\\(''tensorboard OK''\\)\")",
       "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import py_compile; py_compile.compile\\(''train_stage1.py'', doraise=True\\); py_compile.compile\\(''training_logger.py'', doraise=True\\); print\\(''OK''\\)\")",
       "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import py_compile; py_compile.compile\\(''train_stage1.py'', doraise=True\\); py_compile.compile\\(''RL_Agent.py'', doraise=True\\); print\\(''OK''\\)\")",
-      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import py_compile; py_compile.compile\\(''RL_Agent.py'', doraise=True\\); print\\(''OK''\\)\")"
+      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import py_compile; py_compile.compile\\(''RL_Agent.py'', doraise=True\\); print\\(''OK''\\)\")",
+      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import py_compile; py_compile.compile\\(''RL_Agent.py'', doraise=True\\); print\\(''Syntax OK''\\)\")"
     ]
   }
 }

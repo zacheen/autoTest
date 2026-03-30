@@ -262,7 +262,10 @@ def main():
             # ----- 訓練 episode -----
             stats = run_episode(logic, agent, add_noise=True)
 
-            # Episode 結束
+            # Episode 結束 — 更新 alpha + 存檔
+            valid_rate = stats['valid_clicks'] / (stats['valid_clicks'] + stats['invalid_clicks']) \
+                if (stats['valid_clicks'] + stats['invalid_clicks']) > 0 else 0.0
+            agent.update_alpha(valid_rate)
             agent.on_episode_end()
 
             if stats['is_win']:
@@ -343,7 +346,7 @@ def main():
                       f"Avg Steps: {avg_steps:>5.1f} | "
                       f"Total Wins: {total_wins} | "
                       f"Speed: {eps_per_sec:.1f} ep/s | "
-                      f"Alpha: {agent.log_alpha.exp().item():.4f}")
+                      f"Alpha: {agent.alpha:.4f}")
 
             # ----- 定期匯出 transfer weights -----
             if episode % EXPORT_WEIGHTS_INTERVAL == 0:

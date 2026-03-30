@@ -8,7 +8,7 @@ import cv2
 import os
 import random
 import shutil
-from collections import defaultdict
+from collections import defaultdict, deque
 from PIL import Image
 import atexit
 import datetime
@@ -41,6 +41,9 @@ GAMMA = 0.99
 TAU = 0.005
 INIT_ALPHA = 0.2
 TARGET_ENTROPY = -2.0  # = -action_dim
+# Valid-rate-based alpha (Stage 1)
+ALPHA_MAX = 0.3
+ALPHA_MIN = 0.05
 BUFFER_CAPACITY = 600   # Runtime circular buffer in CPU RAM (~1.44GB)
 SAVE_CAPACITY = 150     # Persistent save to disk (~360MB)
 SAVE_EVERY_N_EPISODES = 50
@@ -164,22 +167,171 @@ class YOLO11nBackbone(nn.Module):
         return fused
 
 
-class SpatialAttentionHead(nn.Module):
-    """Spatial attention mechanism that preserves positional information."""
+class LocalAttentionLayer(nn.Module):
+    """Local attention: each position attends to its window_size×window_size neighborhood."""
+
+    def __init__(self, in_channels, out_channels, window_size=8, num_heads=4):
+        super().__init__()
+        self.window_size = window_size
+        self.num_heads = num_heads
+        self.head_dim = out_channels // num_heads
+
+        self.q_proj = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        self.k_proj = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        self.v_proj = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        self.out_proj = nn.Conv2d(out_channels, out_channels, kernel_size=1)
+        self.norm = nn.LayerNorm(out_channels)
+
+        # Residual projection when channel dimensions differ
+        self.residual_proj = None
+        if in_channels != out_channels:
+            self.residual_proj = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        """
+        Args:
+            x: (B, C_in, H, W)
+        Returns:
+            (B, C_out, H, W)
+        """
+        B, C, H, W = x.shape
+        ws = self.window_size
+
+        # Project Q, K, V
+        q = self.q_proj(x)  # (B, C_out, H, W)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+
+        # Pad to make H, W divisible by window_size
+        pad_h = (ws - H % ws) % ws
+        pad_w = (ws - W % ws) % ws
+        if pad_h > 0 or pad_w > 0:
+            q = F.pad(q, (0, pad_w, 0, pad_h))
+            k = F.pad(k, (0, pad_w, 0, pad_h))
+            v = F.pad(v, (0, pad_w, 0, pad_h))
+
+        _, C_out, Hp, Wp = q.shape
+        nH, nW = Hp // ws, Wp // ws
+
+        # Reshape into windows: (B, C_out, nH, ws, nW, ws) → (B*nH*nW, num_heads, ws*ws, head_dim)
+        def to_windows(t):
+            t = t.view(B, C_out, nH, ws, nW, ws)
+            t = t.permute(0, 2, 4, 1, 3, 5)  # (B, nH, nW, C_out, ws, ws)
+            t = t.reshape(B * nH * nW, self.num_heads, self.head_dim, ws * ws)
+            t = t.permute(0, 1, 3, 2)  # (B*nH*nW, num_heads, ws*ws, head_dim)
+            return t
+
+        q_win = to_windows(q)
+        k_win = to_windows(k)
+        v_win = to_windows(v)
+
+        # Flash Attention
+        attn_out = F.scaled_dot_product_attention(q_win, k_win, v_win)
+        # (B*nH*nW, num_heads, ws*ws, head_dim)
+
+        # Reshape back to spatial
+        attn_out = attn_out.permute(0, 1, 3, 2)  # (B*nH*nW, num_heads, head_dim, ws*ws)
+        attn_out = attn_out.reshape(B, nH, nW, C_out, ws, ws)
+        attn_out = attn_out.permute(0, 3, 1, 4, 2, 5)  # (B, C_out, nH, ws, nW, ws)
+        attn_out = attn_out.reshape(B, C_out, Hp, Wp)
+
+        # Remove padding
+        if pad_h > 0 or pad_w > 0:
+            attn_out = attn_out[:, :, :H, :W]
+
+        out = self.out_proj(attn_out)
+
+        # LayerNorm (channel-last)
+        out = out.permute(0, 2, 3, 1)  # (B, H, W, C_out)
+        out = self.norm(out)
+        out = out.permute(0, 3, 1, 2)  # (B, C_out, H, W)
+
+        # Residual connection (with projection if channels differ)
+        if self.residual_proj is not None:
+            out = out + self.residual_proj(x)
+        else:
+            out = out + x
+
+        return out
+
+
+class GlobalAttentionLayer(nn.Module):
+    """Global self-attention: all spatial positions attend to each other via Flash Attention."""
+
+    def __init__(self, in_channels, out_channels, num_heads=4):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = out_channels // num_heads
+
+        self.q_proj = nn.Linear(in_channels, out_channels)
+        self.k_proj = nn.Linear(in_channels, out_channels)
+        self.v_proj = nn.Linear(in_channels, out_channels)
+        self.out_proj = nn.Linear(out_channels, out_channels)
+        self.norm = nn.LayerNorm(out_channels)
+
+    def forward(self, x):
+        """
+        Args:
+            x: (B, C_in, H, W)
+        Returns:
+            (B, C_out, H, W)
+        """
+        B, C, H, W = x.shape
+        N = H * W  # 6400
+
+        # Reshape to tokens: (B, N, C)
+        tokens = x.permute(0, 2, 3, 1).reshape(B, N, C)
+
+        # Project Q, K, V
+        q = self.q_proj(tokens).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(tokens).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(tokens).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        # (B, num_heads, N, head_dim)
+
+        # Flash Attention
+        attn_out = F.scaled_dot_product_attention(q, k, v)
+        # (B, num_heads, N, head_dim)
+
+        # Merge heads
+        attn_out = attn_out.transpose(1, 2).reshape(B, N, -1)  # (B, N, C_out)
+        out = self.out_proj(attn_out)
+        out = self.norm(out)
+
+        # Reshape back to spatial
+        C_out = out.shape[-1]
+        out = out.reshape(B, H, W, C_out).permute(0, 3, 1, 2)  # (B, C_out, H, W)
+
+        return out
+
+
+class HierarchicalAttentionHead(nn.Module):
+    """Hierarchical attention: 3x Local Attention + Global Attention + Conv Downsample.
+
+    Replaces SpatialAttentionHead. Preserves spatial reasoning before compressing.
+    """
 
     def __init__(self, in_channels=128, embed_dim=256):
         super().__init__()
 
-        # Learn attention weights per spatial location
-        self.attention_conv = nn.Sequential(
-            nn.Conv2d(in_channels, 64, kernel_size=3, padding=1),
+        # 3 layers of Local Attention (8×8 window)
+        self.local1 = LocalAttentionLayer(in_channels, 64, window_size=8, num_heads=4)
+        self.local2 = LocalAttentionLayer(64, 32, window_size=8, num_heads=4)
+        self.local3 = LocalAttentionLayer(32, 32, window_size=8, num_heads=4)
+
+        # Global Self-Attention
+        self.global_attn = GlobalAttentionLayer(32, 16, num_heads=2)
+
+        # Conv Downsample: (16, 80, 80) → (32, 20, 20) → (64, 5, 5)
+        self.downsample = nn.Sequential(
+            nn.Conv2d(16, 32, kernel_size=4, stride=4),
             nn.SiLU(inplace=True),
-            nn.Conv2d(64, 1, kernel_size=1),
+            nn.Conv2d(32, 64, kernel_size=4, stride=4),
+            nn.SiLU(inplace=True),
         )
 
-        # Project attended features to embedding
+        # FC: 64*5*5=1600 → embed_dim
         self.fc = nn.Sequential(
-            nn.Linear(in_channels, embed_dim),
+            nn.Linear(64 * 5 * 5, embed_dim),
             nn.SiLU(inplace=True),
         )
 
@@ -190,19 +342,19 @@ class SpatialAttentionHead(nn.Module):
         Returns:
             (B, 256) embedding vector
         """
-        B, C, H, W = features.shape
+        # Local attention (neighbor-level reasoning)
+        x = self.local1(features)   # (B, 64, 80, 80)
+        x = self.local2(x)          # (B, 32, 80, 80)
+        x = self.local3(x)          # (B, 32, 80, 80)
 
-        # Compute attention map
-        attn_map = self.attention_conv(features)  # (B, 1, H, W)
-        attn_weights = F.softmax(attn_map.view(B, -1), dim=-1)  # (B, H*W)
-        attn_weights = attn_weights.view(B, 1, H, W)  # (B, 1, H, W)
+        # Global attention (board-level strategy)
+        x = self.global_attn(x)     # (B, 16, 80, 80)
 
-        # Weighted spatial pooling
-        weighted = features * attn_weights  # (B, C, H, W)
-        pooled = weighted.sum(dim=[2, 3])  # (B, C)
+        # Compress to embedding
+        x = self.downsample(x)      # (B, 64, 5, 5)
+        x = x.flatten(1)            # (B, 1600)
+        embedding = self.fc(x)      # (B, 256)
 
-        # Project to embedding
-        embedding = self.fc(pooled)  # (B, 256)
         return embedding
 
 
@@ -215,7 +367,7 @@ class SACActorNetwork(nn.Module):
     def __init__(self, embed_dim=256, action_dim=2):
         super().__init__()
         self.backbone = YOLO11nBackbone()
-        self.attention = SpatialAttentionHead(in_channels=128, embed_dim=embed_dim)
+        self.attention = HierarchicalAttentionHead(in_channels=128, embed_dim=embed_dim)
 
         self.mean_head = nn.Linear(embed_dim, action_dim)
         self.log_std_head = nn.Linear(embed_dim, action_dim)
@@ -346,9 +498,9 @@ class GridEncoder(nn.Module):
 class Stage1ActorNetwork(nn.Module):
     """Stage 1 Actor: grid state → Gaussian distribution over (x, y) actions.
 
-    GridEncoder + SpatialAttentionHead + mean/log_std heads。
+    GridEncoder + HierarchicalAttentionHead + mean/log_std heads。
     使用 ScaledSigmoid 取代 tanh，輸出約 [-0.05, 1.05]。
-    SpatialAttentionHead 和 head 的權重會轉移到 Stage 2。
+    HierarchicalAttentionHead 和 head 的權重會轉移到 Stage 2。
     """
 
     LOG_STD_MIN = -20
@@ -357,7 +509,7 @@ class Stage1ActorNetwork(nn.Module):
     def __init__(self, embed_dim=256, action_dim=2):
         super().__init__()
         self.encoder = GridEncoder()
-        self.attention = SpatialAttentionHead(in_channels=128, embed_dim=embed_dim)
+        self.attention = HierarchicalAttentionHead(in_channels=128, embed_dim=embed_dim)
         self.mean_head = nn.Linear(embed_dim, action_dim)
         self.log_std_head = nn.Linear(embed_dim, action_dim)
         self.scaled_sigmoid = ScaledSigmoid(scale=1.1, shift=-0.05)
@@ -413,13 +565,13 @@ class Stage1ActorNetwork(nn.Module):
 class Stage1CriticNetwork(nn.Module):
     """Stage 1 Critic: grid state embedding + action → Q-value.
 
-    有自己的 GridEncoder 和 SpatialAttentionHead（不跟 Actor 共享）。
+    有自己的 GridEncoder 和 HierarchicalAttentionHead（不跟 Actor 共享）。
     """
 
     def __init__(self, embed_dim=256, action_dim=2):
         super().__init__()
         self.encoder = GridEncoder()
-        self.attention = SpatialAttentionHead(in_channels=128, embed_dim=embed_dim)
+        self.attention = HierarchicalAttentionHead(in_channels=128, embed_dim=embed_dim)
 
         input_dim = embed_dim + action_dim
         self.q1 = nn.Sequential(
@@ -660,7 +812,7 @@ class Stage1ReplayBuffer:
 class Stage1SACAgent:
     """Stage 1 SAC Agent — 用離散 grid state 預訓練。
 
-    訓練完成後可以匯出 SpatialAttentionHead + SAC head 的權重，
+    訓練完成後可以匯出 HierarchicalAttentionHead + SAC head 的權重，
     供 Stage 2 的 SACAgent 載入。
     """
 
@@ -679,13 +831,9 @@ class Stage1SACAgent:
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR_ACTOR)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LR_CRITIC)
 
-        # Entropy tuning
-        self.target_entropy = TARGET_ENTROPY
-        self.log_alpha = torch.tensor(
-            np.log(INIT_ALPHA), dtype=torch.float32,
-            requires_grad=True, device=device
-        )
-        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR_ALPHA)
+        # Alpha based on valid click rate (sliding window of 50 episodes)
+        self.alpha = ALPHA_MAX  # 初始值：最大探索
+        self.recent_valid_rates = deque(maxlen=50)
 
         # Replay buffer (in-memory, grid state 很小)
         self.replay_buffer = Stage1ReplayBuffer(max_size=BUFFER_CAPACITY)
@@ -731,7 +879,7 @@ class Stage1SACAgent:
         self.total_it += 1
         state, action, next_state, reward, done, per_indices, per_weights = \
             self.replay_buffer.sample(BATCH_SIZE)
-        alpha = self.log_alpha.exp().detach()
+        alpha = self.alpha
 
         # --- Critic update ---
         with torch.no_grad():
@@ -771,11 +919,7 @@ class Stage1SACAgent:
         actor_loss.backward()
         self.actor_optimizer.step()
 
-        # --- Alpha update ---
-        alpha_loss = -(self.log_alpha * (log_prob.detach() + self.target_entropy)).mean()
-        self.alpha_optimizer.zero_grad()
-        alpha_loss.backward()
-        self.alpha_optimizer.step()
+        # --- No alpha update: alpha is set by update_alpha() based on valid_rate ---
 
         # --- Soft update target ---
         for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
@@ -784,8 +928,18 @@ class Stage1SACAgent:
         return {
             "critic_loss": critic_loss.item(),
             "actor_loss": actor_loss.item(),
-            "alpha": alpha.item(),
+            "alpha": alpha,
         }
+
+    def update_alpha(self, valid_rate):
+        """根據有效點擊率更新 alpha。
+
+        Args:
+            valid_rate: float in [0, 1]，本 episode 的有效點擊率
+        """
+        self.recent_valid_rates.append(valid_rate)
+        avg_valid_rate = np.mean(self.recent_valid_rates)
+        self.alpha = ALPHA_MAX - (ALPHA_MAX - ALPHA_MIN) * avg_valid_rate
 
     def on_episode_end(self):
         """每個 episode 結束時呼叫。"""
@@ -802,13 +956,12 @@ class Stage1SACAgent:
         torch.save(self.actor.state_dict(), STAGE1_MODEL_PATH / 'stage1_actor.pth')
         torch.save(self.critic.state_dict(), STAGE1_MODEL_PATH / 'stage1_critic.pth')
         torch.save(self.critic_target.state_dict(), STAGE1_MODEL_PATH / 'stage1_critic_target.pth')
-        torch.save(self.log_alpha, STAGE1_MODEL_PATH / 'stage1_log_alpha.pth')
         torch.save({
             'actor_optimizer': self.actor_optimizer.state_dict(),
             'critic_optimizer': self.critic_optimizer.state_dict(),
-            'alpha_optimizer': self.alpha_optimizer.state_dict(),
             'total_it': self.total_it,
             'episode_count': self.episode_count,
+            'recent_valid_rates': list(self.recent_valid_rates),
         }, STAGE1_MODEL_PATH / 'stage1_optimizer_state.pth')
 
     def try_load_model(self):
@@ -837,26 +990,21 @@ class Stage1SACAgent:
             except Exception as e:
                 print(f"[Stage1] Failed to load Critic Target: {e}")
 
-        alpha_path = STAGE1_MODEL_PATH / 'stage1_log_alpha.pth'
-        if alpha_path.exists():
-            try:
-                self.log_alpha = torch.load(alpha_path, map_location=device)
-                self.log_alpha.requires_grad_(True)
-                self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR_ALPHA)
-                print("[Stage1] Loaded log_alpha")
-            except Exception as e:
-                print(f"[Stage1] Failed to load log_alpha: {e}")
-
         opt_path = STAGE1_MODEL_PATH / 'stage1_optimizer_state.pth'
         if opt_path.exists():
             try:
                 state = torch.load(opt_path, map_location=device, weights_only=False)
                 self.actor_optimizer.load_state_dict(state['actor_optimizer'])
                 self.critic_optimizer.load_state_dict(state['critic_optimizer'])
-                self.alpha_optimizer.load_state_dict(state['alpha_optimizer'])
                 self.total_it = state['total_it']
                 self.episode_count = state.get('episode_count', 0)
-                print(f"[Stage1] Loaded optimizer state: total_it={self.total_it}, episode={self.episode_count}")
+                # 載入 valid_rate 歷史，恢復 alpha
+                saved_rates = state.get('recent_valid_rates', [])
+                if saved_rates:
+                    self.recent_valid_rates = deque(saved_rates, maxlen=50)
+                    avg_valid_rate = np.mean(self.recent_valid_rates)
+                    self.alpha = ALPHA_MAX - (ALPHA_MAX - ALPHA_MIN) * avg_valid_rate
+                print(f"[Stage1] Loaded optimizer state: total_it={self.total_it}, episode={self.episode_count}, alpha={self.alpha:.4f}")
             except Exception as e:
                 print(f"[Stage1] Failed to load optimizer state: {e}")
 
@@ -918,9 +1066,9 @@ class Stage1SACAgent:
         torch.save({
             'actor_optimizer': self.actor_optimizer.state_dict(),
             'critic_optimizer': self.critic_optimizer.state_dict(),
-            'alpha_optimizer': self.alpha_optimizer.state_dict(),
             'total_it': self.total_it,
             'episode_count': self.episode_count,
+            'recent_valid_rates': list(self.recent_valid_rates),
             'persistent_entries': persistent_entries,
         }, STAGE1_MODEL_PATH / 'stage1_training_state.pth')
 
@@ -946,8 +1094,6 @@ class Stage1SACAgent:
             'critic_attention': self.critic.attention.state_dict(),
             'critic_q1': self.critic.q1.state_dict(),
             'critic_q2': self.critic.q2.state_dict(),
-            # Entropy
-            'log_alpha': self.log_alpha.detach().cpu(),
         }
         path = STAGE1_MODEL_PATH / 'stage1_weights.pth'
         torch.save(weights, path)
