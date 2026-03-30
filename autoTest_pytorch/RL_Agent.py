@@ -714,7 +714,7 @@ class Stage1ReplayBuffer:
         self.class_sizes[r] = min(self.class_sizes[r] + 1, self.max_per_class)
 
     def sample(self, batch_size):
-        """每個 reward class 抽相同數量的 samples。
+        """每個 reward class 盡量平均抽，數量不足的 class 抽完後剩餘配額給其他 class。
 
         回傳 (states, actions, next_states, rewards, dones)。
         """
@@ -724,12 +724,40 @@ class Stage1ReplayBuffer:
         if num_classes == 0:
             raise RuntimeError("Replay buffer is empty")
 
-        # 每個 class 分配的 sample 數量
+        # 第一輪：平均分配，數量不夠的 class 只拿實際數量
         base_count = batch_size // num_classes
         remainder = batch_size % num_classes
         class_counts = {}
+        overflow = 0
+        overflow_classes = []
         for i, r in enumerate(sorted(active_classes.keys())):
-            class_counts[r] = base_count + (1 if i < remainder else 0)
+            want = base_count + (1 if i < remainder else 0)
+            have = active_classes[r]
+            if have < want:
+                class_counts[r] = have
+                overflow += want - have
+            else:
+                class_counts[r] = want
+                overflow_classes.append(r)
+
+        # 第二輪：把剩餘配額分給還有餘裕的 class
+        while overflow > 0 and overflow_classes:
+            extra_per = overflow // len(overflow_classes)
+            extra_rem = overflow % len(overflow_classes)
+            if extra_per == 0 and extra_rem == 0:
+                break
+            new_overflow = 0
+            new_overflow_classes = []
+            for i, r in enumerate(overflow_classes):
+                give = extra_per + (1 if i < extra_rem else 0)
+                room = active_classes[r] - class_counts[r]
+                actual = min(give, room)
+                class_counts[r] += actual
+                new_overflow += give - actual
+                if class_counts[r] < active_classes[r]:
+                    new_overflow_classes.append(r)
+            overflow = new_overflow
+            overflow_classes = new_overflow_classes
 
         # 從每個 class 隨機抽
         all_entries = []
@@ -1340,8 +1368,10 @@ class SimpleDiscreteAgent:
         saved_rewards = defaultdict(int)
         for entry in all_entries:
             saved_rewards[entry['reward']] += 1
+        print(f"--- save info ---------------")
         print(f"[Simple] Persistent save: {len(all_entries)} entries")
         print(f"[Simple] Reward distribution: {dict(saved_rewards)}")
+        print(f"--- save end ---------------")
 
     def try_load_model(self):
         actor_path = SIMPLE_MODEL_PATH / 'actor.pth'
