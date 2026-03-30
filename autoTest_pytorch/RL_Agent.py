@@ -718,11 +718,16 @@ class Stage1ReplayBuffer:
         fraction = min(self.sample_count / self.beta_steps, 1.0)
         return self.beta_start + fraction * (self.beta_end - self.beta_start)
 
+    def _is_positive(self, reward):
+        """判斷是否為正面經驗（需要保護不被覆蓋）。"""
+        return reward > 0
+
     def store(self, state, action, next_state, reward, done):
-        """
+        """存 transition。Positive 經驗會被保護不被覆蓋。
+
         Args:
             state: (12, 10, 10) tensor
-            action: numpy array (2,)
+            action: numpy array or int
             next_state: (12, 10, 10) tensor
             reward: float
             done: bool
@@ -739,9 +744,27 @@ class Stage1ReplayBuffer:
         max_p = self.tree.max_priority()
         priority = max_p ** self.alpha if max_p > 0 else 1.0
 
+        # 保護 positive 經驗：如果要覆蓋的位置是 positive，跳到下一個非 positive 位置
+        # SumTree.add() 內部用 write_ptr，我們需要檢查並跳過
+        original_ptr = self.tree.write_ptr
+        attempts = 0
+        while attempts < self.max_size:
+            candidate_idx = self.tree.write_ptr
+            old_entry = self.buffer[candidate_idx]
+            if old_entry is not None and self._is_positive(old_entry['reward']):
+                # 這個位置是 positive 經驗，跳過
+                self.tree.write_ptr = (self.tree.write_ptr + 1) % self.max_size
+                attempts += 1
+            else:
+                break  # 找到可以覆蓋的位置
+
+        if attempts >= self.max_size:
+            # Buffer 全是 positive（極端情況），允許覆蓋最舊的 positive
+            self.tree.write_ptr = original_ptr
+
         data_idx = self.tree.add(priority)
 
-        # 更新 reward group tracking（circular buffer 覆蓋時移除舊的）
+        # 更新 reward group tracking
         old_entry = self.buffer[data_idx]
         if old_entry is not None:
             old_reward = old_entry['reward']
@@ -1150,10 +1173,15 @@ SIMPLE_MODEL_PATH = Path('./models/stage1_simple')
 
 
 class SimpleActorNetwork(nn.Module):
-    """極簡 Actor: grid state flatten → MLP → 100 action probabilities."""
+    """極簡 Actor: grid state flatten → MLP → 100 action probabilities.
+
+    支援 action masking：已翻開的格子機率設為 0。
+    """
 
     def __init__(self, grid_channels=GRID_STATE_CHANNELS, grid_h=10, grid_w=10, num_actions=100):
         super().__init__()
+        self.grid_h = grid_h
+        self.grid_w = grid_w
         input_dim = grid_channels * grid_h * grid_w  # 12*10*10 = 1200
         self.net = nn.Sequential(
             nn.Flatten(),
@@ -1168,6 +1196,7 @@ class SimpleActorNetwork(nn.Module):
         """
         Args:
             state: (B, 12, 10, 10)
+                   channel 0 = 未翻開 (model 應自行學會利用此資訊避開已翻開格子)
         Returns:
             probs: (B, 100), log_probs: (B, 100)
         """
@@ -1245,7 +1274,7 @@ class SimpleDiscreteAgent:
         atexit.register(self.save_persistent)
 
     def select_action(self, state, add_noise=True):
-        """選擇一個 grid cell。
+        """選擇一個 grid cell（不做 hard mask，model 自行學會避開已翻開格子）。
 
         Returns:
             action: int [0, 99]

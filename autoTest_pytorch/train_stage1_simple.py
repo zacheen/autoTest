@@ -57,7 +57,7 @@ def compute_reward(result):
         return -3.0
     if result.changed:
         return 3.0
-    return -2.0
+    return -2.95        # 幾乎跟 game over 同樣的懲罰
 
 
 def run_episode(logic, agent, add_noise=True):
