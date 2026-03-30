@@ -59,7 +59,7 @@ YOLO_LAST_CHANNELS = 128
 FUSED_CHANNELS = YOLO_MID_CHANNELS + YOLO_LAST_CHANNELS  # 256
 
 # Stage 1 預訓練參數
-GRID_STATE_CHANNELS = 12  # one-hot channel 數量 (MinesweeperLogic.NUM_CHANNELS)
+GRID_STATE_CHANNELS = 13  # one-hot channel 數量 + attempted click channel (MinesweeperLogic.NUM_CHANNELS)
 
 # Paths
 LOG_ACTIONS = True

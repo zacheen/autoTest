@@ -56,8 +56,8 @@ def compute_reward(result):
     if result.game_over:
         return -3.0
     if result.changed:
-        return 3.0
-    return -2.0
+        return 5.0
+    return -3.1
 
 
 def run_episode(logic, agent, add_noise=True):
@@ -75,6 +75,7 @@ def run_episode(logic, agent, add_noise=True):
         action = agent.select_action(state, add_noise=add_noise)
         row, col = action_to_grid(action, GRID_ROWS, GRID_COLS)
         result = logic.click(row, col)
+        logic.record_attempt(row, col)  # 記錄嘗試，改變 state 的 channel 12
         reward = compute_reward(result)
         episode_reward += reward
 
@@ -85,7 +86,7 @@ def run_episode(logic, agent, add_noise=True):
 
         done = result.game_over or result.win
         is_win = result.win
-        next_state = logic.get_grid_state_tensor()
+        next_state = logic.get_grid_state_tensor()  # 包含 attempt 資訊
 
         if add_noise:
             agent.store_transition(state, action, next_state, reward, done)

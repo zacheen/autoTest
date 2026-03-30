@@ -20,7 +20,8 @@ CH_NUM_0 = 2     # 已翻開空白 (數字 0)
 CH_NUM_1 = 3
 CH_NUM_8 = 10
 CH_MINE = 11
-NUM_CHANNELS = 12
+CH_ATTEMPTED = 12
+NUM_CHANNELS = 13
 
 
 @dataclass
@@ -56,6 +57,7 @@ class MinesweeperLogic:
         self.is_win = False
         self.first_click = True
         self.remaining_mines = mines_count
+        self.attempts = set()  # 記錄本 episode 嘗試點擊過的格子
 
     def reset(self):
         """重置遊戲到初始狀態。"""
@@ -66,6 +68,7 @@ class MinesweeperLogic:
         self.is_win = False
         self.first_click = True
         self.remaining_mines = self.mines_count
+        self.attempts = set()
 
     def click(self, row: int, col: int) -> ClickResult:
         """左鍵點擊某格。
@@ -170,6 +173,10 @@ class MinesweeperLogic:
             grid.append(row)
         return grid
 
+    def record_attempt(self, row: int, col: int):
+        """記錄一次點擊嘗試（不管有效無效）。"""
+        self.attempts.add((row, col))
+
     def get_grid_state_tensor(self) -> torch.Tensor:
         """取得 one-hot 編碼的 grid state tensor。
 
@@ -179,6 +186,7 @@ class MinesweeperLogic:
                 channel 1: 已標旗
                 channel 2-10: 數字 0-8
                 channel 11: 地雷 (只有 game_over 時才可見)
+                channel 12: 已嘗試點擊（本 episode 內）
         """
         tensor = torch.zeros(NUM_CHANNELS, self.rows, self.cols, dtype=torch.float32)
 
@@ -188,13 +196,16 @@ class MinesweeperLogic:
                     tensor[CH_FLAGGED, r, c] = 1.0
                 elif (r, c) in self.revealed:
                     if (r, c) in self.mines:
-                        # 踩雷後才看得到地雷
                         tensor[CH_MINE, r, c] = 1.0
                     else:
                         num = self._count_adjacent_mines(r, c)
                         tensor[CH_NUM_0 + num, r, c] = 1.0
                 else:
                     tensor[CH_UNREVEALED, r, c] = 1.0
+
+                # Channel 12: 已嘗試點擊
+                if (r, c) in self.attempts:
+                    tensor[CH_ATTEMPTED, r, c] = 1.0
 
         return tensor
 
