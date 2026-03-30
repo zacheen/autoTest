@@ -66,8 +66,8 @@ def compute_reward(result, out_of_bounds=False):
     if result.game_over:
         return -3.0
     if result.changed:
-        return 3.0    # 有效點擊
-    return -2.0        # 無效點擊（已翻開、已標旗）
+        return 5.0    # 有效點擊
+    return -2.9       # 無效點擊（已翻開、已標旗）
 
 
 def run_episode(logic, agent, add_noise=True):
@@ -107,10 +107,12 @@ def run_episode(logic, agent, add_noise=True):
         next_state = logic.get_grid_state_tensor()
 
         if add_noise:
-            agent.store_transition(state, action, next_state, reward, done)
-            train_info = agent.train_step()
-            if train_info is not None:
-                train_info_list.append(train_info)
+            # 跳過第一步：第一次點擊一定有效，沒有學習價值，會稀釋 valid group
+            if episode_steps > 0:
+                agent.store_transition(state, action, next_state, reward, done)
+                train_info = agent.train_step()
+                if train_info is not None:
+                    train_info_list.append(train_info)
 
         episode_steps += 1
 
