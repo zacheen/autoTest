@@ -44,7 +44,7 @@ TARGET_ENTROPY = -2.0  # = -action_dim
 # Valid-rate-based alpha (Stage 1)
 ALPHA_MAX = 0.3
 ALPHA_MIN = 0.05
-BUFFER_CAPACITY = 600   # Runtime circular buffer in CPU RAM (~1.44GB)
+BUFFER_CAPACITY = 2000   # Runtime circular buffer in CPU RAM (~1.44GB)
 SAVE_CAPACITY = 150     # Persistent save to disk (~360MB)
 SAVE_EVERY_N_EPISODES = 50
 IMAGE_SIZE = (640, 640)
@@ -709,6 +709,9 @@ class Stage1ReplayBuffer:
         self.epsilon = per_epsilon
         self.sample_count = 0  # 用來計算 beta 的線性增長
 
+        # Reward group tracking（用於 balanced sampling）
+        self.reward_groups = defaultdict(set)  # reward_value → set of buffer indices
+
     def _get_beta(self):
         """Beta 從 beta_start 線性增長到 beta_end。"""
         fraction = min(self.sample_count / self.beta_steps, 1.0)
@@ -736,40 +739,77 @@ class Stage1ReplayBuffer:
         priority = max_p ** self.alpha if max_p > 0 else 1.0
 
         data_idx = self.tree.add(priority)
+
+        # 更新 reward group tracking（circular buffer 覆蓋時移除舊的）
+        old_entry = self.buffer[data_idx]
+        if old_entry is not None:
+            old_reward = old_entry['reward']
+            self.reward_groups[old_reward].discard(data_idx)
+            if not self.reward_groups[old_reward]:
+                del self.reward_groups[old_reward]
+
         self.buffer[data_idx] = entry
+        self.reward_groups[float(reward)].add(data_idx)
         self.size_count = self.tree.size
 
     def sample(self, batch_size):
-        """優先級抽樣，回傳 (states, actions, next_states, rewards, dones, indices, weights)。
+        """Reward-balanced 抽樣：每個 reward group 抽相同數量的 samples。
 
-        weights 是 importance sampling 權重，用來修正 prioritized sampling 的 bias。
-        indices 用於之後 update_priorities() 更新 TD-error。
+        在每個 group 內使用 PER priority 決定抽哪些。
+        回傳 (states, actions, next_states, rewards, dones, indices, weights)。
         """
         self.sample_count += 1
         beta = self._get_beta()
 
+        # 取得有效的 reward groups
+        active_groups = {r: list(idxs) for r, idxs in self.reward_groups.items() if idxs}
+        num_groups = len(active_groups)
+
+        if num_groups == 0:
+            raise RuntimeError("Replay buffer is empty")
+
+        # 每個 group 分配的 sample 數量
+        base_count = batch_size // num_groups
+        remainder = batch_size % num_groups
+        group_counts = {}
+        for i, reward in enumerate(sorted(active_groups.keys())):
+            group_counts[reward] = base_count + (1 if i < remainder else 0)
+
+        # 從每個 group 中 PER-weighted 抽樣
         indices = []
         priorities = []
         total = self.tree.total()
 
-        # 把 total priority 分成 batch_size 等份，每份隨機抽一個
-        segment = total / batch_size
-        for i in range(batch_size):
-            low = segment * i
-            high = segment * (i + 1)
-            s = np.random.uniform(low, high)
-            data_idx, priority = self.tree.get(s)
-            # 防止抽到空的 slot
-            data_idx = np.clip(data_idx, 0, self.size_count - 1)
-            indices.append(data_idx)
-            priorities.append(priority)
+        for reward, count in group_counts.items():
+            group_indices = active_groups[reward]
+
+            if len(group_indices) <= count:
+                # Group 太小，全部拿（with replacement 補齊）
+                selected = group_indices.copy()
+                while len(selected) < count:
+                    selected.append(random.choice(group_indices))
+            else:
+                # 用 PER priority 從 group 中抽
+                group_priorities = np.array(
+                    [self.tree.tree[idx + self.tree.capacity - 1] for idx in group_indices],
+                    dtype=np.float64
+                )
+                group_priorities = np.clip(group_priorities, 1e-10, None)
+                probs = group_priorities / group_priorities.sum()
+                selected_idx = np.random.choice(len(group_indices), size=count, replace=False, p=probs)
+                selected = [group_indices[i] for i in selected_idx]
+
+            for idx in selected:
+                indices.append(idx)
+                p = self.tree.tree[idx + self.tree.capacity - 1]
+                priorities.append(max(p, 1e-10))
 
         # 計算 importance sampling weights
         priorities = np.array(priorities, dtype=np.float64)
         sampling_probs = priorities / total
-        sampling_probs = np.clip(sampling_probs, 1e-10, None)  # 防止除以 0
+        sampling_probs = np.clip(sampling_probs, 1e-10, None)
         weights = (self.size_count * sampling_probs) ** (-beta)
-        weights = weights / weights.max()  # normalize 到 [0, 1]
+        weights = weights / weights.max()
         weights = torch.tensor(weights, dtype=torch.float32).unsqueeze(1).to(device)
 
         # 組裝 batch
