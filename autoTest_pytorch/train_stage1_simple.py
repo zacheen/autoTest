@@ -119,16 +119,20 @@ def run_demo_episode(f, logic, agent, mode="validation"):
         state = logic.get_grid_state_tensor()
         action = agent.select_action(state, add_noise=add_noise)
         row, col = action_to_grid(action, GRID_ROWS, GRID_COLS)
+
+        safe_cells, _ = logic.get_logically_safe_cells()
         result = logic.click(row, col)
-        reward = compute_reward(result)
+        reward = compute_reward(result, clicked=(row, col), safe_cells=safe_cells)
         total_reward += reward
 
         done = result.game_over or result.win
         step += 1
 
+        is_logical = (row, col) in safe_cells if safe_cells else False
         status = "WIN!" if result.win else "BOOM!" if result.game_over else \
                  "valid" if result.changed else "invalid"
-        f.write(f"\n  Step {step}: click ({row},{col}) -> {status} | reward={reward:+.0f}\n")
+        tag = " [LOGICAL]" if is_logical else " [GUESS]" if result.changed else ""
+        f.write(f"\n  Step {step}: click ({row},{col}) -> {status}{tag} | reward={reward:+.0f}\n")
         f.write(format_grid(logic, click_row=row, click_col=col, result=result) + "\n")
 
     outcome = "WIN" if logic.is_win else "LOSE (mine)" if logic.game_over else "TIMEOUT"
@@ -151,15 +155,38 @@ def run_demo_at_save(logic, agent):
         f.write(f"{'='*50}\n")
 
 
-def compute_reward(result):
-    """根據 ClickResult 計算 reward。"""
+def compute_reward(result, clicked=None, safe_cells=None):
+    """根據 ClickResult + 邏輯安全性計算 reward。
+
+    Reward tiers:
+        +20.0  WIN
+        +6.0   邏輯安全 + flood-fill (≥3 cells)
+        +4.0   邏輯安全 (1-2 cells)
+        +2.0   全場無安全格，猜對了 (forced guess)
+        +1.0   有安全格但沒選到，碰巧沒踩雷 (lucky guess)
+        -3.0   踩雷
+        -2.95  無效點擊
+    """
+    if not result.changed:
+        return -2.95
     if result.win:
         return 20.0
     if result.game_over:
         return -3.0
-    if result.changed:
-        return 3.0
-    return -2.95        # 幾乎跟 game over 同樣的懲罰
+
+    # 有效安全點擊 — 根據邏輯安全性分級
+    if safe_cells is None:
+        return 3.0  # fallback (第一步或無 safe_cells 資訊)
+
+    num_revealed = len(result.revealed_cells)
+    is_flood = num_revealed >= 3
+
+    if clicked in safe_cells:
+        return 6.0 if is_flood else 4.0
+    elif len(safe_cells) == 0:
+        return 2.0  # forced guess
+    else:
+        return 1.0  # lucky guess
 
 
 def run_episode(logic, agent, add_noise=True):
@@ -176,8 +203,12 @@ def run_episode(logic, agent, add_noise=True):
         state = logic.get_grid_state_tensor()
         action = agent.select_action(state, add_noise=add_noise)
         row, col = action_to_grid(action, GRID_ROWS, GRID_COLS)
+
+        # 點擊前計算邏輯安全格（點擊後 board 會變）
+        safe_cells, _ = logic.get_logically_safe_cells()
+
         result = logic.click(row, col)
-        reward = compute_reward(result)
+        reward = compute_reward(result, clicked=(row, col), safe_cells=safe_cells)
         episode_reward += reward
 
         if result.changed:

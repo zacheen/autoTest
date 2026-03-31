@@ -198,6 +198,70 @@ class MinesweeperLogic:
 
         return tensor
 
+    def _get_neighbors(self, row: int, col: int):
+        """取得 (row, col) 的合法 8 鄰居座標。"""
+        neighbors = []
+        for dr in [-1, 0, 1]:
+            for dc in [-1, 0, 1]:
+                if dr == 0 and dc == 0:
+                    continue
+                r, c = row + dr, col + dc
+                if 0 <= r < self.rows and 0 <= c < self.cols:
+                    neighbors.append((r, c))
+        return neighbors
+
+    def get_logically_safe_cells(self):
+        """用約束傳播推導邏輯上安全的格子。
+
+        只用可見資訊（翻開的數字 + 已知推導）做推理，
+        不直接用 self.mines 作弊。
+
+        算法：反覆掃描所有翻開的數字格，做兩種推導：
+          1. 若某數字格周圍的未知地雷數 = 0 → 所有未知鄰居都安全
+          2. 若某數字格周圍的未知鄰居數 = 未知地雷數 → 所有未知鄰居都是雷
+
+        重複直到沒有新推導。
+
+        Returns:
+            (safe_cells: set, inferred_mines: set)
+        """
+        inferred_mines = set(self.flags)
+        inferred_safe = set()
+
+        changed = True
+        while changed:
+            changed = False
+            for (nr, nc) in self.revealed:
+                if (nr, nc) in self.mines:
+                    continue
+
+                k = self._count_adjacent_mines(nr, nc)
+                neighbors = self._get_neighbors(nr, nc)
+
+                # 分類鄰居
+                mine_count = 0
+                unknown = []
+                for (r, c) in neighbors:
+                    if (r, c) in self.revealed:
+                        continue
+                    if (r, c) in inferred_mines:
+                        mine_count += 1
+                    elif (r, c) not in inferred_safe:
+                        unknown.append((r, c))
+
+                remaining_mines = k - mine_count
+
+                if remaining_mines == 0 and unknown:
+                    # 所有未知鄰居都安全
+                    inferred_safe.update(unknown)
+                    changed = True
+                elif remaining_mines > 0 and remaining_mines == len(unknown) and unknown:
+                    # 所有未知鄰居都是雷
+                    inferred_mines.update(unknown)
+                    changed = True
+
+        return inferred_safe, inferred_mines
+
     # ---------- 內部方法 ----------
 
     def _place_mines(self, exclude_row: int, exclude_col: int):
