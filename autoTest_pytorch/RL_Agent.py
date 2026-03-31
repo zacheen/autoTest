@@ -44,7 +44,7 @@ TARGET_ENTROPY = -2.0  # = -action_dim (for continuous SAC)
 DISCRETE_TARGET_ENTROPY = 0.8 * np.log(100)  # ≈ 3.7 (80% of max discrete entropy ln(100)=4.6)
 LR_ALPHA_DISCRETE = 1e-5  # 比 continuous 慢 30 倍，避免 alpha 降太快
 ALPHA_MAX = 0.3
-ALPHA_MIN = 0.05
+ALPHA_MIN = 0.15
 BUFFER_CAPACITY = 2000   # Runtime circular buffer in CPU RAM (~1.44GB)
 SAVE_CAPACITY = 150     # Persistent save to disk (~360MB)
 SAVE_EVERY_N_EPISODES = 50
@@ -1558,8 +1558,10 @@ class TransformerActorNetwork(nn.Module):
         Returns:
             probs: (B, 100), log_probs: (B, 100)
         """
-        x = self._embed(state)                  # (B, 100, d_model)
-        x = self.transformer(x)                  # (B, 100, d_model)
+        x0 = self._embed(state)                  # (B, 100, d_model) — 保存原始 embedding
+        x = x0
+        for layer in self.transformer.layers:
+            x = layer(x) + x0                     # 每層 + 原始 embedding (input residual)
         logits = self.output_head(x).squeeze(-1)  # (B, 100)
 
         # Action masking: channel 0 = 未翻開 (可點擊)
@@ -1619,13 +1621,15 @@ class TransformerCriticNetwork(nn.Module):
     def _forward_branch(self, branch, state):
         B = state.size(0)
         tokens = state.permute(0, 2, 3, 1).reshape(B, self.num_tokens, -1)
-        x = branch['token_embed'](tokens)
+        x0 = branch['token_embed'](tokens)
         pos = torch.cat([
             branch['row_embed'](self.row_indices),
             branch['col_embed'](self.col_indices),
         ], dim=-1)
-        x = x + pos.unsqueeze(0)
-        x = branch['transformer'](x)
+        x0 = x0 + pos.unsqueeze(0)
+        x = x0
+        for layer in branch['transformer'].layers:
+            x = layer(x) + x0  # input residual
         return branch['head'](x).squeeze(-1)  # (B, 100)
 
     def forward(self, state):
@@ -1669,6 +1673,11 @@ class TransformerDiscreteAgent:
         self.total_it = 0
         self.episode_count = 0
 
+        # Epsilon-greedy exploration
+        self.epsilon = 0.3
+        self.epsilon_min = 0.05
+        self.epsilon_decay_episodes = 5000
+
         # Train I/O log
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
         self._io_log = open(TRANSFORMER_MODEL_PATH / 'train_io_log.txt', 'a', encoding='utf-8')
@@ -1684,9 +1693,18 @@ class TransformerDiscreteAgent:
     def select_action(self, state, add_noise=True):
         """選擇一個 grid cell。
 
+        Training 模式下有 epsilon 機率隨機選未翻開格子。
+
         Returns:
             action: int [0, 99]
         """
+        # Epsilon-greedy: 隨機選未翻開格子
+        if add_noise and random.random() < self.epsilon:
+            mask = state[0].reshape(-1).numpy()  # channel 0 = 未翻開
+            unrevealed = np.where(mask > 0.5)[0]
+            if len(unrevealed) > 0:
+                return int(np.random.choice(unrevealed))
+
         state_batch = state.unsqueeze(0).to(device)
 
         self.actor.eval()
@@ -1828,9 +1846,13 @@ class TransformerDiscreteAgent:
 
     def on_episode_end(self):
         self.episode_count += 1
+        # Epsilon decay
+        decay_progress = min(self.episode_count / self.epsilon_decay_episodes, 1.0)
+        self.epsilon = self.epsilon_min + (0.3 - self.epsilon_min) * (1.0 - decay_progress)
         self._save_model()
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
-            print(f"[Transformer] Periodic save at episode {self.episode_count}")
+            print(f"[Transformer] Periodic save at episode {self.episode_count}"
+                  f" | epsilon={self.epsilon:.4f}")
             self.save_persistent()
 
     def _save_model(self):
@@ -1845,6 +1867,7 @@ class TransformerDiscreteAgent:
             'alpha_optimizer': self.alpha_optimizer.state_dict(),
             'total_it': self.total_it,
             'episode_count': self.episode_count,
+            'epsilon': self.epsilon,
         }, TRANSFORMER_MODEL_PATH / 'optimizer_state.pth')
 
     def save_persistent(self):
@@ -1926,7 +1949,10 @@ class TransformerDiscreteAgent:
                     self.alpha_optimizer.load_state_dict(state['alpha_optimizer'])
                 self.total_it = state['total_it']
                 self.episode_count = state.get('episode_count', 0)
-                print(f"[Transformer] Loaded optimizer: total_it={self.total_it}, episode={self.episode_count}")
+                if 'epsilon' in state:
+                    self.epsilon = state['epsilon']
+                print(f"[Transformer] Loaded optimizer: total_it={self.total_it},"
+                      f" episode={self.episode_count}, epsilon={self.epsilon:.4f}")
             except Exception as e:
                 print(f"[Transformer] Failed to load optimizer state: {e}")
 
