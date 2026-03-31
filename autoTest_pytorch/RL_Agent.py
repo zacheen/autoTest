@@ -1578,10 +1578,11 @@ class TransformerCriticNetwork(nn.Module):
 
     Q1 和 Q2 各自有獨立的 embedding + Transformer encoder + output head，
     確保 twin-Q 估計足夠獨立以有效降低 overestimation bias。
+    Critic 用 2 層（比 Actor 的 4 層淺），減少梯度累積深度。
     """
 
     def __init__(self, grid_channels=GRID_STATE_CHANNELS, grid_h=10, grid_w=10,
-                 d_model=64, nhead=4, num_layers=4, dim_feedforward=256, dropout=0.1):
+                 d_model=64, nhead=4, num_layers=2, dim_feedforward=256, dropout=0.1):
         super().__init__()
         self.grid_h = grid_h
         self.grid_w = grid_w
