@@ -30,7 +30,7 @@ GRID_MINES = 10
 MAX_EPISODES = 10000
 MAX_STEPS_PER_EPISODE = 200
 LOG_INTERVAL = 50
-SAVE_INTERVAL = 500
+SAVE_INTERVAL = 300
 
 # ---------- 評估參數 ----------
 EVAL_INTERVAL = 100
@@ -44,6 +44,111 @@ CSV_LOG_PATH = Path("./models/stage1_transformer/training_log.csv")
 def action_to_grid(action, rows, cols):
     """Discrete action [0, 99] → (row, col)."""
     return action // cols, action % cols
+
+
+def format_grid(logic, click_row=None, click_col=None, result=None):
+    """用文字畫出遊戲 grid。
+
+    符號說明：
+        .  = 未翻開
+        F  = 已標旗
+        0-8 = 已翻開的數字
+        *  = 地雷 (game over 後)
+        括號 [X] = 本次點擊位置
+
+    Returns:
+        str: 格式化的 grid 文字
+    """
+    grid = logic.get_grid_state()
+    lines = []
+
+    # Header: column numbers
+    lines.append("    " + "  ".join(f"{c}" for c in range(logic.cols)))
+    lines.append("   " + "---" * logic.cols)
+
+    for r in range(logic.rows):
+        row_str = f"{r} |"
+        for c in range(logic.cols):
+            val = grid[r][c]
+            if val == -1:
+                ch = "."
+            elif val == -2:
+                ch = "F"
+            else:
+                ch = str(val)
+
+            # 踩雷: 顯示地雷
+            if result and result.game_over and result.hit_mine == (r, c):
+                ch = "*"
+
+            # 標記點擊位置
+            if r == click_row and c == click_col:
+                cell = f"[{ch}]"
+            else:
+                cell = f" {ch} "
+
+            row_str += cell
+        lines.append(row_str)
+
+    return "\n".join(lines)
+
+
+DEMO_TRAINING_EPISODES = 3  # save 時印幾場 training demo
+DEMO_LOG_PATH = Path("./models/stage1_transformer/demo_log.txt")
+
+
+def run_demo_episode(f, logic, agent, mode="validation"):
+    """跑一場 demo episode，寫入 file。
+
+    Args:
+        f: 已開啟的 file object
+        logic: MinesweeperLogic
+        agent: agent instance
+        mode: "training" (sample) 或 "validation" (argmax)
+    """
+    add_noise = (mode == "training")
+    logic.reset()
+    done = False
+    step = 0
+    total_reward = 0.0
+
+    label = "TRAINING" if mode == "training" else "VALIDATION"
+    f.write(f"\n  --- {label} demo ---\n")
+
+    while not done and step < MAX_STEPS_PER_EPISODE:
+        state = logic.get_grid_state_tensor()
+        action = agent.select_action(state, add_noise=add_noise)
+        row, col = action_to_grid(action, GRID_ROWS, GRID_COLS)
+        result = logic.click(row, col)
+        reward = compute_reward(result)
+        total_reward += reward
+
+        done = result.game_over or result.win
+        step += 1
+
+        status = "WIN!" if result.win else "BOOM!" if result.game_over else \
+                 "valid" if result.changed else "invalid"
+        f.write(f"\n  Step {step}: click ({row},{col}) -> {status} | reward={reward:+.0f}\n")
+        f.write(format_grid(logic, click_row=row, click_col=col, result=result) + "\n")
+
+    outcome = "WIN" if logic.is_win else "LOSE (mine)" if logic.game_over else "TIMEOUT"
+    f.write(f"\n  Result: {outcome} | steps={step} | total_reward={total_reward:.1f}\n")
+
+
+def run_demo_at_save(logic, agent):
+    """Save model 時寫 demo episodes 到檔案: 幾場 training + 1 場 validation。"""
+    DEMO_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(DEMO_LOG_PATH, 'a', encoding='utf-8') as f:
+        f.write(f"\n{'='*50}\n")
+        f.write(f"  DEMO @ Episode {agent.episode_count}\n")
+        f.write(f"{'='*50}\n")
+
+        for i in range(DEMO_TRAINING_EPISODES):
+            run_demo_episode(f, logic, agent, mode="training")
+
+        run_demo_episode(f, logic, agent, mode="validation")
+
+        f.write(f"{'='*50}\n")
 
 
 def compute_reward(result):
@@ -288,6 +393,7 @@ def main():
 
             if episode % SAVE_INTERVAL == 0:
                 agent._save_model()
+                run_demo_at_save(logic, agent)
 
         # 訓練正常結束
         print()

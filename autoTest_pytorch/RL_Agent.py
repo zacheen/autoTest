@@ -1291,16 +1291,55 @@ class SimpleDiscreteAgent:
             target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
 
         # --- I/O log ---
-        new_alpha = self.log_alpha.exp().item()
-        mean_q = (probs.detach() * min_q).sum(dim=-1).mean().item()
-        reward_counts = defaultdict(int)
-        for r in reward.squeeze(-1).tolist():
-            reward_counts[r] += 1
+        with torch.no_grad():
+            new_alpha = self.log_alpha.exp().item()
+
+            # Batch reward distribution
+            reward_counts = defaultdict(int)
+            for r in reward.squeeze(-1).tolist():
+                reward_counts[r] += 1
+
+            # Model Input: 第一筆 state 的 grid 狀態
+            s0 = state[0]  # (12, 10, 10)
+            unrevealed = s0[0].sum().int().item()
+            flagged = s0[1].sum().int().item()
+            revealed = 100 - unrevealed - flagged
+            num_counts = {}
+            for ch in range(2, 11):
+                cnt = s0[ch].sum().int().item()
+                if cnt > 0:
+                    num_counts[ch - 2] = cnt
+
+            # Model Output: action probs top-5
+            p0 = probs[0]  # (100,)
+            top5_vals, top5_idx = p0.topk(5)
+            top5_info = [(idx.item() // 10, idx.item() % 10, f"{val.item():.4f}")
+                         for val, idx in zip(top5_vals, top5_idx)]
+
+            # Batch actions 分布 (top-3 most frequent)
+            action_list = action_idx.tolist()
+            action_freq = defaultdict(int)
+            for a in action_list:
+                action_freq[a] += 1
+            top3_actions = sorted(action_freq.items(), key=lambda x: -x[1])[:3]
+            top3_str = ", ".join(f"({a//10},{a%10})x{c}" for a, c in top3_actions)
+
+            # Q-values 統計
+            q_selected = torch.min(q1, q2).squeeze(-1)  # (B,)
+            policy_mean_q = (p0 * min_q[0]).sum().item()
+
         self._io_log.write(
             f"[Step {self.total_it}] {datetime.datetime.now().strftime('%H:%M:%S')}\n"
-            f"  Input:  batch_rewards={dict(reward_counts)} | alpha={alpha.item():.4f}\n"
-            f"  Output: critic_loss={critic_loss.item():.4f} | actor_loss={actor_loss.item():.4f}"
-            f" | alpha={new_alpha:.4f} | entropy={entropy.item():.4f} | mean_q={mean_q:.4f}\n"
+            f"  State:  unrevealed={unrevealed} | revealed={revealed} | flagged={flagged}"
+            f" | numbers={num_counts}\n"
+            f"  Batch:  rewards={dict(reward_counts)} | top_actions=[{top3_str}]\n"
+            f"  Probs:  top5={top5_info}\n"
+            f"  Q-val:  selected: mean={q_selected.mean().item():.4f}"
+            f" min={q_selected.min().item():.4f} max={q_selected.max().item():.4f}"
+            f" | policy_mean={policy_mean_q:.4f}"
+            f" | all: min={min_q[0].min().item():.4f} max={min_q[0].max().item():.4f}\n"
+            f"  Loss:   critic={critic_loss.item():.4f} | actor={actor_loss.item():.4f}"
+            f" | alpha={alpha.item():.4f}->{new_alpha:.4f} | entropy={entropy.item():.4f}\n"
             f"---\n"
         )
         self._io_log.flush()
@@ -1723,16 +1762,55 @@ class TransformerDiscreteAgent:
             target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
 
         # --- I/O log ---
-        new_alpha = self.log_alpha.exp().item()
-        mean_q = (probs.detach() * min_q).sum(dim=-1).mean().item()
-        reward_counts = defaultdict(int)
-        for r in reward.squeeze(-1).tolist():
-            reward_counts[r] += 1
+        with torch.no_grad():
+            new_alpha = self.log_alpha.exp().item()
+
+            # Batch reward distribution
+            reward_counts = defaultdict(int)
+            for r in reward.squeeze(-1).tolist():
+                reward_counts[r] += 1
+
+            # Model Input: 第一筆 state 的 grid 狀態
+            s0 = state[0]  # (12, 10, 10)
+            unrevealed = s0[0].sum().int().item()
+            flagged = s0[1].sum().int().item()
+            revealed = 100 - unrevealed - flagged
+            num_counts = {}
+            for ch in range(2, 11):
+                cnt = s0[ch].sum().int().item()
+                if cnt > 0:
+                    num_counts[ch - 2] = cnt
+
+            # Model Output: action probs top-5
+            p0 = probs[0]  # (100,)
+            top5_vals, top5_idx = p0.topk(5)
+            top5_info = [(idx.item() // 10, idx.item() % 10, f"{val.item():.4f}")
+                         for val, idx in zip(top5_vals, top5_idx)]
+
+            # Batch actions 分布 (top-3 most frequent)
+            action_list = action_idx.tolist()
+            action_freq = defaultdict(int)
+            for a in action_list:
+                action_freq[a] += 1
+            top3_actions = sorted(action_freq.items(), key=lambda x: -x[1])[:3]
+            top3_str = ", ".join(f"({a//10},{a%10})x{c}" for a, c in top3_actions)
+
+            # Q-values 統計
+            q_selected = torch.min(q1, q2).squeeze(-1)  # (B,)
+            policy_mean_q = (p0 * min_q[0]).sum().item()
+
         self._io_log.write(
             f"[Step {self.total_it}] {datetime.datetime.now().strftime('%H:%M:%S')}\n"
-            f"  Input:  batch_rewards={dict(reward_counts)} | alpha={alpha.item():.4f}\n"
-            f"  Output: critic_loss={critic_loss.item():.4f} | actor_loss={actor_loss.item():.4f}"
-            f" | alpha={new_alpha:.4f} | entropy={entropy.item():.4f} | mean_q={mean_q:.4f}\n"
+            f"  State:  unrevealed={unrevealed} | revealed={revealed} | flagged={flagged}"
+            f" | numbers={num_counts}\n"
+            f"  Batch:  rewards={dict(reward_counts)} | top_actions=[{top3_str}]\n"
+            f"  Probs:  top5={top5_info}\n"
+            f"  Q-val:  selected: mean={q_selected.mean().item():.4f}"
+            f" min={q_selected.min().item():.4f} max={q_selected.max().item():.4f}"
+            f" | policy_mean={policy_mean_q:.4f}"
+            f" | all: min={min_q[0].min().item():.4f} max={min_q[0].max().item():.4f}\n"
+            f"  Loss:   critic={critic_loss.item():.4f} | actor={actor_loss.item():.4f}"
+            f" | alpha={alpha.item():.4f}->{new_alpha:.4f} | entropy={entropy.item():.4f}\n"
             f"---\n"
         )
         self._io_log.flush()
