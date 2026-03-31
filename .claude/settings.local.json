@@ -15,7 +15,8 @@
       "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import py_compile; py_compile.compile\\(''RL_Agent.py'', doraise=True\\); print\\(''Syntax OK''\\)\")",
       "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \":*)",
       "Bash(C:/Users/User/miniconda3/envs/py310_torch210_cuda118/python probe_diagnostic.py)",
-      "Bash(C:/Users/User/miniconda3/envs/py310_torch210_cuda118/python autoTest_pytorch/probe_diagnostic.py)"
+      "Bash(C:/Users/User/miniconda3/envs/py310_torch210_cuda118/python autoTest_pytorch/probe_diagnostic.py)",
+      "Bash(C:/Users/User/miniconda3/envs/py310_torch210_cuda118/python autoTest_pytorch/probe_gradient.py)"
     ]
   }
 }
