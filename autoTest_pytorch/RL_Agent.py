@@ -45,8 +45,8 @@ DISCRETE_TARGET_ENTROPY = 0.8 * np.log(100)  # ≈ 3.7 (80% of max discrete entr
 LR_ALPHA_DISCRETE = 1e-5  # 比 continuous 慢 30 倍，避免 alpha 降太快
 ALPHA_MAX = 0.3
 ALPHA_MIN = 0.15
-BUFFER_CAPACITY = 2000   # Runtime circular buffer in CPU RAM (~1.44GB)
-SAVE_CAPACITY = 150     # Persistent save to disk (~360MB)
+BUFFER_CAPACITY = 10000  # Runtime circular buffer per class (Stage1: ~24KB/entry, 10K = 240MB)
+SAVE_CAPACITY = 2000    # Persistent save to disk (Stage1: ~4.8MB)
 SAVE_EVERY_N_EPISODES = 50
 IMAGE_SIZE = (640, 640)
 
@@ -1551,6 +1551,20 @@ class TransformerActorNetwork(nn.Module):
         x = x + pos.unsqueeze(0)  # broadcast over batch
         return x
 
+    def get_features(self, state):
+        """提取 Transformer 特徵（供 Critic 共用）。
+
+        Args:
+            state: (B, 12, 10, 10)
+        Returns:
+            (B, 100, d_model) — Transformer 最後一層輸出
+        """
+        x0 = self._embed(state)
+        x = x0
+        for layer in self.transformer.layers:
+            x = layer(x) + x0
+        return x
+
     def forward(self, state):
         """
         Args:
@@ -1558,10 +1572,7 @@ class TransformerActorNetwork(nn.Module):
         Returns:
             probs: (B, 100), log_probs: (B, 100)
         """
-        x0 = self._embed(state)                  # (B, 100, d_model) — 保存原始 embedding
-        x = x0
-        for layer in self.transformer.layers:
-            x = layer(x) + x0                     # 每層 + 原始 embedding (input residual)
+        x = self.get_features(state)              # (B, 100, d_model)
         logits = self.output_head(x).squeeze(-1)  # (B, 100)
 
         # Action masking: channel 0 = 未翻開 (可點擊)
@@ -1574,73 +1585,37 @@ class TransformerActorNetwork(nn.Module):
 
 
 class TransformerCriticNetwork(nn.Module):
-    """Transformer Critic: grid state → per-token Q-values (twin).
+    """Lightweight Critic: 接收 Actor 的 Transformer 特徵，用獨立的 MLP head 估計 Q-value。
 
-    Q1 和 Q2 各自有獨立的 embedding + Transformer encoder + output head，
-    確保 twin-Q 估計足夠獨立以有效降低 overestimation bias。
-    Critic 用 2 層（比 Actor 的 4 層淺），減少梯度累積深度。
+    共用 Actor 的 backbone（不在 Critic 內），只有 Q-head 是 Critic 自己的參數。
+    Twin-Q 用兩個獨立的 MLP head。
     """
 
-    def __init__(self, grid_channels=GRID_STATE_CHANNELS, grid_h=10, grid_w=10,
-                 d_model=64, nhead=4, num_layers=2, dim_feedforward=256, dropout=0.1):
+    def __init__(self, d_model=64):
         super().__init__()
-        self.grid_h = grid_h
-        self.grid_w = grid_w
-        self.num_tokens = grid_h * grid_w
 
-        def _make_branch():
-            token_embed = nn.Linear(grid_channels, d_model)
-            row_embed = nn.Embedding(grid_h, d_model // 2)
-            col_embed = nn.Embedding(grid_w, d_model // 2)
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=d_model,
-                nhead=nhead,
-                dim_feedforward=dim_feedforward,
-                dropout=dropout,
-                activation='gelu',
-                batch_first=True,
-            )
-            transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-            head = nn.Linear(d_model, 1)
-            return nn.ModuleDict({
-                'token_embed': token_embed,
-                'row_embed': row_embed,
-                'col_embed': col_embed,
-                'transformer': transformer,
-                'head': head,
-            })
+        # Twin Q-value heads: features (B, 100, d_model) → Q (B, 100)
+        self.q1_head = nn.Sequential(
+            nn.Linear(d_model, 128),
+            nn.SiLU(inplace=True),
+            nn.Linear(128, 1),
+        )
+        self.q2_head = nn.Sequential(
+            nn.Linear(d_model, 128),
+            nn.SiLU(inplace=True),
+            nn.Linear(128, 1),
+        )
 
-        self.q1 = _make_branch()
-        self.q2 = _make_branch()
-
-        # 預先計算 position indices
-        rows = torch.arange(grid_h).unsqueeze(1).expand(grid_h, grid_w).reshape(-1)
-        cols = torch.arange(grid_w).unsqueeze(0).expand(grid_h, grid_w).reshape(-1)
-        self.register_buffer('row_indices', rows)
-        self.register_buffer('col_indices', cols)
-
-    def _forward_branch(self, branch, state):
-        B = state.size(0)
-        tokens = state.permute(0, 2, 3, 1).reshape(B, self.num_tokens, -1)
-        x0 = branch['token_embed'](tokens)
-        pos = torch.cat([
-            branch['row_embed'](self.row_indices),
-            branch['col_embed'](self.col_indices),
-        ], dim=-1)
-        x0 = x0 + pos.unsqueeze(0)
-        x = x0
-        for layer in branch['transformer'].layers:
-            x = layer(x) + x0  # input residual
-        return branch['head'](x).squeeze(-1)  # (B, 100)
-
-    def forward(self, state):
+    def forward(self, features):
         """
         Args:
-            state: (B, 12, 10, 10)
+            features: (B, 100, d_model) — 從 Actor.get_features() 取得
         Returns:
             q1: (B, 100), q2: (B, 100)
         """
-        return self._forward_branch(self.q1, state), self._forward_branch(self.q2, state)
+        q1 = self.q1_head(features).squeeze(-1)  # (B, 100)
+        q2 = self.q2_head(features).squeeze(-1)  # (B, 100)
+        return q1, q2
 
 
 class TransformerDiscreteAgent:
@@ -1737,15 +1712,18 @@ class TransformerDiscreteAgent:
         else:
             action_idx = action.long()
 
-        # --- Critic update ---
+        # --- Critic update (共用 Actor backbone) ---
         with torch.no_grad():
+            next_features = self.actor.get_features(next_state)
             next_probs, next_log_probs = self.actor(next_state)
-            next_q1, next_q2 = self.critic_target(next_state)
+            next_q1, next_q2 = self.critic_target(next_features)
             next_q = torch.min(next_q1, next_q2)
             next_v = (next_probs * (next_q - alpha * next_log_probs)).sum(dim=-1, keepdim=True)
             target_q = reward + (1 - done) * GAMMA * next_v
 
-        q1_all, q2_all = self.critic(state)
+        # Detach features 讓 critic loss 不更新 actor backbone
+        features = self.actor.get_features(state).detach()
+        q1_all, q2_all = self.critic(features)
         q1 = q1_all.gather(1, action_idx.unsqueeze(-1))
         q2 = q2_all.gather(1, action_idx.unsqueeze(-1))
 
@@ -1759,7 +1737,8 @@ class TransformerDiscreteAgent:
         # --- Actor update ---
         probs, log_probs = self.actor(state)
         with torch.no_grad():
-            q1_all, q2_all = self.critic(state)
+            actor_features = self.actor.get_features(state)
+            q1_all, q2_all = self.critic(actor_features)
             min_q = torch.min(q1_all, q2_all)
 
         actor_loss = (probs * (alpha * log_probs - min_q)).sum(dim=-1).mean()

@@ -48,16 +48,18 @@ def collect_gradient_norms(agent):
 
     # --- Critic forward + backward ---
     with torch.no_grad():
+        next_features = agent.actor.get_features(next_state)
         next_probs, next_log_probs = agent.actor(next_state)
-        next_q1, next_q2 = agent.critic_target(next_state)
+        next_q1, next_q2 = agent.critic_target(next_features)
         next_q = torch.min(next_q1, next_q2)
         next_v = (next_probs * (next_q - alpha * next_log_probs)).sum(dim=-1, keepdim=True)
         target_q = reward + (1 - done) * GAMMA * next_v
 
-    q1_all, q2_all = agent.critic(state)
+    features = agent.actor.get_features(state).detach()
+    q1_all, q2_all = agent.critic(features)
     q1 = q1_all.gather(1, action_idx.unsqueeze(-1))
     q2 = q2_all.gather(1, action_idx.unsqueeze(-1))
-    critic_loss = torch.nn.functional.mse_loss(q1, target_q) + torch.nn.functional.mse_loss(q2, target_q)
+    critic_loss = torch.nn.functional.huber_loss(q1, target_q) + torch.nn.functional.huber_loss(q2, target_q)
 
     agent.critic_optimizer.zero_grad()
     critic_loss.backward()
@@ -72,7 +74,8 @@ def collect_gradient_norms(agent):
     # --- Actor forward + backward ---
     probs, log_probs = agent.actor(state)
     with torch.no_grad():
-        q1_all, q2_all = agent.critic(state)
+        actor_features = agent.actor.get_features(state)
+        q1_all, q2_all = agent.critic(actor_features)
         min_q = torch.min(q1_all, q2_all)
 
     actor_loss = (probs * (alpha * log_probs - min_q)).sum(dim=-1).mean()

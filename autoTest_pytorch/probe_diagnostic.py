@@ -265,16 +265,18 @@ def analyze_attention(attn_store, logic, f):
 # Probe 3: Q-Value Landscape
 # ============================================================
 
-def analyze_q_values(critic, state_tensor, logic, f):
+def analyze_q_values(actor, critic, state_tensor, logic, f):
     """分析 Q-value landscape，寫入報告。
 
     Returns:
         metrics dict
     """
+    actor.eval()
     critic.eval()
     with torch.no_grad():
         state_batch = state_tensor.unsqueeze(0).to(device)
-        q1, q2 = critic(state_batch)
+        features = actor.get_features(state_batch)
+        q1, q2 = critic(features)
         q_min = torch.min(q1, q2)[0].cpu().numpy()  # (100,)
 
     q_grid = q_min.reshape(10, 10)
@@ -472,7 +474,7 @@ def main():
 
             # Probe 3: Q-values
             f.write(f"\n--- PROBE 3: Q-VALUE LANDSCAPE ---\n")
-            q_m = analyze_q_values(critic, state, logic, f)
+            q_m = analyze_q_values(actor, critic, state, logic, f)
             q_metrics_list.append(q_m)
 
         # Verdict

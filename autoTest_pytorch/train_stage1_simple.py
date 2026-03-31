@@ -155,38 +155,47 @@ def run_demo_at_save(logic, agent):
         f.write(f"{'='*50}\n")
 
 
-def compute_reward(result, clicked=None, safe_cells=None):
-    """根據 ClickResult + 邏輯安全性計算 reward。
+def squash_reward(r):
+    """Rainbow DQN 風格的 reward 壓縮，把 reward 壓到 [-1, +1] 附近。
 
-    Reward tiers:
-        +20.0  WIN
-        +6.0   邏輯安全 + flood-fill (≥3 cells)
-        +4.0   邏輯安全 (1-2 cells)
-        +2.0   全場無安全格，猜對了 (forced guess)
-        +1.0   有安全格但沒選到，碰巧沒踩雷 (lucky guess)
-        -3.0   踩雷
-        -2.95  無效點擊
+    公式: sign(r) * (√(|r|+1) - 1) + 0.001 * r
+    效果: +20 → +3.6, +6 → +1.6, +4 → +1.2, -3 → -1.0
+    """
+    return np.sign(r) * (np.sqrt(abs(r) + 1) - 1) + 0.001 * r
+
+
+def compute_reward(result, clicked=None, safe_cells=None):
+    """根據 ClickResult + 邏輯安全性計算 reward（壓縮後）。
+
+    原始 reward tiers → squash 後:
+        +20.0 → +3.60   WIN
+        +6.0  → +1.65   邏輯安全 + flood-fill (≥3 cells)
+        +4.0  → +1.24   邏輯安全 (1-2 cells)
+        +2.0  → +0.73   全場無安全格，猜對了 (forced guess)
+        +1.0  → +0.42   有安全格但沒選到，碰巧沒踩雷 (lucky guess)
+        -3.0  → -1.00   踩雷
+        -2.95 → -0.99   無效點擊
     """
     if not result.changed:
-        return -2.95
+        return squash_reward(-2.95)
     if result.win:
-        return 20.0
+        return squash_reward(20.0)
     if result.game_over:
-        return -3.0
+        return squash_reward(-3.0)
 
     # 有效安全點擊 — 根據邏輯安全性分級
     if safe_cells is None:
-        return 3.0  # fallback (第一步或無 safe_cells 資訊)
+        return squash_reward(3.0)  # fallback (第一步或無 safe_cells 資訊)
 
     num_revealed = len(result.revealed_cells)
     is_flood = num_revealed >= 3
 
     if clicked in safe_cells:
-        return 6.0 if is_flood else 4.0
+        return squash_reward(6.0) if is_flood else squash_reward(4.0)
     elif len(safe_cells) == 0:
-        return 2.0  # forced guess
+        return squash_reward(2.0)  # forced guess
     else:
-        return 1.0  # lucky guess
+        return squash_reward(1.0)  # lucky guess
 
 
 def run_episode(logic, agent, add_noise=True):
