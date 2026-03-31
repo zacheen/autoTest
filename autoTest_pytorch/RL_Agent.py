@@ -33,7 +33,7 @@ class ScaledSigmoid(nn.Module):
 
 
 # Hyperparameters
-BATCH_SIZE = 32
+BATCH_SIZE = 128
 LR_ACTOR = 3e-4
 LR_CRITIC = 3e-4
 LR_ALPHA = 3e-4
@@ -1749,7 +1749,7 @@ class TransformerDiscreteAgent:
         q1 = q1_all.gather(1, action_idx.unsqueeze(-1))
         q2 = q2_all.gather(1, action_idx.unsqueeze(-1))
 
-        critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
+        critic_loss = F.huber_loss(q1, target_q) + F.huber_loss(q2, target_q)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
