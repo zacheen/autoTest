@@ -21,7 +21,7 @@ from collections import defaultdict
 
 from Minesweeper.MinesweeperLogic import MinesweeperLogic
 from RL_Agent import (
-    TransformerActorNetwork, TransformerCriticNetwork,
+    TransformerActorNetwork, DuelingQNetwork,
     TRANSFORMER_MODEL_PATH, device, GRID_STATE_CHANNELS,
 )
 
@@ -265,19 +265,19 @@ def analyze_attention(attn_store, logic, f):
 # Probe 3: Q-Value Landscape
 # ============================================================
 
-def analyze_q_values(actor, critic, state_tensor, logic, f):
+def analyze_q_values(backbone, q_network, state_tensor, logic, f):
     """分析 Q-value landscape，寫入報告。
 
     Returns:
         metrics dict
     """
-    actor.eval()
-    critic.eval()
+    backbone.eval()
+    q_network.eval()
     with torch.no_grad():
         state_batch = state_tensor.unsqueeze(0).to(device)
-        features = actor.get_features(state_batch)
-        q1, q2 = critic(features)
-        q_min = torch.min(q1, q2)[0].cpu().numpy()  # (100,)
+        features = backbone.get_features(state_batch)
+        q_values = q_network(features)
+        q_min = q_values[0].cpu().numpy()  # (100,)
 
     q_grid = q_min.reshape(10, 10)
 

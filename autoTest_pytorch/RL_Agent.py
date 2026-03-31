@@ -48,6 +48,8 @@ ALPHA_MIN = 0.15
 BUFFER_CAPACITY = 10000  # Runtime circular buffer per class (Stage1: ~24KB/entry, 10K = 240MB)
 SAVE_CAPACITY = 2000    # Persistent save to disk (Stage1: ~4.8MB)
 SAVE_EVERY_N_EPISODES = 50
+TARGET_UPDATE_FREQ = 50   # Hard copy target network every N training steps (DDQN)
+LR_DDQN = 1e-4           # DDQN learning rate (lower than SAC for stability)
 IMAGE_SIZE = (640, 640)
 
 # YOLO11n layer indices (discovered via forward pass)
@@ -1584,23 +1586,25 @@ class TransformerActorNetwork(nn.Module):
         return probs, log_probs
 
 
-class TransformerCriticNetwork(nn.Module):
-    """Lightweight Critic: 接收 Actor 的 Transformer 特徵，用獨立的 MLP head 估計 Q-value。
+class DuelingQNetwork(nn.Module):
+    """Dueling Q-Network: features → V(s) + A(s,a) - mean(A) = Q(s,a).
 
-    共用 Actor 的 backbone（不在 Critic 內），只有 Q-head 是 Critic 自己的參數。
-    Twin-Q 用兩個獨立的 MLP head。
+    接收 backbone 的 Transformer 特徵 (B, 100, d_model)，輸出 per-cell Q-values。
+    Value stream 用 mean-pool 壓成 scalar，Advantage stream 是 per-token。
     """
 
     def __init__(self, d_model=64):
         super().__init__()
 
-        # Twin Q-value heads: features (B, 100, d_model) → Q (B, 100)
-        self.q1_head = nn.Sequential(
+        # Value stream: mean-pool(100 tokens) → FC → V(s) scalar
+        self.value_stream = nn.Sequential(
             nn.Linear(d_model, 128),
             nn.SiLU(inplace=True),
             nn.Linear(128, 1),
         )
-        self.q2_head = nn.Sequential(
+
+        # Advantage stream: per-token → A(s, a) for each cell
+        self.advantage_stream = nn.Sequential(
             nn.Linear(d_model, 128),
             nn.SiLU(inplace=True),
             nn.Linear(128, 1),
@@ -1609,40 +1613,42 @@ class TransformerCriticNetwork(nn.Module):
     def forward(self, features):
         """
         Args:
-            features: (B, 100, d_model) — 從 Actor.get_features() 取得
+            features: (B, 100, d_model)
         Returns:
-            q1: (B, 100), q2: (B, 100)
+            q_values: (B, 100)
         """
-        q1 = self.q1_head(features).squeeze(-1)  # (B, 100)
-        q2 = self.q2_head(features).squeeze(-1)  # (B, 100)
-        return q1, q2
+        # Value: mean-pool over tokens → (B, d_model) → (B, 1)
+        v = self.value_stream(features.mean(dim=1))  # (B, 1)
+
+        # Advantage: per-token → (B, 100, 1) → (B, 100)
+        a = self.advantage_stream(features).squeeze(-1)  # (B, 100)
+
+        # Dueling: Q = V + (A - mean(A))
+        q = v + a - a.mean(dim=1, keepdim=True)
+        return q
 
 
 class TransformerDiscreteAgent:
-    """Transformer SAC-Discrete agent — 用 self-attention 學習空間推理。
+    """Dueling DDQN agent with Transformer backbone.
 
-    架構: per-cell token + 2D pos encoding → Transformer → per-token logit → action
-    SAC 訓練邏輯跟 SimpleDiscreteAgent 完全相同。
+    架構: Transformer backbone → DuelingQNetwork → epsilon-greedy action selection.
+    只有 1 個 loss，1 個 optimizer，沒有 actor-critic 互相追逐的問題。
     """
 
     def __init__(self):
         self.num_actions = 100
 
-        self.actor = TransformerActorNetwork().to(device)
-        self.critic = TransformerCriticNetwork().to(device)
-        self.critic_target = TransformerCriticNetwork().to(device)
-        self.critic_target.load_state_dict(self.critic.state_dict())
+        # Backbone (Transformer) + Q-head (Dueling)
+        self.backbone = TransformerActorNetwork().to(device)
+        self.q_network = DuelingQNetwork().to(device)
+        self.q_target = DuelingQNetwork().to(device)
+        self.q_target.load_state_dict(self.q_network.state_dict())
 
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR_ACTOR)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LR_CRITIC)
-
-        # Auto-alpha with clamp
-        self.log_alpha = torch.tensor(
-            np.log(INIT_ALPHA), dtype=torch.float32,
-            requires_grad=True, device=device
+        # 1 個 optimizer，同時更新 backbone + Q-head
+        self.optimizer = optim.Adam(
+            list(self.backbone.parameters()) + list(self.q_network.parameters()),
+            lr=LR_DDQN,
         )
-        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR_ALPHA_DISCRETE)
-        self.target_entropy = DISCRETE_TARGET_ENTROPY
 
         # Replay buffer
         self.replay_buffer = Stage1ReplayBuffer(max_per_class=BUFFER_CAPACITY)
@@ -1667,9 +1673,7 @@ class TransformerDiscreteAgent:
         atexit.register(self._close_io_log)
 
     def select_action(self, state, add_noise=True):
-        """選擇一個 grid cell。
-
-        Training 模式下有 epsilon 機率隨機選未翻開格子。
+        """Epsilon-greedy action selection.
 
         Returns:
             action: int [0, 99]
@@ -1683,15 +1687,17 @@ class TransformerDiscreteAgent:
 
         state_batch = state.unsqueeze(0).to(device)
 
-        self.actor.eval()
+        self.backbone.eval()
+        self.q_network.eval()
         with torch.no_grad():
-            probs, _ = self.actor(state_batch)
-            if add_noise:
-                dist = torch.distributions.Categorical(probs)
-                action = dist.sample().item()
-            else:
-                action = probs.argmax(dim=-1).item()
-        self.actor.train()
+            features = self.backbone.get_features(state_batch)
+            q_values = self.q_network(features)  # (1, 100)
+            # Action masking
+            mask = state_batch[:, 0].reshape(1, -1).bool()
+            q_values = q_values.masked_fill(~mask, -1e8)
+            action = q_values.argmax(dim=-1).item()
+        self.backbone.train()
+        self.q_network.train()
 
         return action
 
@@ -1704,7 +1710,6 @@ class TransformerDiscreteAgent:
 
         self.total_it += 1
         state, action, next_state, reward, done = self.replay_buffer.sample(BATCH_SIZE)
-        alpha = self.log_alpha.exp().detach()
 
         # action → long index
         if isinstance(action, torch.Tensor) and action.dim() > 1:
@@ -1712,65 +1717,49 @@ class TransformerDiscreteAgent:
         else:
             action_idx = action.long()
 
-        # --- Critic update (共用 Actor backbone) ---
+        # --- Double DQN target ---
         with torch.no_grad():
-            next_features = self.actor.get_features(next_state)
-            next_probs, next_log_probs = self.actor(next_state)
-            next_q1, next_q2 = self.critic_target(next_features)
-            next_q = torch.min(next_q1, next_q2)
-            next_v = (next_probs * (next_q - alpha * next_log_probs)).sum(dim=-1, keepdim=True)
-            target_q = reward + (1 - done) * GAMMA * next_v
+            next_features = self.backbone.get_features(next_state)
 
-        # Detach features 讓 critic loss 不更新 actor backbone
-        features = self.actor.get_features(state).detach()
-        q1_all, q2_all = self.critic(features)
-        q1 = q1_all.gather(1, action_idx.unsqueeze(-1))
-        q2 = q2_all.gather(1, action_idx.unsqueeze(-1))
+            # Online network 選 action（Double DQN 的核心）
+            next_q_online = self.q_network(next_features)  # (B, 100)
+            # Mask 已翻開格子
+            next_mask = next_state[:, 0].reshape(next_state.size(0), -1).bool()
+            next_q_online = next_q_online.masked_fill(~next_mask, -1e8)
+            best_actions = next_q_online.argmax(dim=1, keepdim=True)  # (B, 1)
 
-        critic_loss = F.huber_loss(q1, target_q) + F.huber_loss(q2, target_q)
+            # Target network 估值
+            next_q_target = self.q_target(next_features)  # (B, 100)
+            next_q_value = next_q_target.gather(1, best_actions)  # (B, 1)
 
-        self.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
-        self.critic_optimizer.step()
+            target = reward + (1 - done) * GAMMA * next_q_value
 
-        # --- Actor update ---
-        probs, log_probs = self.actor(state)
-        with torch.no_grad():
-            actor_features = self.actor.get_features(state)
-            q1_all, q2_all = self.critic(actor_features)
-            min_q = torch.min(q1_all, q2_all)
+        # --- Online Q-value ---
+        features = self.backbone.get_features(state)
+        q_all = self.q_network(features)  # (B, 100)
+        q_taken = q_all.gather(1, action_idx.unsqueeze(-1))  # (B, 1)
 
-        actor_loss = (probs * (alpha * log_probs - min_q)).sum(dim=-1).mean()
+        loss = F.huber_loss(q_taken, target)
 
-        self.actor_optimizer.zero_grad()
-        actor_loss.backward()
-        self.actor_optimizer.step()
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            list(self.backbone.parameters()) + list(self.q_network.parameters()),
+            max_norm=1.0,
+        )
+        self.optimizer.step()
 
-        # --- Alpha update (auto-alpha with clamp) ---
-        entropy = -(probs * log_probs).sum(dim=-1).mean()
-        alpha_loss = -(self.log_alpha * (entropy.detach() - self.target_entropy))
-        self.alpha_optimizer.zero_grad()
-        alpha_loss.backward()
-        self.alpha_optimizer.step()
-        with torch.no_grad():
-            self.log_alpha.data.clamp_(np.log(ALPHA_MIN), np.log(ALPHA_MAX))
-
-        # --- Soft update target ---
-        for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
-            target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
+        # --- Hard target update ---
+        if self.total_it % TARGET_UPDATE_FREQ == 0:
+            self.q_target.load_state_dict(self.q_network.state_dict())
 
         # --- I/O log ---
         with torch.no_grad():
-            new_alpha = self.log_alpha.exp().item()
-
-            # Batch reward distribution
             reward_counts = defaultdict(int)
             for r in reward.squeeze(-1).tolist():
                 reward_counts[r] += 1
 
-            # Model Input: 第一筆 state 的 grid 狀態
-            s0 = state[0]  # (12, 10, 10)
+            s0 = state[0]
             unrevealed = s0[0].sum().int().item()
             flagged = s0[1].sum().int().item()
             revealed = 100 - unrevealed - flagged
@@ -1780,13 +1769,14 @@ class TransformerDiscreteAgent:
                 if cnt > 0:
                     num_counts[ch - 2] = cnt
 
-            # Model Output: action probs top-5
-            p0 = probs[0]  # (100,)
-            top5_vals, top5_idx = p0.topk(5)
+            # Top-5 Q-values
+            q0 = q_all[0]
+            mask0 = state[0, 0].reshape(-1).bool()
+            q0_masked = q0.masked_fill(~mask0, -1e8)
+            top5_vals, top5_idx = q0_masked.topk(5)
             top5_info = [(idx.item() // 10, idx.item() % 10, f"{val.item():.4f}")
                          for val, idx in zip(top5_vals, top5_idx)]
 
-            # Batch actions 分布 (top-3 most frequent)
             action_list = action_idx.tolist()
             action_freq = defaultdict(int)
             for a in action_list:
@@ -1794,31 +1784,24 @@ class TransformerDiscreteAgent:
             top3_actions = sorted(action_freq.items(), key=lambda x: -x[1])[:3]
             top3_str = ", ".join(f"({a//10},{a%10})x{c}" for a, c in top3_actions)
 
-            # Q-values 統計
-            q_selected = torch.min(q1, q2).squeeze(-1)  # (B,)
-            policy_mean_q = (p0 * min_q[0]).sum().item()
+            q_mean = q_taken.mean().item()
 
         self._io_log.write(
             f"[Step {self.total_it}] {datetime.datetime.now().strftime('%H:%M:%S')}\n"
             f"  State:  unrevealed={unrevealed} | revealed={revealed} | flagged={flagged}"
             f" | numbers={num_counts}\n"
             f"  Batch:  rewards={dict(reward_counts)} | top_actions=[{top3_str}]\n"
-            f"  Probs:  top5={top5_info}\n"
-            f"  Q-val:  selected: mean={q_selected.mean().item():.4f}"
-            f" min={q_selected.min().item():.4f} max={q_selected.max().item():.4f}"
-            f" | policy_mean={policy_mean_q:.4f}"
-            f" | all: min={min_q[0].min().item():.4f} max={min_q[0].max().item():.4f}\n"
-            f"  Loss:   critic={critic_loss.item():.4f} | actor={actor_loss.item():.4f}"
-            f" | alpha={alpha.item():.4f}->{new_alpha:.4f} | entropy={entropy.item():.4f}\n"
+            f"  Q-top5: {top5_info}\n"
+            f"  Q-val:  taken_mean={q_mean:.4f}"
+            f" | all: min={q0[mask0].min().item():.4f} max={q0[mask0].max().item():.4f}\n"
+            f"  Loss:   {loss.item():.4f} | epsilon={self.epsilon:.4f}\n"
             f"---\n"
         )
         self._io_log.flush()
 
         return {
-            "critic_loss": critic_loss.item(),
-            "actor_loss": actor_loss.item(),
-            "alpha": alpha.item(),
-            "entropy": entropy.item(),
+            "loss": loss.item(),
+            "q_mean": q_mean,
         }
 
     def _close_io_log(self):
@@ -1832,20 +1815,17 @@ class TransformerDiscreteAgent:
         self.epsilon = self.epsilon_min + (0.3 - self.epsilon_min) * (1.0 - decay_progress)
         self._save_model()
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
-            print(f"[Transformer] Periodic save at episode {self.episode_count}"
+            print(f"[DDQN] Periodic save at episode {self.episode_count}"
                   f" | epsilon={self.epsilon:.4f}")
             self.save_persistent()
 
     def _save_model(self):
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
-        torch.save(self.actor.state_dict(), TRANSFORMER_MODEL_PATH / 'actor.pth')
-        torch.save(self.critic.state_dict(), TRANSFORMER_MODEL_PATH / 'critic.pth')
-        torch.save(self.critic_target.state_dict(), TRANSFORMER_MODEL_PATH / 'critic_target.pth')
-        torch.save(self.log_alpha, TRANSFORMER_MODEL_PATH / 'log_alpha.pth')
+        torch.save(self.backbone.state_dict(), TRANSFORMER_MODEL_PATH / 'backbone.pth')
+        torch.save(self.q_network.state_dict(), TRANSFORMER_MODEL_PATH / 'q_network.pth')
+        torch.save(self.q_target.state_dict(), TRANSFORMER_MODEL_PATH / 'q_target.pth')
         torch.save({
-            'actor_optimizer': self.actor_optimizer.state_dict(),
-            'critic_optimizer': self.critic_optimizer.state_dict(),
-            'alpha_optimizer': self.alpha_optimizer.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
             'total_it': self.total_it,
             'episode_count': self.episode_count,
             'epsilon': self.epsilon,
@@ -1881,61 +1861,48 @@ class TransformerDiscreteAgent:
         for entry in all_entries:
             saved_rewards[entry['reward']] += 1
         print(f"--- save info ---------------")
-        print(f"[Transformer] Persistent save: {len(all_entries)} entries")
-        print(f"[Transformer] Reward distribution: {dict(saved_rewards)}")
+        print(f"[DDQN] Persistent save: {len(all_entries)} entries")
+        print(f"[DDQN] Reward distribution: {dict(saved_rewards)}")
         print(f"--- save end ---------------")
 
     def try_load_model(self):
-        actor_path = TRANSFORMER_MODEL_PATH / 'actor.pth'
-        if actor_path.exists():
+        backbone_path = TRANSFORMER_MODEL_PATH / 'backbone.pth'
+        if backbone_path.exists():
             try:
-                self.actor.load_state_dict(torch.load(actor_path, map_location=device))
-                print("[Transformer] Loaded Actor")
+                self.backbone.load_state_dict(torch.load(backbone_path, map_location=device))
+                print("[DDQN] Loaded Backbone")
             except Exception as e:
-                print(f"[Transformer] Failed to load Actor: {e}")
+                print(f"[DDQN] Failed to load Backbone: {e}")
 
-        critic_path = TRANSFORMER_MODEL_PATH / 'critic.pth'
-        if critic_path.exists():
+        q_path = TRANSFORMER_MODEL_PATH / 'q_network.pth'
+        if q_path.exists():
             try:
-                self.critic.load_state_dict(torch.load(critic_path, map_location=device))
-                print("[Transformer] Loaded Critic")
+                self.q_network.load_state_dict(torch.load(q_path, map_location=device))
+                print("[DDQN] Loaded Q-Network")
             except Exception as e:
-                print(f"[Transformer] Failed to load Critic: {e}")
+                print(f"[DDQN] Failed to load Q-Network: {e}")
 
-        critic_target_path = TRANSFORMER_MODEL_PATH / 'critic_target.pth'
-        if critic_target_path.exists():
+        q_target_path = TRANSFORMER_MODEL_PATH / 'q_target.pth'
+        if q_target_path.exists():
             try:
-                self.critic_target.load_state_dict(torch.load(critic_target_path, map_location=device))
-                print("[Transformer] Loaded Critic Target")
+                self.q_target.load_state_dict(torch.load(q_target_path, map_location=device))
+                print("[DDQN] Loaded Q-Target")
             except Exception as e:
-                print(f"[Transformer] Failed to load Critic Target: {e}")
-
-        alpha_path = TRANSFORMER_MODEL_PATH / 'log_alpha.pth'
-        if alpha_path.exists():
-            try:
-                self.log_alpha = torch.load(alpha_path, map_location=device)
-                self.log_alpha.requires_grad_(True)
-                self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR_ALPHA_DISCRETE)
-                print(f"[Transformer] Loaded log_alpha: alpha={self.log_alpha.exp().item():.4f}")
-            except Exception as e:
-                print(f"[Transformer] Failed to load log_alpha: {e}")
+                print(f"[DDQN] Failed to load Q-Target: {e}")
 
         opt_path = TRANSFORMER_MODEL_PATH / 'optimizer_state.pth'
         if opt_path.exists():
             try:
                 state = torch.load(opt_path, map_location=device, weights_only=False)
-                self.actor_optimizer.load_state_dict(state['actor_optimizer'])
-                self.critic_optimizer.load_state_dict(state['critic_optimizer'])
-                if 'alpha_optimizer' in state:
-                    self.alpha_optimizer.load_state_dict(state['alpha_optimizer'])
+                self.optimizer.load_state_dict(state['optimizer'])
                 self.total_it = state['total_it']
                 self.episode_count = state.get('episode_count', 0)
                 if 'epsilon' in state:
                     self.epsilon = state['epsilon']
-                print(f"[Transformer] Loaded optimizer: total_it={self.total_it},"
+                print(f"[DDQN] Loaded optimizer: total_it={self.total_it},"
                       f" episode={self.episode_count}, epsilon={self.epsilon:.4f}")
             except Exception as e:
-                print(f"[Transformer] Failed to load optimizer state: {e}")
+                print(f"[DDQN] Failed to load optimizer state: {e}")
 
         training_state_path = TRANSFORMER_MODEL_PATH / 'training_state.pth'
         if training_state_path.exists():
@@ -1950,9 +1917,9 @@ class TransformerDiscreteAgent:
                         entry['next_state'], entry['reward'], entry['done']
                     )
                 if loaded > 0:
-                    print(f"[Transformer] Loaded {loaded} replay buffer entries")
+                    print(f"[DDQN] Loaded {loaded} replay buffer entries")
             except Exception as e:
-                print(f"[Transformer] Failed to load replay buffer: {e}")
+                print(f"[DDQN] Failed to load replay buffer: {e}")
 
 
 # ============================================================
