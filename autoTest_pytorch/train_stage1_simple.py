@@ -24,9 +24,9 @@ from Minesweeper.MinesweeperLogic import MinesweeperLogic
 from RL_Agent import TransformerDiscreteAgent
 
 # ---------- 訓練參數 ----------
-GRID_ROWS = 10
-GRID_COLS = 10
-GRID_MINES = 10
+GRID_ROWS = 6
+GRID_COLS = 6
+GRID_MINES = 4
 MAX_EPISODES = 10000
 MAX_STEPS_PER_EPISODE = 200
 LOG_INTERVAL = 50
@@ -307,7 +307,8 @@ class CSVLogger:
 
 def main():
     print("=" * 60)
-    print("  Stage 1 Transformer: Grid State → Self-Attention → 100 actions")
+    num_actions = GRID_ROWS * GRID_COLS
+    print(f"  Stage 1 DDQN: Grid State → Transformer → Dueling Q → {num_actions} actions")
     print("=" * 60)
     print(f"Grid: {GRID_ROWS}x{GRID_COLS}, Mines: {GRID_MINES}")
     print(f"Architecture: 100 tokens × 12-d → Transformer(d=64, h=4, L=4) → per-token logit")
@@ -315,7 +316,7 @@ def main():
     print()
 
     logic = MinesweeperLogic(rows=GRID_ROWS, cols=GRID_COLS, mines_count=GRID_MINES)
-    agent = TransformerDiscreteAgent()
+    agent = TransformerDiscreteAgent(grid_h=GRID_ROWS, grid_w=GRID_COLS)
 
     # TensorBoard
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -1635,11 +1635,11 @@ class TransformerDiscreteAgent:
     只有 1 個 loss，1 個 optimizer，沒有 actor-critic 互相追逐的問題。
     """
 
-    def __init__(self):
-        self.num_actions = 100
+    def __init__(self, grid_h=10, grid_w=10):
+        self.num_actions = grid_h * grid_w
 
         # Backbone (Transformer) + Q-head (Dueling)
-        self.backbone = TransformerActorNetwork().to(device)
+        self.backbone = TransformerActorNetwork(grid_h=grid_h, grid_w=grid_w).to(device)
         self.q_network = DuelingQNetwork().to(device)
         self.q_target = DuelingQNetwork().to(device)
         self.q_target.load_state_dict(self.q_network.state_dict())
