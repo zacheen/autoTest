@@ -37,7 +37,7 @@ BATCH_SIZE = 128
 LR_ACTOR = 3e-4
 LR_CRITIC = 3e-4
 LR_ALPHA = 3e-4
-GAMMA = 0.99
+GAMMA = 0.9   # Minesweeper episodes are short (2-15 steps), don't need long-horizon discount
 TAU = 0.005
 INIT_ALPHA = 0.2
 TARGET_ENTROPY = -2.0  # = -action_dim (for continuous SAC)

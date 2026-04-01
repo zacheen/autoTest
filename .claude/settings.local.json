@@ -16,7 +16,9 @@
       "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \":*)",
       "Bash(C:/Users/User/miniconda3/envs/py310_torch210_cuda118/python probe_diagnostic.py)",
       "Bash(C:/Users/User/miniconda3/envs/py310_torch210_cuda118/python autoTest_pytorch/probe_diagnostic.py)",
-      "Bash(C:/Users/User/miniconda3/envs/py310_torch210_cuda118/python autoTest_pytorch/probe_gradient.py)"
+      "Bash(C:/Users/User/miniconda3/envs/py310_torch210_cuda118/python autoTest_pytorch/probe_gradient.py)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }
