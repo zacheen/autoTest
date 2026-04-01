@@ -805,6 +805,112 @@ class Stage1ReplayBuffer:
         return entries
 
 
+# PER 超參數
+PER_ALPHA = 0.6       # Priority 指數 (0=uniform, 1=full priority)
+PER_BETA_START = 0.4  # IS-weight 初始值
+PER_BETA_END = 1.0    # IS-weight 最終值
+PER_EPSILON = 1e-5    # 防止 priority=0
+PER_CAPACITY = 50000  # 單一 buffer 容量
+
+
+class PERReplayBuffer:
+    """Prioritized Experience Replay buffer，用 SumTree 做 O(log n) 抽樣。
+
+    Priority = (|TD-error| + epsilon) ^ alpha
+    高 TD-error 的 transition 被更常抽到，也更不容易被覆蓋。
+    """
+
+    def __init__(self, capacity=PER_CAPACITY, alpha=PER_ALPHA):
+        self.capacity = capacity
+        self.alpha = alpha
+        self.tree = SumTree(capacity)
+        self.data = [None] * capacity
+
+    def store(self, state, action, next_state, reward, done):
+        """存 transition，初始 priority 設為目前最大值（保證至少被抽到一次）。"""
+        entry = {
+            'state': state.cpu().clone() if isinstance(state, torch.Tensor) else state,
+            'action': action.copy() if isinstance(action, np.ndarray) else np.array(action),
+            'next_state': next_state.cpu().clone() if isinstance(next_state, torch.Tensor) else next_state,
+            'reward': float(reward),
+            'done': bool(done),
+        }
+        priority = self.tree.max_priority()
+        idx = self.tree.add(priority)
+        self.data[idx] = entry
+
+    def sample(self, batch_size, beta=PER_BETA_START):
+        """Priority-proportional 抽樣 + importance sampling weights。
+
+        Returns:
+            (states, actions, next_states, rewards, dones, indices, weights)
+        """
+        indices = []
+        priorities = []
+        entries = []
+
+        segment = self.tree.total() / batch_size
+
+        for i in range(batch_size):
+            lo = segment * i
+            hi = segment * (i + 1)
+            s = random.uniform(lo, hi)
+            idx, priority = self.tree.get(s)
+
+            # 防止抽到空 slot
+            if self.data[idx] is None:
+                idx = random.randint(0, self.tree.size - 1)
+                priority = self.tree.tree[idx + self.tree.capacity - 1]
+
+            indices.append(idx)
+            priorities.append(priority)
+            entries.append(self.data[idx])
+
+        # Importance Sampling weights
+        total = self.tree.total()
+        N = self.tree.size
+        priorities_arr = np.array(priorities, dtype=np.float64)
+        probabilities = priorities_arr / (total + 1e-10)
+        weights = (N * probabilities + 1e-10) ** (-beta)
+        weights = weights / weights.max()  # normalize to [0, 1]
+        weights = torch.tensor(weights, dtype=torch.float32).unsqueeze(1).to(device)
+
+        # 組裝 batch
+        states = torch.stack([e['state'] for e in entries]).to(device)
+        actions = torch.tensor(
+            np.array([e['action'] for e in entries]),
+            dtype=torch.float32,
+        ).to(device)
+        next_states = torch.stack([e['next_state'] for e in entries]).to(device)
+        rewards = torch.tensor(
+            [e['reward'] for e in entries],
+            dtype=torch.float32,
+        ).unsqueeze(1).to(device)
+        dones = torch.tensor(
+            [float(e['done']) for e in entries],
+            dtype=torch.float32,
+        ).unsqueeze(1).to(device)
+
+        return states, actions, next_states, rewards, dones, indices, weights
+
+    def update_priorities(self, indices, td_errors):
+        """用 TD-error 更新 priorities。"""
+        for idx, td_error in zip(indices, td_errors):
+            priority = (abs(td_error) + PER_EPSILON) ** self.alpha
+            self.tree.update(idx, priority)
+
+    def size(self):
+        return self.tree.size
+
+    def get_all_entries(self):
+        """取得所有 entries（用於 persistent save）。"""
+        entries = []
+        for i in range(self.tree.size):
+            if self.data[i] is not None:
+                entries.append(self.data[i])
+        return entries
+
+
 class Stage1SACAgent:
     """Stage 1 SAC Agent — 用離散 grid state 預訓練。
 
@@ -1650,10 +1756,11 @@ class TransformerDiscreteAgent:
             lr=LR_DDQN,
         )
 
-        # Replay buffer
-        self.replay_buffer = Stage1ReplayBuffer(max_per_class=BUFFER_CAPACITY)
+        # PER Replay buffer
+        self.replay_buffer = PERReplayBuffer(capacity=PER_CAPACITY, alpha=PER_ALPHA)
         self.total_it = 0
         self.episode_count = 0
+        self.beta = PER_BETA_START  # IS-weight annealing
 
         # Epsilon-greedy exploration
         self.epsilon = 0.3
@@ -1709,7 +1816,8 @@ class TransformerDiscreteAgent:
             return None
 
         self.total_it += 1
-        state, action, next_state, reward, done = self.replay_buffer.sample(BATCH_SIZE)
+        state, action, next_state, reward, done, per_indices, is_weights = \
+            self.replay_buffer.sample(BATCH_SIZE, beta=self.beta)
 
         # action → long index
         if isinstance(action, torch.Tensor) and action.dim() > 1:
@@ -1722,24 +1830,29 @@ class TransformerDiscreteAgent:
             next_features = self.backbone.get_features(next_state)
 
             # Online network 選 action（Double DQN 的核心）
-            next_q_online = self.q_network(next_features)  # (B, 100)
+            next_q_online = self.q_network(next_features)  # (B, N)
             # Mask 已翻開格子
             next_mask = next_state[:, 0].reshape(next_state.size(0), -1).bool()
             next_q_online = next_q_online.masked_fill(~next_mask, -1e8)
             best_actions = next_q_online.argmax(dim=1, keepdim=True)  # (B, 1)
 
             # Target network 估值
-            next_q_target = self.q_target(next_features)  # (B, 100)
+            next_q_target = self.q_target(next_features)  # (B, N)
             next_q_value = next_q_target.gather(1, best_actions)  # (B, 1)
 
             target = reward + (1 - done) * GAMMA * next_q_value
 
         # --- Online Q-value ---
         features = self.backbone.get_features(state)
-        q_all = self.q_network(features)  # (B, 100)
+        q_all = self.q_network(features)  # (B, N)
         q_taken = q_all.gather(1, action_idx.unsqueeze(-1))  # (B, 1)
 
-        loss = F.huber_loss(q_taken, target)
+        # Per-sample TD-error（用於更新 PER priorities）
+        td_error = (q_taken - target).abs().detach()  # (B, 1)
+
+        # IS-weighted Huber loss（修正 priority sampling 偏差）
+        per_sample_loss = F.huber_loss(q_taken, target, reduction='none')  # (B, 1)
+        loss = (is_weights * per_sample_loss).mean()
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -1748,6 +1861,11 @@ class TransformerDiscreteAgent:
             max_norm=1.0,
         )
         self.optimizer.step()
+
+        # --- 更新 PER priorities ---
+        self.replay_buffer.update_priorities(
+            per_indices, td_error.squeeze(-1).cpu().numpy()
+        )
 
         # --- Hard target update ---
         if self.total_it % TARGET_UPDATE_FREQ == 0:
@@ -1813,10 +1931,13 @@ class TransformerDiscreteAgent:
         # Epsilon decay
         decay_progress = min(self.episode_count / self.epsilon_decay_episodes, 1.0)
         self.epsilon = self.epsilon_min + (0.3 - self.epsilon_min) * (1.0 - decay_progress)
+        # Beta annealing (PER IS-weight)
+        beta_progress = min(self.episode_count / 5000.0, 1.0)
+        self.beta = PER_BETA_START + (PER_BETA_END - PER_BETA_START) * beta_progress
         self._save_model()
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
             print(f"[DDQN] Periodic save at episode {self.episode_count}"
-                  f" | epsilon={self.epsilon:.4f}")
+                  f" | epsilon={self.epsilon:.4f} | beta={self.beta:.4f}")
             self.save_persistent()
 
     def _save_model(self):
@@ -1829,6 +1950,7 @@ class TransformerDiscreteAgent:
             'total_it': self.total_it,
             'episode_count': self.episode_count,
             'epsilon': self.epsilon,
+            'beta': self.beta,
         }, TRANSFORMER_MODEL_PATH / 'optimizer_state.pth')
 
     def save_persistent(self):
@@ -1840,15 +1962,7 @@ class TransformerDiscreteAgent:
 
         all_entries = buf.get_all_entries()
         if len(all_entries) > SAVE_CAPACITY:
-            dist = buf.get_class_distribution()
-            per_class = max(1, SAVE_CAPACITY // len(dist))
-            selected = []
-            for r, size in dist.items():
-                class_entries = [e for e in all_entries if e['reward'] == r]
-                if len(class_entries) > per_class:
-                    class_entries = random.sample(class_entries, per_class)
-                selected.extend(class_entries)
-            all_entries = selected[:SAVE_CAPACITY]
+            all_entries = random.sample(all_entries, SAVE_CAPACITY)
 
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
         torch.save({
@@ -1899,8 +2013,11 @@ class TransformerDiscreteAgent:
                 self.episode_count = state.get('episode_count', 0)
                 if 'epsilon' in state:
                     self.epsilon = state['epsilon']
+                if 'beta' in state:
+                    self.beta = state['beta']
                 print(f"[DDQN] Loaded optimizer: total_it={self.total_it},"
-                      f" episode={self.episode_count}, epsilon={self.epsilon:.4f}")
+                      f" episode={self.episode_count}, epsilon={self.epsilon:.4f},"
+                      f" beta={self.beta:.4f}")
             except Exception as e:
                 print(f"[DDQN] Failed to load optimizer state: {e}")
 
@@ -1909,7 +2026,7 @@ class TransformerDiscreteAgent:
             try:
                 state = torch.load(training_state_path, map_location=device, weights_only=False)
                 persistent_entries = state.get('persistent_entries', [])
-                loaded = min(len(persistent_entries), BUFFER_CAPACITY)
+                loaded = min(len(persistent_entries), PER_CAPACITY)
                 for i in range(loaded):
                     entry = persistent_entries[i]
                     self.replay_buffer.store(
