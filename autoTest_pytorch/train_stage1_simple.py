@@ -21,7 +21,7 @@ from pathlib import Path
 from torch.utils.tensorboard import SummaryWriter
 
 from Minesweeper.MinesweeperLogic import MinesweeperLogic
-from RL_Agent import TransformerDiscreteAgent
+from RL_Agent import DiffusionPolicyAgent
 
 # ---------- 訓練參數 ----------
 GRID_ROWS = 6
@@ -117,7 +117,7 @@ def run_demo_episode(f, logic, agent, mode="validation"):
 
     while not done and step < MAX_STEPS_PER_EPISODE:
         state = logic.get_grid_state_tensor()
-        row, col = agent.select_action(state, add_noise=add_noise)
+        (row, col), _ = agent.select_action(state, add_noise=add_noise)
 
         result = logic.click(row, col)
         reward = compute_reward(result)
@@ -190,7 +190,7 @@ def run_episode(logic, agent, add_noise=True):
 
     while not done and episode_steps < MAX_STEPS_PER_EPISODE:
         state = logic.get_grid_state_tensor()
-        row, col = agent.select_action(state, add_noise=add_noise)
+        (row, col), action_continuous = agent.select_action(state, add_noise=add_noise)
 
         result = logic.click(row, col)
         reward = compute_reward(result)
@@ -208,7 +208,7 @@ def run_episode(logic, agent, add_noise=True):
         if add_noise:
             # 跳過第一步：第一次點擊一定有效，沒有學習價值，會稀釋 valid group
             if episode_steps > 0:
-                agent.store_transition(state, (row, col), next_state, reward, done)
+                agent.store_transition(state, action_continuous, next_state, reward, done)
                 train_info = agent.train_step()
                 if train_info is not None:
                     train_info_list.append(train_info)
@@ -218,10 +218,12 @@ def run_episode(logic, agent, add_noise=True):
     total_clicks = valid_clicks + invalid_clicks
     invalid_rate = invalid_clicks / total_clicks if total_clicks > 0 else 0.0
 
-    avg_loss = None
+    avg_diff_loss = None
+    avg_critic_loss = None
     avg_q_mean = None
     if train_info_list:
-        avg_loss = np.mean([t['loss'] for t in train_info_list])
+        avg_diff_loss = np.mean([t['diffusion_loss'] for t in train_info_list])
+        avg_critic_loss = np.mean([t['critic_loss'] for t in train_info_list])
         avg_q_mean = np.mean([t['q_mean'] for t in train_info_list])
 
     return {
@@ -231,7 +233,8 @@ def run_episode(logic, agent, add_noise=True):
         'invalid_rate': invalid_rate,
         'valid_clicks': valid_clicks,
         'invalid_clicks': invalid_clicks,
-        'loss': avg_loss,
+        'diffusion_loss': avg_diff_loss,
+        'critic_loss': avg_critic_loss,
         'q_mean': avg_q_mean,
     }
 
@@ -284,7 +287,7 @@ class CSVLogger:
 def main():
     print("=" * 60)
     num_actions = GRID_ROWS * GRID_COLS
-    print(f"  Stage 1 DDQN: Grid State → Transformer → Dueling Q → {num_actions} actions")
+    print(f"  Stage 1 Diffusion Policy: Grid State → Transformer → Diffusion → (x,y) → {num_actions} cells")
     print("=" * 60)
     print(f"Grid: {GRID_ROWS}x{GRID_COLS}, Mines: {GRID_MINES}")
     print(f"Architecture: 100 tokens × 12-d → Transformer(d=64, h=4, L=4) → per-token logit")
@@ -292,7 +295,7 @@ def main():
     print()
 
     logic = MinesweeperLogic(rows=GRID_ROWS, cols=GRID_COLS, mines_count=GRID_MINES)
-    agent = TransformerDiscreteAgent(grid_h=GRID_ROWS, grid_w=GRID_COLS)
+    agent = DiffusionPolicyAgent(grid_h=GRID_ROWS, grid_w=GRID_COLS)
 
     # TensorBoard
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -305,7 +308,7 @@ def main():
     csv_fields = [
         'episode', 'reward', 'steps', 'is_win', 'invalid_rate',
         'valid_clicks', 'invalid_clicks',
-        'loss', 'q_mean', 'epsilon',
+        'diffusion_loss', 'critic_loss', 'q_mean',
         'eval_avg_reward', 'eval_win_rate', 'eval_avg_steps', 'eval_avg_invalid_rate',
         'timestamp',
     ]
@@ -336,8 +339,9 @@ def main():
             writer.add_scalar('train/episode_reward', stats['reward'], episode)
             writer.add_scalar('train/episode_steps', stats['steps'], episode)
             writer.add_scalar('train/invalid_rate', stats['invalid_rate'], episode)
-            if stats['loss'] is not None:
-                writer.add_scalar('train/loss', stats['loss'], episode)
+            if stats['diffusion_loss'] is not None:
+                writer.add_scalar('train/diffusion_loss', stats['diffusion_loss'], episode)
+                writer.add_scalar('train/critic_loss', stats['critic_loss'], episode)
                 writer.add_scalar('train/q_mean', stats['q_mean'], episode)
 
             # CSV
@@ -349,9 +353,9 @@ def main():
                 'invalid_rate': f"{stats['invalid_rate']:.4f}",
                 'valid_clicks': stats['valid_clicks'],
                 'invalid_clicks': stats['invalid_clicks'],
-                'loss': f"{stats['loss']:.6f}" if stats['loss'] is not None else '',
+                'diffusion_loss': f"{stats['diffusion_loss']:.6f}" if stats['diffusion_loss'] is not None else '',
+                'critic_loss': f"{stats['critic_loss']:.6f}" if stats['critic_loss'] is not None else '',
                 'q_mean': f"{stats['q_mean']:.4f}" if stats['q_mean'] is not None else '',
-                'epsilon': f"{agent.epsilon:.4f}",
                 'eval_avg_reward': '',
                 'eval_win_rate': '',
                 'eval_avg_steps': '',
@@ -397,8 +401,7 @@ def main():
                       f"Win Rate(50): {win_rate:>5.1f}% | "
                       f"Overall WR: {overall_wr:>5.1f}% | "
                       f"Total Wins: {total_wins} | "
-                      f"Speed: {eps_per_sec:.1f} ep/s | "
-                      f"Epsilon: {agent.epsilon:.4f}")
+                      f"Speed: {eps_per_sec:.1f} ep/s")
 
             if episode % SAVE_INTERVAL == 0:
                 agent._save_model()

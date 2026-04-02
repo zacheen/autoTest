@@ -1745,6 +1745,483 @@ class DuelingQNetwork(nn.Module):
         return q.view(-1, self.grid_h, self.grid_w)  # (B, H, W)
 
 
+# ============================================================
+# Diffusion Policy — continuous (x,y) output via DiffusionQL
+# ============================================================
+
+DIFFUSION_T = 20           # Denoising steps
+DIFFUSION_DDIM_STEPS = 5   # DDIM steps for eval
+Q_GUIDANCE_WEIGHT = 0.1    # α_q: Q-guidance loss weight
+DIFFUSION_MODEL_PATH = Path('./models/stage1_diffusion')
+
+
+class DiffusionSchedule:
+    """Cosine noise schedule，預計算 α, β, ᾱ 等常數。"""
+
+    def __init__(self, T=DIFFUSION_T, s=0.008):
+        self.T = T
+        steps = torch.arange(T + 1, dtype=torch.float64)
+        f = torch.cos((steps / T + s) / (1 + s) * (np.pi / 2)) ** 2
+        alphas_cumprod = f / f[0]
+        betas = 1 - alphas_cumprod[1:] / alphas_cumprod[:-1]
+        betas = torch.clamp(betas, max=0.999).float()
+
+        alphas = 1.0 - betas
+        alphas_cumprod = torch.cumprod(alphas, dim=0)
+
+        self.betas = betas.to(device)
+        self.alphas = alphas.to(device)
+        self.alphas_cumprod = alphas_cumprod.to(device)
+        self.sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod).to(device)
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - alphas_cumprod).to(device)
+        self.sqrt_recip_alphas = torch.sqrt(1.0 / alphas).to(device)
+
+    def q_sample(self, x0, t, noise):
+        """Forward process: x0 → x_t."""
+        sqrt_a = self.sqrt_alphas_cumprod[t].unsqueeze(-1)       # (B, 1)
+        sqrt_1ma = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(-1)  # (B, 1)
+        return sqrt_a * x0 + sqrt_1ma * noise
+
+    def p_sample_step(self, x_t, t, predicted_noise, add_noise=True):
+        """Reverse process: x_t → x_{t-1}."""
+        beta = self.betas[t].unsqueeze(-1)           # (B, 1)
+        sqrt_1ma = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(-1)
+        sqrt_recip_a = self.sqrt_recip_alphas[t].unsqueeze(-1)
+
+        mean = sqrt_recip_a * (x_t - beta / sqrt_1ma * predicted_noise)
+
+        if add_noise and (t > 0).any():
+            sigma = torch.sqrt(beta)
+            noise = torch.randn_like(x_t)
+            return mean + sigma * noise
+        return mean
+
+
+class SinusoidalTimestepEmbedding(nn.Module):
+    """Sinusoidal positional encoding for diffusion timestep."""
+
+    def __init__(self, dim=32):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, t):
+        """
+        Args:
+            t: (B,) integer timesteps
+        Returns:
+            (B, dim) embedding
+        """
+        half = self.dim // 2
+        freqs = torch.exp(-np.log(10000.0) * torch.arange(half, device=t.device) / half)
+        args = t.float().unsqueeze(-1) * freqs.unsqueeze(0)  # (B, half)
+        return torch.cat([torch.sin(args), torch.cos(args)], dim=-1)  # (B, dim)
+
+
+class DiffusionMLPDenoiser(nn.Module):
+    """Denoiser MLP: (noisy_action, timestep, condition) → predicted_noise.
+
+    用於 2D continuous action space。
+    """
+
+    def __init__(self, action_dim=2, condition_dim=64, timestep_dim=32, hidden_dim=256):
+        super().__init__()
+        self.time_embed = SinusoidalTimestepEmbedding(timestep_dim)
+        input_dim = action_dim + timestep_dim + condition_dim
+
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(hidden_dim, action_dim),
+        )
+
+    def forward(self, noisy_action, t, condition):
+        """
+        Args:
+            noisy_action: (B, 2)
+            t: (B,) integer timesteps
+            condition: (B, 64) state condition
+        Returns:
+            predicted_noise: (B, 2)
+        """
+        t_emb = self.time_embed(t)  # (B, 32)
+        x = torch.cat([noisy_action, t_emb, condition], dim=-1)  # (B, 98)
+        return self.net(x)
+
+
+class DiffusionCritic(nn.Module):
+    """Twin Q-Network for continuous actions: (condition, action) → Q-value."""
+
+    def __init__(self, condition_dim=64, action_dim=2, hidden_dim=256):
+        super().__init__()
+        input_dim = condition_dim + action_dim
+
+        self.q1 = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(hidden_dim, 1),
+        )
+        self.q2 = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, condition, action):
+        """
+        Args:
+            condition: (B, 64)
+            action: (B, 2)
+        Returns:
+            q1: (B, 1), q2: (B, 1)
+        """
+        x = torch.cat([condition, action], dim=-1)
+        return self.q1(x), self.q2(x)
+
+
+class DiffusionPolicyAgent:
+    """Diffusion Policy agent with DiffusionQL training.
+
+    Architecture:
+        - Backbone: TransformerActorNetwork (state encoder, shared)
+        - Actor: DiffusionMLPDenoiser (denoise noise → continuous (x,y) action)
+        - Critic: DiffusionCritic (twin Q, evaluates (condition, action) pair)
+    """
+
+    def __init__(self, grid_h=10, grid_w=10):
+        self.grid_h = grid_h
+        self.grid_w = grid_w
+
+        # State encoder (shared backbone)
+        self.backbone = TransformerActorNetwork(grid_h=grid_h, grid_w=grid_w).to(device)
+
+        # Diffusion denoiser (actor)
+        self.denoiser = DiffusionMLPDenoiser(action_dim=2, condition_dim=64).to(device)
+
+        # Critic (twin Q) + target
+        self.critic = DiffusionCritic(condition_dim=64, action_dim=2).to(device)
+        self.critic_target = DiffusionCritic(condition_dim=64, action_dim=2).to(device)
+        self.critic_target.load_state_dict(self.critic.state_dict())
+
+        # Noise schedule
+        self.schedule = DiffusionSchedule(T=DIFFUSION_T)
+
+        # Optimizers: actor (backbone + denoiser), critic (Q-head only)
+        self.actor_optimizer = optim.Adam(
+            list(self.backbone.parameters()) + list(self.denoiser.parameters()),
+            lr=LR_DDQN,
+        )
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LR_CRITIC)
+
+        # PER Replay buffer
+        self.replay_buffer = PERReplayBuffer(capacity=PER_CAPACITY, alpha=PER_ALPHA)
+        self.total_it = 0
+        self.episode_count = 0
+        self.beta = PER_BETA_START
+
+        # Train I/O log
+        DIFFUSION_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        self._io_log = open(DIFFUSION_MODEL_PATH / 'train_io_log.txt', 'a', encoding='utf-8')
+        self._io_log.write(f"\n{'='*60}\n")
+        self._io_log.write(f"Session started: {datetime.datetime.now().isoformat()}\n")
+        self._io_log.write(f"{'='*60}\n")
+        self._io_log.flush()
+
+        self.try_load_model()
+        atexit.register(self.save_persistent)
+        atexit.register(self._close_io_log)
+
+    def _get_condition(self, state):
+        """State → condition vector via backbone mean-pool."""
+        features = self.backbone.get_features(state)  # (B, H*W, 64)
+        return features.mean(dim=1)  # (B, 64)
+
+    def _diffusion_sample(self, condition, add_noise=True):
+        """Run reverse diffusion to generate action.
+
+        Args:
+            condition: (B, 64)
+            add_noise: True=stochastic (training), False=DDIM deterministic (eval)
+        Returns:
+            action: (B, 2) in roughly [0, 1]²
+        """
+        B = condition.size(0)
+        x_t = torch.randn(B, 2, device=device)
+
+        if add_noise:
+            # Full T-step stochastic reverse
+            for t_val in reversed(range(DIFFUSION_T)):
+                t = torch.full((B,), t_val, device=device, dtype=torch.long)
+                predicted_noise = self.denoiser(x_t, t, condition)
+                x_t = self.schedule.p_sample_step(x_t, t, predicted_noise, add_noise=(t_val > 0))
+        else:
+            # DDIM deterministic (fewer steps)
+            ddim_steps = np.linspace(0, DIFFUSION_T - 1, DIFFUSION_DDIM_STEPS, dtype=int)[::-1]
+            for t_val in ddim_steps:
+                t = torch.full((B,), t_val, device=device, dtype=torch.long)
+                predicted_noise = self.denoiser(x_t, t, condition)
+                x_t = self.schedule.p_sample_step(x_t, t, predicted_noise, add_noise=False)
+
+        return x_t
+
+    def select_action(self, state, add_noise=True):
+        """Diffusion Policy → continuous (x, y) → discretize to (row, col).
+
+        Returns:
+            (row, col) tuple, action_continuous np.array([x, y])
+        """
+        state_batch = state.unsqueeze(0).to(device)
+
+        self.backbone.eval()
+        self.denoiser.eval()
+        with torch.no_grad():
+            condition = self._get_condition(state_batch)
+            action = self._diffusion_sample(condition, add_noise=add_noise)
+            action = action.clamp(0, 1).cpu().numpy().flatten()  # (2,)
+        self.backbone.train()
+        self.denoiser.train()
+
+        # Discretize
+        col = int(np.clip(action[0] * self.grid_w, 0, self.grid_w - 1))
+        row = int(np.clip(action[1] * self.grid_h, 0, self.grid_h - 1))
+
+        return (row, col), action
+
+    def store_transition(self, state, action_continuous, next_state, reward, done):
+        """Store continuous action in buffer."""
+        self.replay_buffer.store(state, action_continuous, next_state, reward, done)
+
+    def train_step(self):
+        if self.replay_buffer.size() < BATCH_SIZE:
+            return None
+
+        self.total_it += 1
+        state, action_0, next_state, reward, done, per_indices, is_weights = \
+            self.replay_buffer.sample(BATCH_SIZE, beta=self.beta)
+        B = state.size(0)
+
+        # === Critic update ===
+        with torch.no_grad():
+            next_condition = self._get_condition(next_state)
+            next_action = self._diffusion_sample(next_condition, add_noise=True)
+            next_action = next_action.clamp(0, 1)
+
+            tq1, tq2 = self.critic_target(next_condition, next_action)
+            target_q = torch.min(tq1, tq2)
+            target = reward + (1 - done) * GAMMA * target_q
+
+        condition = self._get_condition(state).detach()
+        q1, q2 = self.critic(condition, action_0)
+
+        td_error = torch.max((q1 - target).abs(), (q2 - target).abs()).detach()
+
+        critic_loss = (is_weights * (
+            F.huber_loss(q1, target, reduction='none') +
+            F.huber_loss(q2, target, reduction='none')
+        )).mean()
+
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
+        self.critic_optimizer.step()
+
+        # === Actor update (DiffusionQL) ===
+
+        # 1. Diffusion loss: 教 denoiser 重建 replay buffer action
+        condition_actor = self._get_condition(state)
+        t = torch.randint(0, DIFFUSION_T, (B,), device=device)
+        noise = torch.randn_like(action_0)
+        a_t = self.schedule.q_sample(action_0, t, noise)
+        predicted_noise = self.denoiser(a_t, t, condition_actor)
+        diffusion_loss = F.mse_loss(predicted_noise, noise)
+
+        # 2. Q-guidance loss: 推動生成的 action 往高 Q-value
+        with torch.no_grad():
+            cond_for_q = self._get_condition(state)
+            x_t = torch.randn(B, 2, device=device)
+            # Denoise T-1 steps without gradient
+            for t_val in reversed(range(1, DIFFUSION_T)):
+                t_batch = torch.full((B,), t_val, device=device, dtype=torch.long)
+                pred = self.denoiser(x_t, t_batch, cond_for_q)
+                x_t = self.schedule.p_sample_step(x_t, t_batch, pred, add_noise=(t_val > 1))
+
+        # Last step WITH gradient
+        t_zero = torch.zeros(B, device=device, dtype=torch.long)
+        pred_final = self.denoiser(x_t, t_zero, condition_actor)
+        a_0_gen = self.schedule.p_sample_step(x_t, t_zero, pred_final, add_noise=False)
+        a_0_gen = a_0_gen.clamp(0, 1)
+
+        # Critic 當可微分函數用（gradient 流過 a_0_gen → denoiser → backbone）
+        # Critic 自己的參數不會被 actor_optimizer 更新（不在 param group 裡）
+        q1_gen, q2_gen = self.critic(condition_actor, a_0_gen)
+        q_guidance_loss = -torch.min(q1_gen, q2_gen).mean()
+
+        actor_loss = diffusion_loss + Q_GUIDANCE_WEIGHT * q_guidance_loss
+
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            list(self.backbone.parameters()) + list(self.denoiser.parameters()),
+            max_norm=1.0,
+        )
+        self.actor_optimizer.step()
+
+        # === PER priority update ===
+        self.replay_buffer.update_priorities(
+            per_indices, td_error.squeeze(-1).cpu().numpy()
+        )
+
+        # === Hard target update ===
+        if self.total_it % TARGET_UPDATE_FREQ == 0:
+            self.critic_target.load_state_dict(self.critic.state_dict())
+
+        # === I/O log ===
+        with torch.no_grad():
+            q_mean = torch.min(q1, q2).mean().item()
+
+        self._io_log.write(
+            f"[Step {self.total_it}] {datetime.datetime.now().strftime('%H:%M:%S')}\n"
+            f"  Loss: diff={diffusion_loss.item():.4f} | q_guide={q_guidance_loss.item():.4f}"
+            f" | critic={critic_loss.item():.4f}\n"
+            f"  Q-val: mean={q_mean:.4f}\n"
+            f"---\n"
+        )
+        self._io_log.flush()
+
+        return {
+            "diffusion_loss": diffusion_loss.item(),
+            "q_guidance_loss": q_guidance_loss.item(),
+            "critic_loss": critic_loss.item(),
+            "q_mean": q_mean,
+        }
+
+    def _close_io_log(self):
+        if self._io_log and not self._io_log.closed:
+            self._io_log.close()
+
+    def on_episode_end(self):
+        self.episode_count += 1
+        # Beta annealing (PER)
+        beta_progress = min(self.episode_count / 5000.0, 1.0)
+        self.beta = PER_BETA_START + (PER_BETA_END - PER_BETA_START) * beta_progress
+        self._save_model()
+        if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
+            print(f"[Diffusion] Periodic save at episode {self.episode_count}"
+                  f" | beta={self.beta:.4f}")
+            self.save_persistent()
+
+    def _save_model(self):
+        DIFFUSION_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        torch.save(self.backbone.state_dict(), DIFFUSION_MODEL_PATH / 'backbone.pth')
+        torch.save(self.denoiser.state_dict(), DIFFUSION_MODEL_PATH / 'denoiser.pth')
+        torch.save(self.critic.state_dict(), DIFFUSION_MODEL_PATH / 'critic.pth')
+        torch.save(self.critic_target.state_dict(), DIFFUSION_MODEL_PATH / 'critic_target.pth')
+        torch.save({
+            'actor_optimizer': self.actor_optimizer.state_dict(),
+            'critic_optimizer': self.critic_optimizer.state_dict(),
+            'total_it': self.total_it,
+            'episode_count': self.episode_count,
+            'beta': self.beta,
+        }, DIFFUSION_MODEL_PATH / 'optimizer_state.pth')
+
+    def save_persistent(self):
+        """儲存 replay buffer (PER top entries)。"""
+        buf = self.replay_buffer
+        if buf.size() == 0:
+            return
+        total = buf.size()
+        if total <= SAVE_CAPACITY:
+            all_entries = buf.get_all_entries()
+        else:
+            all_entries = buf.get_top_entries(SAVE_CAPACITY)
+
+        DIFFUSION_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        torch.save({
+            'persistent_entries': all_entries,
+            'total_it': self.total_it,
+            'episode_count': self.episode_count,
+        }, DIFFUSION_MODEL_PATH / 'training_state.pth')
+
+        saved_rewards = defaultdict(int)
+        for entry in all_entries:
+            saved_rewards[round(entry['reward'], 3)] += 1
+        print(f"--- save info ---------------")
+        print(f"[Diffusion] Persistent save: {len(all_entries)} entries")
+        print(f"[Diffusion] Reward distribution: {dict(saved_rewards)}")
+        print(f"--- save end ---------------")
+
+    def try_load_model(self):
+        backbone_path = DIFFUSION_MODEL_PATH / 'backbone.pth'
+        if backbone_path.exists():
+            try:
+                self.backbone.load_state_dict(torch.load(backbone_path, map_location=device))
+                print("[Diffusion] Loaded Backbone")
+            except Exception as e:
+                print(f"[Diffusion] Failed to load Backbone: {e}")
+
+        denoiser_path = DIFFUSION_MODEL_PATH / 'denoiser.pth'
+        if denoiser_path.exists():
+            try:
+                self.denoiser.load_state_dict(torch.load(denoiser_path, map_location=device))
+                print("[Diffusion] Loaded Denoiser")
+            except Exception as e:
+                print(f"[Diffusion] Failed to load Denoiser: {e}")
+
+        critic_path = DIFFUSION_MODEL_PATH / 'critic.pth'
+        if critic_path.exists():
+            try:
+                self.critic.load_state_dict(torch.load(critic_path, map_location=device))
+                print("[Diffusion] Loaded Critic")
+            except Exception as e:
+                print(f"[Diffusion] Failed to load Critic: {e}")
+
+        ct_path = DIFFUSION_MODEL_PATH / 'critic_target.pth'
+        if ct_path.exists():
+            try:
+                self.critic_target.load_state_dict(torch.load(ct_path, map_location=device))
+                print("[Diffusion] Loaded Critic Target")
+            except Exception as e:
+                print(f"[Diffusion] Failed to load Critic Target: {e}")
+
+        opt_path = DIFFUSION_MODEL_PATH / 'optimizer_state.pth'
+        if opt_path.exists():
+            try:
+                state = torch.load(opt_path, map_location=device, weights_only=False)
+                self.actor_optimizer.load_state_dict(state['actor_optimizer'])
+                self.critic_optimizer.load_state_dict(state['critic_optimizer'])
+                self.total_it = state['total_it']
+                self.episode_count = state.get('episode_count', 0)
+                if 'beta' in state:
+                    self.beta = state['beta']
+                print(f"[Diffusion] Loaded optimizer: total_it={self.total_it},"
+                      f" episode={self.episode_count}, beta={self.beta:.4f}")
+            except Exception as e:
+                print(f"[Diffusion] Failed to load optimizer state: {e}")
+
+        ts_path = DIFFUSION_MODEL_PATH / 'training_state.pth'
+        if ts_path.exists():
+            try:
+                state = torch.load(ts_path, map_location=device, weights_only=False)
+                entries = state.get('persistent_entries', [])
+                loaded = min(len(entries), PER_CAPACITY)
+                for i in range(loaded):
+                    e = entries[i]
+                    self.replay_buffer.store(
+                        e['state'], e['action'], e['next_state'], e['reward'], e['done']
+                    )
+                if loaded > 0:
+                    print(f"[Diffusion] Loaded {loaded} replay buffer entries")
+            except Exception as e:
+                print(f"[Diffusion] Failed to load replay buffer: {e}")
+
+
 class TransformerDiscreteAgent:
     """Dueling DDQN agent with Transformer backbone.
 
