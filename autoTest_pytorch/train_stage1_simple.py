@@ -27,14 +27,14 @@ from RL_Agent import TransformerDiscreteAgent
 GRID_ROWS = 6
 GRID_COLS = 6
 GRID_MINES = 4
-MAX_EPISODES = 20000
+MAX_EPISODES = 50000
 MAX_STEPS_PER_EPISODE = 200
 LOG_INTERVAL = 50
 SAVE_INTERVAL = 300
 
 # ---------- 評估參數 ----------
 EVAL_INTERVAL = 100
-EVAL_EPISODES = 30
+EVAL_EPISODES = 50
 
 # ---------- 路徑 ----------
 TENSORBOARD_DIR = Path("./runs/stage1_transformer")
@@ -117,8 +117,7 @@ def run_demo_episode(f, logic, agent, mode="validation"):
 
     while not done and step < MAX_STEPS_PER_EPISODE:
         state = logic.get_grid_state_tensor()
-        action = agent.select_action(state, add_noise=add_noise)
-        row, col = action_to_grid(action, GRID_ROWS, GRID_COLS)
+        row, col = agent.select_action(state, add_noise=add_noise)
 
         result = logic.click(row, col)
         reward = compute_reward(result)
@@ -191,8 +190,7 @@ def run_episode(logic, agent, add_noise=True):
 
     while not done and episode_steps < MAX_STEPS_PER_EPISODE:
         state = logic.get_grid_state_tensor()
-        action = agent.select_action(state, add_noise=add_noise)
-        row, col = action_to_grid(action, GRID_ROWS, GRID_COLS)
+        row, col = agent.select_action(state, add_noise=add_noise)
 
         result = logic.click(row, col)
         reward = compute_reward(result)
@@ -210,7 +208,7 @@ def run_episode(logic, agent, add_noise=True):
         if add_noise:
             # 跳過第一步：第一次點擊一定有效，沒有學習價值，會稀釋 valid group
             if episode_steps > 0:
-                agent.store_transition(state, action, next_state, reward, done)
+                agent.store_transition(state, (row, col), next_state, reward, done)
                 train_info = agent.train_step()
                 if train_info is not None:
                     train_info_list.append(train_info)

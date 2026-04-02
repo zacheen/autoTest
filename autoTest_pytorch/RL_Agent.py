@@ -1704,14 +1704,16 @@ class TransformerActorNetwork(nn.Module):
 class DuelingQNetwork(nn.Module):
     """Dueling Q-Network: features → V(s) + A(s,a) - mean(A) = Q(s,a).
 
-    接收 backbone 的 Transformer 特徵 (B, 100, d_model)，輸出 per-cell Q-values。
-    Value stream 用 mean-pool 壓成 scalar，Advantage stream 是 per-token。
+    接收 backbone 的 Transformer 特徵 (B, H*W, d_model)，輸出 2D Q-values (B, H, W)。
+    Selection 時先選 row (argmax over rows of max-col)，再選 col (argmax within row)。
     """
 
-    def __init__(self, d_model=64):
+    def __init__(self, d_model=64, grid_h=10, grid_w=10):
         super().__init__()
+        self.grid_h = grid_h
+        self.grid_w = grid_w
 
-        # Value stream: mean-pool(100 tokens) → FC → V(s) scalar
+        # Value stream: mean-pool(tokens) → FC → V(s) scalar
         self.value_stream = nn.Sequential(
             nn.Linear(d_model, 128),
             nn.SiLU(inplace=True),
@@ -1728,19 +1730,19 @@ class DuelingQNetwork(nn.Module):
     def forward(self, features):
         """
         Args:
-            features: (B, 100, d_model)
+            features: (B, H*W, d_model)
         Returns:
-            q_values: (B, 100)
+            q_values: (B, H, W)
         """
-        # Value: mean-pool over tokens → (B, d_model) → (B, 1)
+        # Value: mean-pool over tokens → (B, 1)
         v = self.value_stream(features.mean(dim=1))  # (B, 1)
 
-        # Advantage: per-token → (B, 100, 1) → (B, 100)
-        a = self.advantage_stream(features).squeeze(-1)  # (B, 100)
+        # Advantage: per-token → (B, H*W)
+        a = self.advantage_stream(features).squeeze(-1)  # (B, H*W)
 
         # Dueling: Q = V + (A - mean(A))
-        q = v + a - a.mean(dim=1, keepdim=True)
-        return q
+        q = v + a - a.mean(dim=1, keepdim=True)  # (B, H*W)
+        return q.view(-1, self.grid_h, self.grid_w)  # (B, H, W)
 
 
 class TransformerDiscreteAgent:
@@ -1751,12 +1753,14 @@ class TransformerDiscreteAgent:
     """
 
     def __init__(self, grid_h=10, grid_w=10):
+        self.grid_h = grid_h
+        self.grid_w = grid_w
         self.num_actions = grid_h * grid_w
 
-        # Backbone (Transformer) + Q-head (Dueling)
+        # Backbone (Transformer) + Q-head (Dueling 2D)
         self.backbone = TransformerActorNetwork(grid_h=grid_h, grid_w=grid_w).to(device)
-        self.q_network = DuelingQNetwork().to(device)
-        self.q_target = DuelingQNetwork().to(device)
+        self.q_network = DuelingQNetwork(grid_h=grid_h, grid_w=grid_w).to(device)
+        self.q_target = DuelingQNetwork(grid_h=grid_h, grid_w=grid_w).to(device)
         self.q_target.load_state_dict(self.q_network.state_dict())
 
         # 1 個 optimizer，同時更新 backbone + Q-head
@@ -1789,15 +1793,16 @@ class TransformerDiscreteAgent:
         atexit.register(self._close_io_log)
 
     def select_action(self, state, add_noise=True):
-        """Epsilon-greedy action selection.
+        """Sequential action selection: 先選 row，再選 col conditioned on row.
 
         Returns:
-            action: int [0, 99]
+            (row, col) tuple of ints
         """
-        # Epsilon-greedy: 隨機選 action
-        num_actions = state.shape[1] * state.shape[2]  # grid_h * grid_w
+        # Epsilon-greedy: 隨機選 row + col
         if add_noise and random.random() < self.epsilon:
-            return random.randint(0, num_actions - 1)
+            row = random.randint(0, self.grid_h - 1)
+            col = random.randint(0, self.grid_w - 1)
+            return (row, col)
 
         state_batch = state.unsqueeze(0).to(device)
 
@@ -1805,15 +1810,24 @@ class TransformerDiscreteAgent:
         self.q_network.eval()
         with torch.no_grad():
             features = self.backbone.get_features(state_batch)
-            q_values = self.q_network(features)  # (1, N)
-            action = q_values.argmax(dim=-1).item()
+            q_2d = self.q_network(features)  # (1, H, W)
+            q_2d = q_2d.squeeze(0)           # (H, W)
+
+            # Step 1: 選 row = argmax over rows of max-col Q
+            row_q = q_2d.max(dim=1).values   # (H,)
+            row = row_q.argmax().item()
+
+            # Step 2: 選 col = argmax within selected row
+            col = q_2d[row].argmax().item()
         self.backbone.train()
         self.q_network.train()
 
-        return action
+        return (row, col)
 
     def store_transition(self, state, action, next_state, reward, done):
-        self.replay_buffer.store(state, action, next_state, reward, done)
+        """action 是 (row, col) tuple，存成 np.array([row, col])。"""
+        action_arr = np.array(action, dtype=np.int64)
+        self.replay_buffer.store(state, action_arr, next_state, reward, done)
 
     def train_step(self):
         if self.replay_buffer.size() < BATCH_SIZE:
@@ -1823,30 +1837,37 @@ class TransformerDiscreteAgent:
         state, action, next_state, reward, done, per_indices, is_weights = \
             self.replay_buffer.sample(BATCH_SIZE, beta=self.beta)
 
-        # action → long index
-        if isinstance(action, torch.Tensor) and action.dim() > 1:
-            action_idx = action.squeeze(-1).long()
-        else:
-            action_idx = action.long()
+        # action → (row, col) indices
+        action = action.long()  # (B, 2)
+        row_idx = action[:, 0]  # (B,)
+        col_idx = action[:, 1]  # (B,)
+        B = state.size(0)
 
         # --- Double DQN target ---
         with torch.no_grad():
             next_features = self.backbone.get_features(next_state)
 
-            # Online network 選 action（Double DQN 的核心）
-            next_q_online = self.q_network(next_features)  # (B, N)
-            best_actions = next_q_online.argmax(dim=1, keepdim=True)  # (B, 1)
+            # Online network 選 action（flatten → argmax → divmod）
+            next_q_2d = self.q_network(next_features)  # (B, H, W)
+            next_q_flat = next_q_2d.view(B, -1)        # (B, H*W)
+            best_flat = next_q_flat.argmax(dim=1)       # (B,)
+            best_rows = best_flat // self.grid_w        # (B,)
+            best_cols = best_flat % self.grid_w         # (B,)
 
             # Target network 估值
-            next_q_target = self.q_target(next_features)  # (B, N)
-            next_q_value = next_q_target.gather(1, best_actions)  # (B, 1)
+            next_q_target_2d = self.q_target(next_features)  # (B, H, W)
+            next_q_value = next_q_target_2d[
+                torch.arange(B, device=device), best_rows, best_cols
+            ].unsqueeze(1)  # (B, 1)
 
             target = reward + (1 - done) * GAMMA * next_q_value
 
         # --- Online Q-value ---
         features = self.backbone.get_features(state)
-        q_all = self.q_network(features)  # (B, N)
-        q_taken = q_all.gather(1, action_idx.unsqueeze(-1))  # (B, 1)
+        q_2d = self.q_network(features)  # (B, H, W)
+        q_taken = q_2d[
+            torch.arange(B, device=device), row_idx, col_idx
+        ].unsqueeze(1)  # (B, 1)
 
         # Per-sample TD-error（用於更新 PER priorities）
         td_error = (q_taken - target).abs().detach()  # (B, 1)
@@ -1881,25 +1902,27 @@ class TransformerDiscreteAgent:
             s0 = state[0]
             unrevealed = s0[0].sum().int().item()
             flagged = s0[1].sum().int().item()
-            revealed = 100 - unrevealed - flagged
+            total_cells = self.grid_h * self.grid_w
+            revealed = total_cells - unrevealed - flagged
             num_counts = {}
             for ch in range(2, 11):
                 cnt = s0[ch].sum().int().item()
                 if cnt > 0:
                     num_counts[ch - 2] = cnt
 
-            # Top-5 Q-values
-            q0 = q_all[0]
-            top5_vals, top5_idx = q0.topk(5)
-            top5_info = [(idx.item() // 10, idx.item() % 10, f"{val.item():.4f}")
-                         for val, idx in zip(top5_vals, top5_idx)]
+            # Top-5 Q-values from 2D
+            q0_flat = q_2d[0].view(-1)  # (H*W,)
+            top5_vals, top5_flat = q0_flat.topk(5)
+            top5_info = [(idx.item() // self.grid_w, idx.item() % self.grid_w, f"{val.item():.4f}")
+                         for val, idx in zip(top5_vals, top5_flat)]
 
-            action_list = action_idx.tolist()
+            # Action frequency
+            action_list = list(zip(row_idx.tolist(), col_idx.tolist()))
             action_freq = defaultdict(int)
-            for a in action_list:
-                action_freq[a] += 1
+            for rc in action_list:
+                action_freq[rc] += 1
             top3_actions = sorted(action_freq.items(), key=lambda x: -x[1])[:3]
-            top3_str = ", ".join(f"({a//10},{a%10})x{c}" for a, c in top3_actions)
+            top3_str = ", ".join(f"({r},{c})x{cnt}" for (r, c), cnt in top3_actions)
 
             q_mean = q_taken.mean().item()
 
@@ -1910,7 +1933,7 @@ class TransformerDiscreteAgent:
             f"  Batch:  rewards={dict(reward_counts)} | top_actions=[{top3_str}]\n"
             f"  Q-top5: {top5_info}\n"
             f"  Q-val:  taken_mean={q_mean:.4f}"
-            f" | all: min={q0.min().item():.4f} max={q0.max().item():.4f}\n"
+            f" | all: min={q0_flat.min().item():.4f} max={q0_flat.max().item():.4f}\n"
             f"  Loss:   {loss.item():.4f} | epsilon={self.epsilon:.4f}\n"
             f"---\n"
         )
