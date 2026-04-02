@@ -1641,8 +1641,14 @@ class TransformerActorNetwork(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        # Per-token output head → 1 logit per token
-        self.output_head = nn.Linear(d_model, 1)
+        # Per-token output head → MLP → 1 logit per token
+        self.output_head = nn.Sequential(
+            nn.Linear(d_model, 128),
+            nn.SiLU(inplace=True),
+            nn.Linear(128, 128),
+            nn.SiLU(inplace=True),
+            nn.Linear(128, 1),
+        )
 
         # 預先計算 position indices
         rows = torch.arange(grid_h).unsqueeze(1).expand(grid_h, grid_w).reshape(-1)
@@ -1713,16 +1719,20 @@ class DuelingQNetwork(nn.Module):
         self.grid_h = grid_h
         self.grid_w = grid_w
 
-        # Value stream: mean-pool(tokens) → FC → V(s) scalar
+        # Value stream: mean-pool(tokens) → MLP → V(s) scalar
         self.value_stream = nn.Sequential(
             nn.Linear(d_model, 128),
+            nn.SiLU(inplace=True),
+            nn.Linear(128, 128),
             nn.SiLU(inplace=True),
             nn.Linear(128, 1),
         )
 
-        # Advantage stream: per-token → A(s, a) for each cell
+        # Advantage stream: per-token → MLP → A(s, a) for each cell
         self.advantage_stream = nn.Sequential(
             nn.Linear(d_model, 128),
+            nn.SiLU(inplace=True),
+            nn.Linear(128, 128),
             nn.SiLU(inplace=True),
             nn.Linear(128, 1),
         )
@@ -2016,7 +2026,7 @@ class TransformerDiscreteAgent:
 
         saved_rewards = defaultdict(int)
         for entry in all_entries:
-            saved_rewards[entry['reward']] += 1
+            saved_rewards[round(entry['reward'], 3)] += 1
         print(f"--- save info ---------------")
         print(f"[AC] Persistent save: {len(all_entries)} entries")
         print(f"[AC] Reward distribution: {dict(saved_rewards)}")
