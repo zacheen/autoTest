@@ -34,7 +34,7 @@ SAVE_INTERVAL = 300
 
 # ---------- 評估參數 ----------
 EVAL_INTERVAL = 100
-EVAL_EPISODES = 10
+EVAL_EPISODES = 20
 
 # ---------- 路徑 ----------
 TENSORBOARD_DIR = Path("./runs/stage1_transformer")
@@ -393,10 +393,11 @@ def main():
                 writer.add_scalar('train/avg_reward_50', avg_reward, episode)
                 writer.add_scalar('train/win_rate_50', win_rate, episode)
 
+                overall_wr = total_wins / episode * 100
                 print(f"[Ep {episode:>6d}] "
                       f"Avg Reward: {avg_reward:>7.2f} | "
-                      f"Win Rate: {win_rate:>5.1f}% | "
-                      f"Avg Steps: {avg_steps:>5.1f} | "
+                      f"Win Rate(50): {win_rate:>5.1f}% | "
+                      f"Overall WR: {overall_wr:>5.1f}% | "
                       f"Total Wins: {total_wins} | "
                       f"Speed: {eps_per_sec:.1f} ep/s | "
                       f"Epsilon: {agent.epsilon:.4f}")
