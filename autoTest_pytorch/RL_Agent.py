@@ -49,7 +49,7 @@ BUFFER_CAPACITY = 10000  # Runtime circular buffer per class (Stage1: ~24KB/entr
 SAVE_CAPACITY = 2000    # Persistent save to disk (Stage1: ~4.8MB)
 SAVE_EVERY_N_EPISODES = 50
 TARGET_UPDATE_FREQ = 50   # Hard copy target network every N training steps (DDQN)
-LR_DDQN = 1e-4           # DDQN learning rate (lower than SAC for stability)
+LR_DDQN = 5e-5           # DDQN learning rate (lower than SAC for stability)
 IMAGE_SIZE = (640, 640)
 
 # YOLO11n layer indices (discovered via forward pass)

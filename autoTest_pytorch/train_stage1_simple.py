@@ -27,14 +27,14 @@ from RL_Agent import TransformerDiscreteAgent
 GRID_ROWS = 6
 GRID_COLS = 6
 GRID_MINES = 4
-MAX_EPISODES = 10000
+MAX_EPISODES = 20000
 MAX_STEPS_PER_EPISODE = 200
 LOG_INTERVAL = 50
 SAVE_INTERVAL = 300
 
 # ---------- 評估參數 ----------
 EVAL_INTERVAL = 100
-EVAL_EPISODES = 20
+EVAL_EPISODES = 30
 
 # ---------- 路徑 ----------
 TENSORBOARD_DIR = Path("./runs/stage1_transformer")
