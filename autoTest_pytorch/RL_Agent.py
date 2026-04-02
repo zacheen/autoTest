@@ -1962,6 +1962,19 @@ class TransformerDiscreteAgent:
                   f" | epsilon={self.epsilon:.4f} | beta={self.beta:.4f}")
             self.save_persistent()
 
+    def save_frozen_backbone(self, path=None):
+        """匯出 backbone 權重供其他 agent 載入（例如 Diffusion Policy）。
+
+        Usage:
+            agent.save_frozen_backbone()
+            # → models/stage1_transformer/frozen_backbone.pth
+        """
+        if path is None:
+            path = TRANSFORMER_MODEL_PATH / 'frozen_backbone.pth'
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self.backbone.state_dict(), path)
+        print(f"[DDQN] Frozen backbone saved to {path}")
+
     def _save_model(self):
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
         torch.save(self.backbone.state_dict(), TRANSFORMER_MODEL_PATH / 'backbone.pth')

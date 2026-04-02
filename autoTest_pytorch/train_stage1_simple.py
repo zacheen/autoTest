@@ -423,10 +423,12 @@ def main():
         print(f"Invalid Rate: {final_eval['avg_invalid_rate']:.2%}")
 
         agent.save_persistent()
+        agent.save_frozen_backbone()
 
     except KeyboardInterrupt:
         print("\n\n[!] Training interrupted")
         agent.save_persistent()
+        agent.save_frozen_backbone()
 
     finally:
         print(f"\nTensorBoard logs: {tb_dir}")
