@@ -219,10 +219,14 @@ def run_episode(logic, agent, add_noise=True):
     invalid_rate = invalid_clicks / total_clicks if total_clicks > 0 else 0.0
 
     avg_loss = None
+    avg_actor_loss = None
     avg_q_mean = None
+    avg_entropy = None
     if train_info_list:
         avg_loss = np.mean([t['loss'] for t in train_info_list])
+        avg_actor_loss = np.mean([t['actor_loss'] for t in train_info_list])
         avg_q_mean = np.mean([t['q_mean'] for t in train_info_list])
+        avg_entropy = np.mean([t['entropy'] for t in train_info_list])
 
     return {
         'reward': episode_reward,
@@ -232,7 +236,9 @@ def run_episode(logic, agent, add_noise=True):
         'valid_clicks': valid_clicks,
         'invalid_clicks': invalid_clicks,
         'loss': avg_loss,
+        'actor_loss': avg_actor_loss,
         'q_mean': avg_q_mean,
+        'entropy': avg_entropy,
     }
 
 
@@ -305,7 +311,7 @@ def main():
     csv_fields = [
         'episode', 'reward', 'steps', 'is_win', 'invalid_rate',
         'valid_clicks', 'invalid_clicks',
-        'loss', 'q_mean', 'epsilon',
+        'critic_loss', 'actor_loss', 'q_mean', 'entropy', 'epsilon',
         'eval_avg_reward', 'eval_win_rate', 'eval_avg_steps', 'eval_avg_invalid_rate',
         'timestamp',
     ]
@@ -337,8 +343,10 @@ def main():
             writer.add_scalar('train/episode_steps', stats['steps'], episode)
             writer.add_scalar('train/invalid_rate', stats['invalid_rate'], episode)
             if stats['loss'] is not None:
-                writer.add_scalar('train/loss', stats['loss'], episode)
+                writer.add_scalar('train/critic_loss', stats['loss'], episode)
+                writer.add_scalar('train/actor_loss', stats['actor_loss'], episode)
                 writer.add_scalar('train/q_mean', stats['q_mean'], episode)
+                writer.add_scalar('train/entropy', stats['entropy'], episode)
 
             # CSV
             csv_row = {
@@ -349,8 +357,10 @@ def main():
                 'invalid_rate': f"{stats['invalid_rate']:.4f}",
                 'valid_clicks': stats['valid_clicks'],
                 'invalid_clicks': stats['invalid_clicks'],
-                'loss': f"{stats['loss']:.6f}" if stats['loss'] is not None else '',
+                'critic_loss': f"{stats['loss']:.6f}" if stats['loss'] is not None else '',
+                'actor_loss': f"{stats['actor_loss']:.6f}" if stats['actor_loss'] is not None else '',
                 'q_mean': f"{stats['q_mean']:.4f}" if stats['q_mean'] is not None else '',
+                'entropy': f"{stats['entropy']:.4f}" if stats['entropy'] is not None else '',
                 'epsilon': f"{agent.epsilon:.4f}",
                 'eval_avg_reward': '',
                 'eval_win_rate': '',
