@@ -1683,10 +1683,6 @@ class TransformerActorNetwork(nn.Module):
         x = self.get_features(state)              # (B, 100, d_model)
         logits = self.output_head(x).squeeze(-1)  # (B, 100)
 
-        # Action masking: channel 0 = 未翻開 (可點擊)
-        mask = state[:, 0].reshape(state.size(0), -1).bool()  # (B, 100)
-        logits = logits.masked_fill(~mask, -1e8)
-
         probs = F.softmax(logits, dim=-1)
         log_probs = F.log_softmax(logits, dim=-1)
         return probs, log_probs
@@ -1785,12 +1781,10 @@ class TransformerDiscreteAgent:
         Returns:
             action: int [0, 99]
         """
-        # Epsilon-greedy: 隨機選未翻開格子
+        # Epsilon-greedy: 隨機選 action
+        num_actions = state.shape[1] * state.shape[2]  # grid_h * grid_w
         if add_noise and random.random() < self.epsilon:
-            mask = state[0].reshape(-1).numpy()  # channel 0 = 未翻開
-            unrevealed = np.where(mask > 0.5)[0]
-            if len(unrevealed) > 0:
-                return int(np.random.choice(unrevealed))
+            return random.randint(0, num_actions - 1)
 
         state_batch = state.unsqueeze(0).to(device)
 
@@ -1798,10 +1792,7 @@ class TransformerDiscreteAgent:
         self.q_network.eval()
         with torch.no_grad():
             features = self.backbone.get_features(state_batch)
-            q_values = self.q_network(features)  # (1, 100)
-            # Action masking
-            mask = state_batch[:, 0].reshape(1, -1).bool()
-            q_values = q_values.masked_fill(~mask, -1e8)
+            q_values = self.q_network(features)  # (1, N)
             action = q_values.argmax(dim=-1).item()
         self.backbone.train()
         self.q_network.train()
@@ -1831,9 +1822,6 @@ class TransformerDiscreteAgent:
 
             # Online network 選 action（Double DQN 的核心）
             next_q_online = self.q_network(next_features)  # (B, N)
-            # Mask 已翻開格子
-            next_mask = next_state[:, 0].reshape(next_state.size(0), -1).bool()
-            next_q_online = next_q_online.masked_fill(~next_mask, -1e8)
             best_actions = next_q_online.argmax(dim=1, keepdim=True)  # (B, 1)
 
             # Target network 估值
@@ -1889,9 +1877,7 @@ class TransformerDiscreteAgent:
 
             # Top-5 Q-values
             q0 = q_all[0]
-            mask0 = state[0, 0].reshape(-1).bool()
-            q0_masked = q0.masked_fill(~mask0, -1e8)
-            top5_vals, top5_idx = q0_masked.topk(5)
+            top5_vals, top5_idx = q0.topk(5)
             top5_info = [(idx.item() // 10, idx.item() % 10, f"{val.item():.4f}")
                          for val, idx in zip(top5_vals, top5_idx)]
 
@@ -1911,7 +1897,7 @@ class TransformerDiscreteAgent:
             f"  Batch:  rewards={dict(reward_counts)} | top_actions=[{top3_str}]\n"
             f"  Q-top5: {top5_info}\n"
             f"  Q-val:  taken_mean={q_mean:.4f}"
-            f" | all: min={q0[mask0].min().item():.4f} max={q0[mask0].max().item():.4f}\n"
+            f" | all: min={q0.min().item():.4f} max={q0.max().item():.4f}\n"
             f"  Loss:   {loss.item():.4f} | epsilon={self.epsilon:.4f}\n"
             f"---\n"
         )
