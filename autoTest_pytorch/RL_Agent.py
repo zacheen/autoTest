@@ -1682,10 +1682,8 @@ class TransformerActorNetwork(nn.Module):
         Returns:
             (B, 100, d_model) — Transformer 最後一層輸出
         """
-        x0 = self._embed(state)
-        x = x0
-        for layer in self.transformer.layers:
-            x = layer(x) + x0
+        x = self._embed(state)
+        x = self.transformer(x)
         return x
 
     def forward(self, state):
