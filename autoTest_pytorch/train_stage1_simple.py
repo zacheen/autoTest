@@ -120,19 +120,16 @@ def run_demo_episode(f, logic, agent, mode="validation"):
         action = agent.select_action(state, add_noise=add_noise)
         row, col = action_to_grid(action, GRID_ROWS, GRID_COLS)
 
-        safe_cells, _ = logic.get_logically_safe_cells()
         result = logic.click(row, col)
-        reward = compute_reward(result, clicked=(row, col), safe_cells=safe_cells)
+        reward = compute_reward(result)
         total_reward += reward
 
         done = result.game_over or result.win
         step += 1
 
-        is_logical = (row, col) in safe_cells if safe_cells else False
         status = "WIN!" if result.win else "BOOM!" if result.game_over else \
                  "valid" if result.changed else "invalid"
-        tag = " [LOGICAL]" if is_logical else " [GUESS]" if result.changed else ""
-        f.write(f"\n  Step {step}: click ({row},{col}) -> {status}{tag} | reward={reward:+.0f}\n")
+        f.write(f"\n  Step {step}: click ({row},{col}) -> {status} | reward={reward:+.0f}\n")
         f.write(format_grid(logic, click_row=row, click_col=col, result=result) + "\n")
 
     outcome = "WIN" if logic.is_win else "LOSE (mine)" if logic.game_over else "TIMEOUT"
@@ -164,17 +161,14 @@ def squash_reward(r):
     return np.sign(r) * (np.sqrt(abs(r) + 1) - 1) + 0.001 * r
 
 
-def compute_reward(result, clicked=None, safe_cells=None):
-    """根據 ClickResult + 邏輯安全性計算 reward（壓縮後）。
+def compute_reward(result):
+    """計算 reward（壓縮後）。
 
-    原始 reward tiers → squash 後:
+    4 個分類:
         +20.0 → +3.60   WIN
-        +6.0  → +1.65   邏輯安全 + flood-fill (≥3 cells)
-        +4.0  → +1.24   邏輯安全 (1-2 cells)
-        +2.0  → +0.73   全場無安全格，猜對了 (forced guess)
-        +1.0  → +0.42   有安全格但沒選到，碰巧沒踩雷 (lucky guess)
+        +3.0  → +1.00   有效點擊（翻開新格子）
         -3.0  → -1.00   踩雷
-        -2.95 → -0.99   無效點擊
+        -2.95 → -0.99   無效點擊（點已翻開格）
     """
     if not result.changed:
         return squash_reward(-2.95)
@@ -182,20 +176,7 @@ def compute_reward(result, clicked=None, safe_cells=None):
         return squash_reward(20.0)
     if result.game_over:
         return squash_reward(-3.0)
-
-    # 有效安全點擊 — 根據邏輯安全性分級
-    if safe_cells is None:
-        return squash_reward(3.0)  # fallback (第一步或無 safe_cells 資訊)
-
-    num_revealed = len(result.revealed_cells)
-    is_flood = num_revealed >= 3
-
-    if clicked in safe_cells:
-        return squash_reward(6.0) if is_flood else squash_reward(4.0)
-    elif len(safe_cells) == 0:
-        return squash_reward(2.0)  # forced guess
-    else:
-        return squash_reward(1.0)  # lucky guess
+    return squash_reward(3.0)
 
 
 def run_episode(logic, agent, add_noise=True):
@@ -213,11 +194,8 @@ def run_episode(logic, agent, add_noise=True):
         action = agent.select_action(state, add_noise=add_noise)
         row, col = action_to_grid(action, GRID_ROWS, GRID_COLS)
 
-        # 點擊前計算邏輯安全格（點擊後 board 會變）
-        safe_cells, _ = logic.get_logically_safe_cells()
-
         result = logic.click(row, col)
-        reward = compute_reward(result, clicked=(row, col), safe_cells=safe_cells)
+        reward = compute_reward(result)
         episode_reward += reward
 
         if result.changed:
