@@ -910,6 +910,21 @@ class PERReplayBuffer:
                 entries.append(self.data[i])
         return entries
 
+    def get_top_entries(self, k):
+        """取得 priority 最高的 k 筆 entries（用於 persistent save）。"""
+        # 收集 (priority, index) pairs
+        priorities = []
+        for i in range(self.tree.size):
+            if self.data[i] is not None:
+                tree_idx = i + self.tree.capacity - 1
+                priority = self.tree.tree[tree_idx]
+                priorities.append((priority, i))
+
+        # 按 priority 降序排序，取 top-k
+        priorities.sort(key=lambda x: -x[0])
+        top_k = priorities[:k]
+        return [self.data[idx] for _, idx in top_k]
+
 
 class Stage1SACAgent:
     """Stage 1 SAC Agent — 用離散 grid state 預訓練。
@@ -1946,9 +1961,11 @@ class TransformerDiscreteAgent:
         if total == 0:
             return
 
-        all_entries = buf.get_all_entries()
-        if len(all_entries) > SAVE_CAPACITY:
-            all_entries = random.sample(all_entries, SAVE_CAPACITY)
+        total = buf.size()
+        if total <= SAVE_CAPACITY:
+            all_entries = buf.get_all_entries()
+        else:
+            all_entries = buf.get_top_entries(SAVE_CAPACITY)
 
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
         torch.save({
