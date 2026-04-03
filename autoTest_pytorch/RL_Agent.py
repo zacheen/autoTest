@@ -1763,13 +1763,19 @@ class TransformerDiscreteAgent:
     Backbone 共用，Actor 和 Critic 各自有 optimizer。
     """
 
-    def __init__(self, grid_h=10, grid_w=10):
+    def __init__(self, grid_h=10, grid_w=10, frozen_backbone_path=None):
         self.grid_h = grid_h
         self.grid_w = grid_w
         self.num_actions = grid_h * grid_w
 
         # Shared backbone (Transformer) — Actor head 內建在 backbone.output_head
         self.backbone = TransformerActorNetwork(grid_h=grid_h, grid_w=grid_w).to(device)
+
+        # 載入 pretrained backbone（從 DDQN 訓練好的權重）
+        if frozen_backbone_path is not None:
+            state_dict = torch.load(frozen_backbone_path, map_location=device)
+            self.backbone.load_state_dict(state_dict, strict=False)
+            print(f"[AC] Loaded pretrained backbone from {frozen_backbone_path}")
 
         # Critic Q-head (Dueling 2D) + target
         self.q_network = DuelingQNetwork(grid_h=grid_h, grid_w=grid_w).to(device)
@@ -1990,6 +1996,14 @@ class TransformerDiscreteAgent:
                   f" | epsilon={self.epsilon:.4f} | beta={self.beta:.4f}")
             self.save_persistent()
 
+    def save_frozen_backbone(self, path=None):
+        """匯出 backbone 權重供其他 agent 載入。"""
+        if path is None:
+            path = TRANSFORMER_MODEL_PATH / 'frozen_backbone.pth'
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self.backbone.state_dict(), path)
+        print(f"[DDQN] Frozen backbone saved to {path}")
+
     def _save_model(self):
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
         torch.save(self.backbone.state_dict(), TRANSFORMER_MODEL_PATH / 'backbone.pth')
@@ -2036,8 +2050,13 @@ class TransformerDiscreteAgent:
         backbone_path = TRANSFORMER_MODEL_PATH / 'backbone.pth'
         if backbone_path.exists():
             try:
-                self.backbone.load_state_dict(torch.load(backbone_path, map_location=device))
-                print("[AC] Loaded Backbone")
+                missing, unexpected = self.backbone.load_state_dict(
+                    torch.load(backbone_path, map_location=device), strict=False
+                )
+                if missing or unexpected:
+                    print(f"[AC] Loaded Backbone (partial: {len(missing)} missing, {len(unexpected)} unexpected)")
+                else:
+                    print("[AC] Loaded Backbone")
             except Exception as e:
                 print(f"[AC] Failed to load Backbone: {e}")
 

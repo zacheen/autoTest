@@ -298,7 +298,10 @@ def main():
     print()
 
     logic = MinesweeperLogic(rows=GRID_ROWS, cols=GRID_COLS, mines_count=GRID_MINES)
-    agent = TransformerDiscreteAgent(grid_h=GRID_ROWS, grid_w=GRID_COLS)
+    # 如果有 pretrained backbone，載入加速訓練
+    frozen_path = Path("./models/stage1_transformer/frozen_backbone.pth")
+    frozen = str(frozen_path) if frozen_path.exists() else None
+    agent = TransformerDiscreteAgent(grid_h=GRID_ROWS, grid_w=GRID_COLS, frozen_backbone_path=frozen)
 
     # TensorBoard
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -433,10 +436,12 @@ def main():
         print(f"Invalid Rate: {final_eval['avg_invalid_rate']:.2%}")
 
         agent.save_persistent()
+        agent.save_frozen_backbone()
 
     except KeyboardInterrupt:
         print("\n\n[!] Training interrupted")
         agent.save_persistent()
+        agent.save_frozen_backbone()
 
     finally:
         print(f"\nTensorBoard logs: {tb_dir}")
