@@ -70,90 +70,156 @@ CSV_LOG_PATH = MODEL_PATH / "training_log.csv"
 # SAC Networks
 # ============================================================
 
+class CrossAttentionPooling(nn.Module):
+    """用 learnable query token 做 cross-attention，將 N 個 token 壓成 1 個向量。
+
+    query (1, d) attends to key/value (N, d) → output (1, d)
+    """
+
+    def __init__(self, d_model=64, nhead=4):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(1, 1, d_model))  # learnable query
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=d_model, num_heads=nhead, batch_first=True,
+        )
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, features):
+        """
+        Args:
+            features: (B, N, d_model) — N 個 token
+        Returns:
+            (B, d_model) — 1 個 summary vector
+        """
+        B = features.size(0)
+        query = self.query.expand(B, -1, -1)  # (B, 1, d_model)
+        out, _ = self.cross_attn(query, features, features)  # (B, 1, d_model)
+        out = self.norm(out)
+        return out.squeeze(1)  # (B, d_model)
+
+
 class ContinuousSACActor(nn.Module):
-    """SAC Actor: condition → Gaussian → sigmoid → (x, y) ∈ [0,1]²."""
+    """SAC Actor: token features → cross-attention → Gaussian → sigmoid → (x, y) ∈ [0,1]².
+
+    接收 backbone 的 per-token features (B, N, 64)，用 cross-attention 壓成 (B, 64)，
+    再輸出 continuous action。
+    """
 
     LOG_STD_MIN = -20
     LOG_STD_MAX = 2
 
-    def __init__(self, condition_dim=64, action_dim=2, hidden_dim=256):
+    def __init__(self, d_model=64, action_dim=2, hidden_dim=256, nhead=4):
         super().__init__()
+        # 1 層 self-attention 讓 Actor 有自己的特徵處理
+        self.self_attn = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead, dim_feedforward=hidden_dim,
+            dropout=0.1, activation='gelu', batch_first=True,
+        )
+        # Cross-attention: N tokens → 1 vector
+        self.pool = CrossAttentionPooling(d_model=d_model, nhead=nhead)
+
+        # MLP → mean + log_std
         self.trunk = nn.Sequential(
-            nn.Linear(condition_dim, hidden_dim),
-            nn.SiLU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(d_model, hidden_dim),
             nn.SiLU(inplace=True),
         )
         self.mean_head = nn.Linear(hidden_dim, action_dim)
         self.log_std_head = nn.Linear(hidden_dim, action_dim)
 
-    def forward(self, condition):
+    def _encode(self, features):
+        """Features → summary vector (B, d_model)."""
+        x = self.self_attn(features)    # (B, N, d_model)
+        return self.pool(x)             # (B, d_model)
+
+    def forward(self, features):
         """Returns mean, log_std."""
-        h = self.trunk(condition)
+        h = self._encode(features)
+        h = self.trunk(h)
         mean = self.mean_head(h)
         log_std = self.log_std_head(h).clamp(self.LOG_STD_MIN, self.LOG_STD_MAX)
         return mean, log_std
 
-    def sample(self, condition):
+    def sample(self, features):
         """Reparameterization trick + sigmoid squashing.
 
+        Args:
+            features: (B, N, 64) — backbone token features
         Returns:
             action: (B, 2) in [0, 1]²
             log_prob: (B, 1)
         """
-        mean, log_std = self.forward(condition)
+        mean, log_std = self.forward(features)
         std = log_std.exp()
         normal = torch.distributions.Normal(mean, std)
 
-        # Reparameterization
         z = normal.rsample()
         action = torch.sigmoid(z)
 
         # Log-prob with sigmoid correction
-        # d/dz sigmoid(z) = sigmoid(z) * (1 - sigmoid(z)) = action * (1 - action)
         log_prob = normal.log_prob(z) - torch.log(action * (1 - action) + 1e-6)
         log_prob = log_prob.sum(dim=-1, keepdim=True)  # (B, 1)
 
         return action, log_prob
 
-    def deterministic(self, condition):
+    def deterministic(self, features):
         """Deterministic action for evaluation."""
-        mean, _ = self.forward(condition)
+        mean, _ = self.forward(features)
         return torch.sigmoid(mean)
 
 
 class ContinuousSACCritic(nn.Module):
-    """Twin Q-Network: Q(condition, action) → scalar."""
+    """Twin Q-Network with cross-attention: Q(features, action) → scalar.
 
-    def __init__(self, condition_dim=64, action_dim=2, hidden_dim=256):
+    接收 per-token features (B, N, 64) + action (B, 2)，
+    各自用 cross-attention 壓成 (B, 64)，再 concat action 算 Q-value。
+    """
+
+    def __init__(self, d_model=64, action_dim=2, hidden_dim=256, nhead=4):
         super().__init__()
-        input_dim = condition_dim + action_dim
 
-        self.q1 = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.SiLU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(inplace=True),
-            nn.Linear(hidden_dim, 1),
+        # Q1 branch
+        self.q1_self_attn = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead, dim_feedforward=hidden_dim,
+            dropout=0.1, activation='gelu', batch_first=True,
         )
-        self.q2 = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.SiLU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim),
+        self.q1_pool = CrossAttentionPooling(d_model=d_model, nhead=nhead)
+        self.q1_head = nn.Sequential(
+            nn.Linear(d_model + action_dim, hidden_dim),
             nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, condition, action):
+        # Q2 branch
+        self.q2_self_attn = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead, dim_feedforward=hidden_dim,
+            dropout=0.1, activation='gelu', batch_first=True,
+        )
+        self.q2_pool = CrossAttentionPooling(d_model=d_model, nhead=nhead)
+        self.q2_head = nn.Sequential(
+            nn.Linear(d_model + action_dim, hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, features, action):
         """
         Args:
-            condition: (B, 64)
+            features: (B, N, 64) — backbone token features
             action: (B, 2)
         Returns:
             q1: (B, 1), q2: (B, 1)
         """
-        x = torch.cat([condition, action], dim=-1)
-        return self.q1(x), self.q2(x)
+        # Q1
+        x1 = self.q1_self_attn(features)
+        s1 = self.q1_pool(x1)  # (B, 64)
+        q1 = self.q1_head(torch.cat([s1, action], dim=-1))
+
+        # Q2
+        x2 = self.q2_self_attn(features)
+        s2 = self.q2_pool(x2)  # (B, 64)
+        q2 = self.q2_head(torch.cat([s2, action], dim=-1))
+
+        return q1, q2
 
 
 # ============================================================
@@ -172,13 +238,13 @@ class SACContinuousAgent:
         self._load_frozen_backbone()
         self.backbone.eval()
 
-        # Actor
-        self.actor = ContinuousSACActor(condition_dim=64).to(device)
+        # Actor (with cross-attention)
+        self.actor = ContinuousSACActor(d_model=64).to(device)
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR)
 
-        # Critic + target
-        self.critic = ContinuousSACCritic(condition_dim=64).to(device)
-        self.critic_target = ContinuousSACCritic(condition_dim=64).to(device)
+        # Critic + target (with cross-attention)
+        self.critic = ContinuousSACCritic(d_model=64).to(device)
+        self.critic_target = ContinuousSACCritic(d_model=64).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LR)
 
@@ -218,10 +284,9 @@ class SACContinuousAgent:
                 param.requires_grad = False
 
     @torch.no_grad()
-    def _get_condition(self, state):
-        """State → condition vector (B, 64)."""
-        features = self.backbone.get_features(state)  # (B, H*W, 64)
-        return features.mean(dim=1)  # (B, 64)
+    def _get_features(self, state):
+        """State → token features (B, N, 64) from frozen backbone."""
+        return self.backbone.get_features(state)  # (B, H*W, 64)
 
     def select_action(self, state, deterministic=False):
         """Select continuous (x, y) action.
@@ -230,14 +295,14 @@ class SACContinuousAgent:
             (row, col), action_np
         """
         state_batch = state.unsqueeze(0).to(device)
-        condition = self._get_condition(state_batch)
+        features = self._get_features(state_batch)
 
         self.actor.eval()
         with torch.no_grad():
             if deterministic:
-                action = self.actor.deterministic(condition)
+                action = self.actor.deterministic(features)
             else:
-                action, _ = self.actor.sample(condition)
+                action, _ = self.actor.sample(features)
         self.actor.train()
 
         action_np = action.cpu().numpy().flatten()  # (2,)
@@ -257,18 +322,18 @@ class SACContinuousAgent:
             self.replay_buffer.sample(BATCH_SIZE, beta=self.beta)
         B = state.size(0)
 
-        condition = self._get_condition(state)
-        next_condition = self._get_condition(next_state)
+        features = self._get_features(state)
+        next_features = self._get_features(next_state)
         alpha = self.log_alpha.exp().detach()
 
         # === Critic update ===
         with torch.no_grad():
-            next_action, next_log_prob = self.actor.sample(next_condition)
-            tq1, tq2 = self.critic_target(next_condition, next_action)
+            next_action, next_log_prob = self.actor.sample(next_features)
+            tq1, tq2 = self.critic_target(next_features, next_action)
             target_q = torch.min(tq1, tq2) - alpha * next_log_prob
             target = reward + (1 - done) * GAMMA * target_q
 
-        q1, q2 = self.critic(condition, action)
+        q1, q2 = self.critic(features, action)
         td_error = torch.max((q1 - target).abs(), (q2 - target).abs()).detach()
 
         critic_loss = (is_weights * (
@@ -287,8 +352,8 @@ class SACContinuousAgent:
         )
 
         # === Actor update ===
-        new_action, log_prob = self.actor.sample(condition.detach())
-        q1_new, q2_new = self.critic(condition.detach(), new_action)
+        new_action, log_prob = self.actor.sample(features)
+        q1_new, q2_new = self.critic(features, new_action)
         min_q = torch.min(q1_new, q2_new)
         actor_loss = (alpha * log_prob - min_q).mean()
 
