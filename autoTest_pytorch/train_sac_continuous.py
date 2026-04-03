@@ -63,7 +63,7 @@ SAVE_CAPACITY = 5000
 
 FROZEN_BACKBONE_PATH = Path("./models/stage1_transformer/frozen_backbone.pth")
 MODEL_PATH = Path("./models/sac_continuous")
-TENSORBOARD_DIR = Path("./runs/sac_continuous")
+TENSORBOARD_DIR = MODEL_PATH / "tb_logs"
 CSV_LOG_PATH = MODEL_PATH / "training_log.csv"
 
 
@@ -365,12 +365,22 @@ class SACContinuousAgent:
         for p, tp in zip(self.critic.parameters(), self.critic_target.parameters()):
             tp.data.copy_(TAU * p.data + (1 - TAU) * tp.data)
 
+        # === Gradient norms (clip 前已算完，這裡讀 clip 後的值) ===
+        actor_grad_norm = sum(
+            p.grad.norm().item() ** 2 for p in self.actor.parameters() if p.grad is not None
+        ) ** 0.5
+        critic_grad_norm = sum(
+            p.grad.norm().item() ** 2 for p in self.critic.parameters() if p.grad is not None
+        ) ** 0.5
+
         return {
             "critic_loss": critic_loss.item(),
             "actor_loss": actor_loss.item(),
             "alpha": alpha.item(),
             "q_mean": torch.min(q1, q2).mean().item(),
             "entropy": -log_prob.mean().item(),
+            "actor_grad_norm": actor_grad_norm,
+            "critic_grad_norm": critic_grad_norm,
         }
 
     def on_episode_end(self):
@@ -537,12 +547,16 @@ def run_episode(logic, agent, global_steps, add_noise=True):
     avg_q_mean = None
     avg_alpha = None
     avg_entropy = None
+    avg_actor_grad = None
+    avg_critic_grad = None
     if train_info_list:
         avg_critic_loss = np.mean([t['critic_loss'] for t in train_info_list])
         avg_actor_loss = np.mean([t['actor_loss'] for t in train_info_list])
         avg_q_mean = np.mean([t['q_mean'] for t in train_info_list])
         avg_alpha = np.mean([t['alpha'] for t in train_info_list])
         avg_entropy = np.mean([t['entropy'] for t in train_info_list])
+        avg_actor_grad = np.mean([t['actor_grad_norm'] for t in train_info_list])
+        avg_critic_grad = np.mean([t['critic_grad_norm'] for t in train_info_list])
 
     return {
         'reward': episode_reward,
@@ -556,6 +570,8 @@ def run_episode(logic, agent, global_steps, add_noise=True):
         'q_mean': avg_q_mean,
         'alpha': avg_alpha,
         'entropy': avg_entropy,
+        'actor_grad_norm': avg_actor_grad,
+        'critic_grad_norm': avg_critic_grad,
     }
 
 
@@ -639,6 +655,15 @@ def main():
                 writer.add_scalar('train/q_mean', stats['q_mean'], episode)
                 writer.add_scalar('train/alpha', stats['alpha'], episode)
                 writer.add_scalar('train/entropy', stats['entropy'], episode)
+                writer.add_scalar('grad/actor_norm', stats['actor_grad_norm'], episode)
+                writer.add_scalar('grad/critic_norm', stats['critic_grad_norm'], episode)
+
+            # Weight histograms (每 100 episode 記錄一次，避免 log 太大)
+            if episode % 100 == 0:
+                for name, param in agent.actor.named_parameters():
+                    writer.add_histogram(f'actor_weights/{name}', param.data, episode)
+                for name, param in agent.critic.named_parameters():
+                    writer.add_histogram(f'critic_weights/{name}', param.data, episode)
 
             # CSV
             csv_row = {
