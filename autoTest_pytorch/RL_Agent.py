@@ -39,6 +39,7 @@ LR_CRITIC = 2e-4
 LR_ALPHA = 1e-4
 GAMMA = 0.9   # Minesweeper episodes are short (2-15 steps), don't need long-horizon discount
 TAU = 0.005
+DELAY_UPDATE = 5000
 INIT_ALPHA = 0.2
 TARGET_ENTROPY = -1.8  # = -action_dim (for continuous SAC)
 DISCRETE_TARGET_ENTROPY = 0.8 * np.log(100)  # ≈ 3.7 (80% of max discrete entropy ln(100)=4.6)
@@ -1917,8 +1918,8 @@ class TransformerDiscreteAgent:
         torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
         self.critic_optimizer.step()
 
-        # === Actor update (前 5000 步只練 Critic，之後每 3 步更新 1 次) ===
-        if self.total_it < 5000 or self.total_it % 3 != 0:
+        # === Actor update (前 DELAY_UPDATE 步只練 Critic，之後每 3 步更新 1 次) ===
+        if self.total_it < DELAY_UPDATE or self.total_it % 3 != 0:
             # 只更新 Critic，跳過 Actor
             self.replay_buffer.update_priorities(
                 per_indices, td_error.squeeze(-1).cpu().numpy()
