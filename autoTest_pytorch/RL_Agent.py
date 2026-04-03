@@ -1777,13 +1777,19 @@ class TransformerDiscreteAgent:
             state_dict = torch.load(frozen_backbone_path, map_location=device)
             missing, unexpected = self.backbone.load_state_dict(state_dict, strict=False)
             self._frozen_backbone_loaded = True
-            # 驗證：Transformer 層有載入（missing 應只有 output_head）
+            # Freeze Transformer 權重，只訓練 output_head
+            frozen_count = 0
+            for name, param in self.backbone.named_parameters():
+                if 'output_head' not in name:
+                    param.requires_grad = False
+                    frozen_count += 1
+            # 驗證
             transformer_missing = [k for k in missing if 'output_head' not in k]
             if transformer_missing:
                 print(f"[AC] WARNING: Transformer weights missing: {transformer_missing}")
             else:
-                print(f"[AC] Loaded pretrained backbone OK "
-                      f"(transformer: all loaded, output_head: {len(missing)} skipped)")
+                print(f"[AC] Loaded & frozen backbone OK "
+                      f"(frozen: {frozen_count} params, output_head: trainable)")
 
         # Critic Q-head (Dueling 2D) + target
         self.q_network = DuelingQNetwork(grid_h=grid_h, grid_w=grid_w).to(device)
