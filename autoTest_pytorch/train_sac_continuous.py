@@ -31,7 +31,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 from Minesweeper.MinesweeperLogic import MinesweeperLogic
 from RL_Agent import TransformerActorNetwork, PERReplayBuffer, device, \
-    PER_CAPACITY, PER_ALPHA, PER_BETA_START, PER_BETA_END, PER_EPSILON
+    PER_CAPACITY, PER_ALPHA, PER_BETA_START, PER_BETA_END, PER_EPSILON, \
+    Stage1ReplayBuffer, BUFFER_CAPACITY
 from util import TeeOutput, CSVLogger, compute_reward, action_to_grid
 
 
@@ -256,11 +257,10 @@ class SACContinuousAgent:
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR)
         self.target_entropy = TARGET_ENTROPY
 
-        # Replay buffer
-        self.replay_buffer = PERReplayBuffer(capacity=PER_CAPACITY, alpha=PER_ALPHA)
+        # Replay buffer (per-class balanced sampling)
+        self.replay_buffer = Stage1ReplayBuffer(max_per_class=BUFFER_CAPACITY)
         self.total_steps = 0
         self.episode_count = 0
-        self.beta = PER_BETA_START
 
         self.try_load_model()
         atexit.register(self.save_persistent)
@@ -318,8 +318,7 @@ class SACContinuousAgent:
 
         self.total_steps += 1
 
-        state, action, next_state, reward, done, per_indices, is_weights = \
-            self.replay_buffer.sample(BATCH_SIZE, beta=self.beta)
+        state, action, next_state, reward, done = self.replay_buffer.sample(BATCH_SIZE)
         B = state.size(0)
 
         features = self._get_features(state)
@@ -334,22 +333,16 @@ class SACContinuousAgent:
             target = reward + (1 - done) * GAMMA * target_q
 
         q1, q2 = self.critic(features, action)
-        td_error = torch.max((q1 - target).abs(), (q2 - target).abs()).detach()
 
-        critic_loss = (is_weights * (
+        critic_loss = (
             F.huber_loss(q1, target, reduction='none') +
             F.huber_loss(q2, target, reduction='none')
-        )).mean()
+        ).mean()
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
         self.critic_optimizer.step()
-
-        # === PER update ===
-        self.replay_buffer.update_priorities(
-            per_indices, td_error.squeeze(-1).cpu().numpy()
-        )
 
         # === Actor update ===
         new_action, log_prob = self.actor.sample(features)
@@ -382,8 +375,6 @@ class SACContinuousAgent:
 
     def on_episode_end(self):
         self.episode_count += 1
-        beta_progress = min(self.episode_count / 15000.0, 1.0)
-        self.beta = PER_BETA_START + (PER_BETA_END - PER_BETA_START) * beta_progress
 
     def _save_model(self):
         MODEL_PATH.mkdir(parents=True, exist_ok=True)
@@ -397,17 +388,15 @@ class SACContinuousAgent:
             'alpha_optimizer': self.alpha_optimizer.state_dict(),
             'total_steps': self.total_steps,
             'episode_count': self.episode_count,
-            'beta': self.beta,
         }, MODEL_PATH / 'optimizer_state.pth')
 
     def save_persistent(self):
         buf = self.replay_buffer
         if buf.size() == 0:
             return
-        if buf.size() <= SAVE_CAPACITY:
-            entries = buf.get_all_entries()
-        else:
-            entries = buf.get_top_entries(SAVE_CAPACITY)
+        entries = buf.get_all_entries()
+        if len(entries) > SAVE_CAPACITY:
+            entries = random.sample(entries, SAVE_CAPACITY)
 
         MODEL_PATH.mkdir(parents=True, exist_ok=True)
         torch.save({
@@ -469,10 +458,8 @@ class SACContinuousAgent:
                     self.alpha_optimizer.load_state_dict(state['alpha_optimizer'])
                 self.total_steps = state['total_steps']
                 self.episode_count = state.get('episode_count', 0)
-                if 'beta' in state:
-                    self.beta = state['beta']
                 print(f"[SAC] Loaded optimizer: steps={self.total_steps},"
-                      f" episodes={self.episode_count}, beta={self.beta:.4f}")
+                      f" episodes={self.episode_count}")
             except Exception as e:
                 print(f"[SAC] Failed to load optimizer: {e}")
 
@@ -481,7 +468,7 @@ class SACContinuousAgent:
             try:
                 state = torch.load(ts_path, map_location=device, weights_only=False)
                 entries = state.get('persistent_entries', [])
-                loaded = min(len(entries), PER_CAPACITY)
+                loaded = min(len(entries), BUFFER_CAPACITY)
                 for i in range(loaded):
                     e = entries[i]
                     self.replay_buffer.store(
