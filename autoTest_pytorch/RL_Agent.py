@@ -1895,12 +1895,22 @@ class DiffusionPolicyAgent:
         - Critic: DiffusionCritic (twin Q, evaluates (condition, action) pair)
     """
 
-    def __init__(self, grid_h=10, grid_w=10):
+    def __init__(self, grid_h=10, grid_w=10, frozen_backbone_path=None):
         self.grid_h = grid_h
         self.grid_w = grid_w
 
         # State encoder (shared backbone)
         self.backbone = TransformerActorNetwork(grid_h=grid_h, grid_w=grid_w).to(device)
+
+        # 載入 frozen backbone（從 DDQN 訓練好的權重）
+        self.backbone_frozen = False
+        if frozen_backbone_path is not None:
+            state_dict = torch.load(frozen_backbone_path, map_location=device)
+            self.backbone.load_state_dict(state_dict)
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+            self.backbone_frozen = True
+            print(f"[Diffusion] Loaded frozen backbone from {frozen_backbone_path}")
 
         # Diffusion denoiser (actor)
         self.denoiser = DiffusionMLPDenoiser(action_dim=2, condition_dim=64).to(device)
@@ -1913,11 +1923,12 @@ class DiffusionPolicyAgent:
         # Noise schedule
         self.schedule = DiffusionSchedule(T=DIFFUSION_T)
 
-        # Optimizers: actor (backbone + denoiser), critic (Q-head only)
-        self.actor_optimizer = optim.Adam(
-            list(self.backbone.parameters()) + list(self.denoiser.parameters()),
-            lr=LR_DDQN,
-        )
+        # Optimizers: backbone frozen 時只訓練 denoiser，否則 backbone + denoiser
+        if self.backbone_frozen:
+            actor_params = list(self.denoiser.parameters())
+        else:
+            actor_params = list(self.backbone.parameters()) + list(self.denoiser.parameters())
+        self.actor_optimizer = optim.Adam(actor_params, lr=LR_DDQN)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LR_CRITIC)
 
         # PER Replay buffer

@@ -32,6 +32,9 @@ MAX_STEPS_PER_EPISODE = 200
 LOG_INTERVAL = 50
 SAVE_INTERVAL = 300
 
+# ---------- Frozen backbone ----------
+FROZEN_BACKBONE_PATH = Path("./models/stage1_transformer/frozen_backbone.pth")
+
 # ---------- 評估參數 ----------
 EVAL_INTERVAL = 100
 EVAL_EPISODES = 50
@@ -295,7 +298,8 @@ def main():
     print()
 
     logic = MinesweeperLogic(rows=GRID_ROWS, cols=GRID_COLS, mines_count=GRID_MINES)
-    agent = DiffusionPolicyAgent(grid_h=GRID_ROWS, grid_w=GRID_COLS)
+    frozen_path = str(FROZEN_BACKBONE_PATH) if FROZEN_BACKBONE_PATH.exists() else None
+    agent = DiffusionPolicyAgent(grid_h=GRID_ROWS, grid_w=GRID_COLS, frozen_backbone_path=frozen_path)
 
     # TensorBoard
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
