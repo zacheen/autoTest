@@ -62,6 +62,7 @@ SAVE_INTERVAL = 500
 SAVE_CAPACITY = 5000
 
 FROZEN_BACKBONE_PATH = Path("./models/stage1_transformer/frozen_backbone.pth")
+FREEZE_BACKBONE = False    # True=鎖定 backbone 不更新, False=載入權重但繼續訓練
 MODEL_PATH = Path("./models/sac_continuous")
 TENSORBOARD_DIR = MODEL_PATH / "tb_logs"
 CSV_LOG_PATH = MODEL_PATH / "training_log.csv"
@@ -266,22 +267,27 @@ class SACContinuousAgent:
         atexit.register(self.save_persistent)
 
     def _load_frozen_backbone(self):
-        """載入並 freeze backbone。"""
+        """載入 pretrained backbone，根據 FREEZE_BACKBONE 決定是否鎖定。"""
         if FROZEN_BACKBONE_PATH.exists():
             state_dict = torch.load(FROZEN_BACKBONE_PATH, map_location=device)
             missing, unexpected = self.backbone.load_state_dict(state_dict, strict=False)
-            for param in self.backbone.parameters():
-                param.requires_grad = False
             transformer_missing = [k for k in missing if 'output_head' not in k]
             if transformer_missing:
                 print(f"[SAC] WARNING: Transformer weights missing: {transformer_missing}")
+
+            if FREEZE_BACKBONE:
+                for param in self.backbone.parameters():
+                    param.requires_grad = False
+                print(f"[SAC] Loaded & FROZEN backbone"
+                      f" (transformer: all loaded, output_head: {len(missing)} skipped)")
             else:
-                print(f"[SAC] Loaded & frozen backbone OK"
+                print(f"[SAC] Loaded backbone (trainable)"
                       f" (transformer: all loaded, output_head: {len(missing)} skipped)")
         else:
             print(f"[SAC] WARNING: {FROZEN_BACKBONE_PATH} not found, using random backbone")
-            for param in self.backbone.parameters():
-                param.requires_grad = False
+            if FREEZE_BACKBONE:
+                for param in self.backbone.parameters():
+                    param.requires_grad = False
 
     @torch.no_grad()
     def _get_features(self, state):
