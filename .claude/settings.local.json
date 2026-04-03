@@ -18,7 +18,9 @@
       "Bash(C:/Users/User/miniconda3/envs/py310_torch210_cuda118/python autoTest_pytorch/probe_diagnostic.py)",
       "Bash(C:/Users/User/miniconda3/envs/py310_torch210_cuda118/python autoTest_pytorch/probe_gradient.py)",
       "WebFetch(domain:github.com)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Read(//d/dont_move/git_save/all_autoTest/autoTest_clau/**)",
+      "Bash(\"C:/Users/User/.claude/plans/ancient-rolling-dream-agent-a4e1dbabdaa35692d.md\")"
     ]
   }
 }
