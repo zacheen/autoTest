@@ -33,23 +33,23 @@ class ScaledSigmoid(nn.Module):
 
 
 # Hyperparameters
-BATCH_SIZE = 128
-LR_ACTOR = 3e-4
-LR_CRITIC = 3e-4
-LR_ALPHA = 3e-4
+BATCH_SIZE = 256
+LR_ACTOR = 1e-4
+LR_CRITIC = 2e-4
+LR_ALPHA = 1e-4
 GAMMA = 0.9   # Minesweeper episodes are short (2-15 steps), don't need long-horizon discount
 TAU = 0.005
 INIT_ALPHA = 0.2
-TARGET_ENTROPY = -2.0  # = -action_dim (for continuous SAC)
+TARGET_ENTROPY = -1.8  # = -action_dim (for continuous SAC)
 DISCRETE_TARGET_ENTROPY = 0.8 * np.log(100)  # ≈ 3.7 (80% of max discrete entropy ln(100)=4.6)
 LR_ALPHA_DISCRETE = 1e-5  # 比 continuous 慢 30 倍，避免 alpha 降太快
 ALPHA_MAX = 0.3
 ALPHA_MIN = 0.15
-BUFFER_CAPACITY = 10000  # Runtime circular buffer per class (Stage1: ~24KB/entry, 10K = 240MB)
+BUFFER_CAPACITY = 50000  # Runtime circular buffer per class (Stage1: ~24KB/entry, 10K = 240MB)
 SAVE_CAPACITY = 2000    # Persistent save to disk (Stage1: ~4.8MB)
 SAVE_EVERY_N_EPISODES = 50
 TARGET_UPDATE_FREQ = 50   # Hard copy target network every N training steps (DDQN)
-LR_DDQN = 5e-5           # DDQN learning rate (lower than SAC for stability)
+LR_DDQN = 1e-5           # DDQN learning rate (lower than SAC for stability)
 IMAGE_SIZE = (640, 640)
 
 # YOLO11n layer indices (discovered via forward pass)
@@ -1804,10 +1804,10 @@ class TransformerDiscreteAgent:
         self.actor_optimizer = optim.Adam([
             {'params': backbone_params, 'lr': LR_DDQN * 0.1},
             {'params': head_params, 'lr': LR_DDQN},
-        ])
+        ], weight_decay=1e-5)
 
         # Critic optimizer: 只有 Q-head 參數（backbone 由 actor_optimizer 更新）
-        self.critic_optimizer = optim.Adam(self.q_network.parameters(), lr=LR_DDQN)
+        self.critic_optimizer = optim.Adam(self.q_network.parameters(), lr=LR_DDQN, weight_decay=1e-5)
 
         # PER Replay buffer
         self.replay_buffer = PERReplayBuffer(capacity=PER_CAPACITY, alpha=PER_ALPHA)
@@ -1917,8 +1917,8 @@ class TransformerDiscreteAgent:
         torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
         self.critic_optimizer.step()
 
-        # === Actor update (每 3 步更新 1 次，讓 Critic 先學穩) ===
-        if self.total_it % 3 != 0:
+        # === Actor update (前 5000 步只練 Critic，之後每 3 步更新 1 次) ===
+        if self.total_it < 5000 or self.total_it % 3 != 0:
             # 只更新 Critic，跳過 Actor
             self.replay_buffer.update_priorities(
                 per_indices, td_error.squeeze(-1).cpu().numpy()
