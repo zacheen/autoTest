@@ -299,6 +299,7 @@ def main():
 
     logic = MinesweeperLogic(rows=GRID_ROWS, cols=GRID_COLS, mines_count=GRID_MINES)
     # 如果有 pretrained backbone，載入加速訓練
+    # after frozen backbone the win rate increase
     frozen_path = Path("./models/stage1_transformer/frozen_backbone.pth")
     frozen = str(frozen_path) if frozen_path.exists() else None
     agent = TransformerDiscreteAgent(grid_h=GRID_ROWS, grid_w=GRID_COLS, frozen_backbone_path=frozen)
