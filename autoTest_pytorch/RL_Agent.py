@@ -1772,10 +1772,18 @@ class TransformerDiscreteAgent:
         self.backbone = TransformerActorNetwork(grid_h=grid_h, grid_w=grid_w).to(device)
 
         # 載入 pretrained backbone（從 DDQN 訓練好的權重）
+        self._frozen_backbone_loaded = False
         if frozen_backbone_path is not None:
             state_dict = torch.load(frozen_backbone_path, map_location=device)
-            self.backbone.load_state_dict(state_dict, strict=False)
-            print(f"[AC] Loaded pretrained backbone from {frozen_backbone_path}")
+            missing, unexpected = self.backbone.load_state_dict(state_dict, strict=False)
+            self._frozen_backbone_loaded = True
+            # 驗證：Transformer 層有載入（missing 應只有 output_head）
+            transformer_missing = [k for k in missing if 'output_head' not in k]
+            if transformer_missing:
+                print(f"[AC] WARNING: Transformer weights missing: {transformer_missing}")
+            else:
+                print(f"[AC] Loaded pretrained backbone OK "
+                      f"(transformer: all loaded, output_head: {len(missing)} skipped)")
 
         # Critic Q-head (Dueling 2D) + target
         self.q_network = DuelingQNetwork(grid_h=grid_h, grid_w=grid_w).to(device)
@@ -2047,18 +2055,22 @@ class TransformerDiscreteAgent:
         print(f"--- save end ---------------")
 
     def try_load_model(self):
-        backbone_path = TRANSFORMER_MODEL_PATH / 'backbone.pth'
-        if backbone_path.exists():
-            try:
-                missing, unexpected = self.backbone.load_state_dict(
-                    torch.load(backbone_path, map_location=device), strict=False
-                )
-                if missing or unexpected:
-                    print(f"[AC] Loaded Backbone (partial: {len(missing)} missing, {len(unexpected)} unexpected)")
-                else:
-                    print("[AC] Loaded Backbone")
-            except Exception as e:
-                print(f"[AC] Failed to load Backbone: {e}")
+        # Frozen backbone 已載入時跳過，避免被舊 checkpoint 覆蓋
+        if not self._frozen_backbone_loaded:
+            backbone_path = TRANSFORMER_MODEL_PATH / 'backbone.pth'
+            if backbone_path.exists():
+                try:
+                    missing, unexpected = self.backbone.load_state_dict(
+                        torch.load(backbone_path, map_location=device), strict=False
+                    )
+                    if missing or unexpected:
+                        print(f"[AC] Loaded Backbone (partial: {len(missing)} missing, {len(unexpected)} unexpected)")
+                    else:
+                        print("[AC] Loaded Backbone")
+                except Exception as e:
+                    print(f"[AC] Failed to load Backbone: {e}")
+        else:
+            print("[AC] Skipping backbone.pth (frozen backbone already loaded)")
 
         q_path = TRANSFORMER_MODEL_PATH / 'q_network.pth'
         if q_path.exists():
