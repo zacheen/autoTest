@@ -1796,8 +1796,15 @@ class TransformerDiscreteAgent:
         self.q_target = DuelingQNetwork(grid_h=grid_h, grid_w=grid_w).to(device)
         self.q_target.load_state_dict(self.q_network.state_dict())
 
-        # Actor optimizer: backbone 全部參數（包含 output_head）
-        self.actor_optimizer = optim.Adam(self.backbone.parameters(), lr=LR_DDQN)
+        # Actor optimizer: backbone 用低 LR（features 變化慢），output_head 用正常 LR
+        backbone_params = [p for n, p in self.backbone.named_parameters()
+                           if 'output_head' not in n and p.requires_grad]
+        head_params = [p for n, p in self.backbone.named_parameters()
+                       if 'output_head' in n and p.requires_grad]
+        self.actor_optimizer = optim.Adam([
+            {'params': backbone_params, 'lr': LR_DDQN * 0.1},
+            {'params': head_params, 'lr': LR_DDQN},
+        ])
 
         # Critic optimizer: 只有 Q-head 參數（backbone 由 actor_optimizer 更新）
         self.critic_optimizer = optim.Adam(self.q_network.parameters(), lr=LR_DDQN)
@@ -1910,7 +1917,21 @@ class TransformerDiscreteAgent:
         torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
         self.critic_optimizer.step()
 
-        # === Actor update ===
+        # === Actor update (每 3 步更新 1 次，讓 Critic 先學穩) ===
+        if self.total_it % 3 != 0:
+            # 只更新 Critic，跳過 Actor
+            self.replay_buffer.update_priorities(
+                per_indices, td_error.squeeze(-1).cpu().numpy()
+            )
+            if self.total_it % TARGET_UPDATE_FREQ == 0:
+                self.q_target.load_state_dict(self.q_network.state_dict())
+            return {
+                "loss": critic_loss.item(),
+                "actor_loss": 0.0,
+                "q_mean": q_taken.mean().item(),
+                "entropy": 0.0,
+            }
+
         probs, log_probs = self.backbone(state)  # (B, H*W)
 
         with torch.no_grad():
