@@ -13,6 +13,8 @@ Standard SAC with continuous (x, y) ∈ [0,1]² output + frozen Transformer back
 監控:
   tensorboard --logdir runs/sac_continuous/
 """
+import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 import sys
 import time
@@ -52,6 +54,7 @@ BATCH_SIZE = 256
 GAMMA = 0.9
 TAU = 0.005
 LR = 3e-4
+# Avg Reward:   -0.07 | α: 0.0932
 INIT_ALPHA = 0.2
 TARGET_ENTROPY = -2.0     # = -action_dim
 
