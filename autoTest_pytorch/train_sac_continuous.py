@@ -53,7 +53,10 @@ WARMUP_STEPS = 1000       # 前 N 步用 random action 填 buffer
 BATCH_SIZE = 256
 GAMMA = 0.9
 TAU = 0.005
-LR = 3e-4
+LR_ACTOR = 1e-4
+LR_CRITIC = 3e-4
+LR_ALPHA = 3e-5
+ACTOR_UPDATE_INTERVAL = 2
 # Avg Reward:   -0.07 | α: 0.0932
 INIT_ALPHA = 0.2
 TARGET_ENTROPY = -2.0     # = -action_dim
@@ -110,8 +113,8 @@ class ContinuousSACActor(nn.Module):
     再輸出 continuous action。
     """
 
-    LOG_STD_MIN = -20
-    LOG_STD_MAX = 2
+    LOG_STD_MIN = -5
+    LOG_STD_MAX = 0.5
 
     def __init__(self, d_model=64, action_dim=2, hidden_dim=256, nhead=4):
         super().__init__()
@@ -245,20 +248,20 @@ class SACContinuousAgent:
 
         # Actor (with cross-attention)
         self.actor = ContinuousSACActor(d_model=64).to(device)
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR_ACTOR)
 
         # Critic + target (with cross-attention)
         self.critic = ContinuousSACCritic(d_model=64).to(device)
         self.critic_target = ContinuousSACCritic(d_model=64).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LR)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LR_CRITIC)
 
         # Auto-alpha
         self.log_alpha = torch.tensor(
             np.log(INIT_ALPHA), dtype=torch.float32,
             requires_grad=True, device=device,
         )
-        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR)
+        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR_ALPHA)
         self.target_entropy = TARGET_ENTROPY
 
         # Replay buffer (per-class balanced sampling)
@@ -353,41 +356,47 @@ class SACContinuousAgent:
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
         self.critic_optimizer.step()
 
-        # === Actor update ===
-        new_action, log_prob = self.actor.sample(features)
-        q1_new, q2_new = self.critic(features, new_action)
-        min_q = torch.min(q1_new, q2_new)
-        actor_loss = (alpha * log_prob - min_q).mean()
+        actor_loss = None
+        entropy = None
+        actor_grad_norm = None
 
-        self.actor_optimizer.zero_grad()
-        actor_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
-        self.actor_optimizer.step()
+        # === Actor / alpha update (delayed) ===
+        if self.total_steps % ACTOR_UPDATE_INTERVAL == 0:
+            new_action, log_prob = self.actor.sample(features)
+            q1_new, q2_new = self.critic(features, new_action)
+            min_q = torch.min(q1_new, q2_new)
+            actor_loss = (alpha * log_prob - min_q).mean()
 
-        # === Alpha update ===
-        alpha_loss = -(self.log_alpha * (log_prob.detach() + self.target_entropy)).mean()
-        self.alpha_optimizer.zero_grad()
-        alpha_loss.backward()
-        self.alpha_optimizer.step()
+            self.actor_optimizer.zero_grad()
+            actor_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
+            self.actor_optimizer.step()
+
+            alpha_loss = -(self.log_alpha * (log_prob.detach() + self.target_entropy)).mean()
+            self.alpha_optimizer.zero_grad()
+            alpha_loss.backward()
+            self.alpha_optimizer.step()
+
+            actor_grad_norm = sum(
+                p.grad.norm().item() ** 2 for p in self.actor.parameters() if p.grad is not None
+            ) ** 0.5
+            entropy = -log_prob.mean().item()
 
         # === Soft target update ===
         for p, tp in zip(self.critic.parameters(), self.critic_target.parameters()):
             tp.data.copy_(TAU * p.data + (1 - TAU) * tp.data)
 
         # === Gradient norms (clip 前已算完，這裡讀 clip 後的值) ===
-        actor_grad_norm = sum(
-            p.grad.norm().item() ** 2 for p in self.actor.parameters() if p.grad is not None
-        ) ** 0.5
         critic_grad_norm = sum(
             p.grad.norm().item() ** 2 for p in self.critic.parameters() if p.grad is not None
         ) ** 0.5
 
         return {
             "critic_loss": critic_loss.item(),
-            "actor_loss": actor_loss.item(),
+            "actor_loss": actor_loss.item() if actor_loss is not None else None,
             "alpha": alpha.item(),
             "q_mean": torch.min(q1, q2).mean().item(),
-            "entropy": -log_prob.mean().item(),
+            "entropy": entropy,
             "actor_grad_norm": actor_grad_norm,
             "critic_grad_norm": critic_grad_norm,
         }
@@ -462,7 +471,7 @@ class SACContinuousAgent:
             try:
                 self.log_alpha = torch.load(alpha_path, map_location=device)
                 self.log_alpha.requires_grad_(True)
-                self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR)
+                self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR_ALPHA)
                 print(f"[SAC] Loaded alpha={self.log_alpha.exp().item():.4f}")
             except Exception as e:
                 print(f"[SAC] Failed to load alpha: {e}")
@@ -560,12 +569,20 @@ def run_episode(logic, agent, global_steps, add_noise=True):
     avg_critic_grad = None
     if train_info_list:
         avg_critic_loss = np.mean([t['critic_loss'] for t in train_info_list])
-        avg_actor_loss = np.mean([t['actor_loss'] for t in train_info_list])
         avg_q_mean = np.mean([t['q_mean'] for t in train_info_list])
         avg_alpha = np.mean([t['alpha'] for t in train_info_list])
-        avg_entropy = np.mean([t['entropy'] for t in train_info_list])
-        avg_actor_grad = np.mean([t['actor_grad_norm'] for t in train_info_list])
         avg_critic_grad = np.mean([t['critic_grad_norm'] for t in train_info_list])
+
+        actor_losses = [t['actor_loss'] for t in train_info_list if t['actor_loss'] is not None]
+        entropies = [t['entropy'] for t in train_info_list if t['entropy'] is not None]
+        actor_grads = [t['actor_grad_norm'] for t in train_info_list if t['actor_grad_norm'] is not None]
+
+        if actor_losses:
+            avg_actor_loss = np.mean(actor_losses)
+        if entropies:
+            avg_entropy = np.mean(entropies)
+        if actor_grads:
+            avg_actor_grad = np.mean(actor_grads)
 
     return {
         'reward': episode_reward,
@@ -660,12 +677,15 @@ def main():
             writer.add_scalar('train/episode_steps', stats['steps'], episode)
             if stats['critic_loss'] is not None:
                 writer.add_scalar('train/critic_loss', stats['critic_loss'], episode)
-                writer.add_scalar('train/actor_loss', stats['actor_loss'], episode)
                 writer.add_scalar('train/q_mean', stats['q_mean'], episode)
                 writer.add_scalar('train/alpha', stats['alpha'], episode)
-                writer.add_scalar('train/entropy', stats['entropy'], episode)
-                writer.add_scalar('grad/actor_norm', stats['actor_grad_norm'], episode)
                 writer.add_scalar('grad/critic_norm', stats['critic_grad_norm'], episode)
+            if stats['actor_loss'] is not None:
+                writer.add_scalar('train/actor_loss', stats['actor_loss'], episode)
+            if stats['entropy'] is not None:
+                writer.add_scalar('train/entropy', stats['entropy'], episode)
+            if stats['actor_grad_norm'] is not None:
+                writer.add_scalar('grad/actor_norm', stats['actor_grad_norm'], episode)
 
             # Weight histograms (每 100 episode 記錄一次，避免 log 太大)
             if episode % 100 == 0:
