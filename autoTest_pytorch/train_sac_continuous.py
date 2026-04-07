@@ -737,6 +737,7 @@ def main():
             # Save
             if episode % SAVE_INTERVAL == 0:
                 agent._save_model()
+                torch.cuda.empty_cache()  # 定期清理防止 CUDA memory 累積
 
         # Training complete
         print()
