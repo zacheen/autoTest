@@ -46,9 +46,9 @@ GRID_ROWS = 6
 GRID_COLS = 6
 GRID_MINES = 4
 
-MAX_EPISODES = 200000
+MAX_EPISODES = 400000
 MAX_STEPS_PER_EPISODE = 200
-WARMUP_STEPS = 1000       # 前 N 步用 random action 填 buffer
+WARMUP_STEPS = 200       # 前 N 步用 random action 填 buffer
 
 BATCH_SIZE = 256
 GAMMA = 0.9
@@ -245,7 +245,14 @@ class SACContinuousAgent:
 
         # Actor (with cross-attention)
         self.actor = ContinuousSACActor(d_model=64).to(device)
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR)
+        # Actor optimizer: backbone 用低 LR（如果 trainable），actor head 用正常 LR
+        if FREEZE_BACKBONE:
+            self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR)
+        else:
+            self.actor_optimizer = optim.Adam([
+                {'params': self.backbone.parameters(), 'lr': LR * 0.1},
+                {'params': self.actor.parameters(), 'lr': LR},
+            ])
 
         # Critic + target (with cross-attention)
         self.critic = ContinuousSACCritic(d_model=64).to(device)
@@ -292,10 +299,12 @@ class SACContinuousAgent:
                 for param in self.backbone.parameters():
                     param.requires_grad = False
 
-    @torch.no_grad()
     def _get_features(self, state):
-        """State → token features (B, N, 64) from frozen backbone."""
-        return self.backbone.get_features(state)  # (B, H*W, 64)
+        """State → token features (B, N, 64) from backbone."""
+        if FREEZE_BACKBONE:
+            with torch.no_grad():
+                return self.backbone.get_features(state)
+        return self.backbone.get_features(state)
 
     def select_action(self, state, deterministic=False):
         """Select continuous (x, y) action.
@@ -330,7 +339,6 @@ class SACContinuousAgent:
         state, action, next_state, reward, done = self.replay_buffer.sample(BATCH_SIZE)
         B = state.size(0)
 
-        features = self._get_features(state)
         next_features = self._get_features(next_state)
         alpha = self.log_alpha.exp().detach()
 
@@ -341,7 +349,8 @@ class SACContinuousAgent:
             target_q = torch.min(tq1, tq2) - alpha * next_log_prob
             target = reward + (1 - done) * GAMMA * target_q
 
-        q1, q2 = self.critic(features, action)
+        critic_features = self._get_features(state)
+        q1, q2 = self.critic(critic_features, action)
 
         critic_loss = (
             F.huber_loss(q1, target, reduction='none') +
@@ -354,8 +363,9 @@ class SACContinuousAgent:
         self.critic_optimizer.step()
 
         # === Actor update ===
-        new_action, log_prob = self.actor.sample(features)
-        q1_new, q2_new = self.critic(features, new_action)
+        actor_features = self._get_features(state)
+        new_action, log_prob = self.actor.sample(actor_features)
+        q1_new, q2_new = self.critic(actor_features, new_action)
         min_q = torch.min(q1_new, q2_new)
         actor_loss = (alpha * log_prob - min_q).mean()
 
@@ -397,6 +407,8 @@ class SACContinuousAgent:
 
     def _save_model(self):
         MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        if not FREEZE_BACKBONE:
+            torch.save(self.backbone.state_dict(), MODEL_PATH / 'backbone.pth')
         torch.save(self.actor.state_dict(), MODEL_PATH / 'actor.pth')
         torch.save(self.critic.state_dict(), MODEL_PATH / 'critic.pth')
         torch.save(self.critic_target.state_dict(), MODEL_PATH / 'critic_target.pth')
@@ -433,6 +445,17 @@ class SACContinuousAgent:
         print(f"--- save end ---------------")
 
     def try_load_model(self):
+        # Backbone (覆蓋 frozen_backbone.pth 為訓練過的版本)
+        backbone_path = MODEL_PATH / 'backbone.pth'
+        if backbone_path.exists() and not FREEZE_BACKBONE:
+            try:
+                self.backbone.load_state_dict(
+                    torch.load(backbone_path, map_location=device), strict=False
+                )
+                print("[SAC] Loaded trained backbone (overrides frozen)")
+            except Exception as e:
+                print(f"[SAC] Failed to load backbone: {e}")
+
         actor_path = MODEL_PATH / 'actor.pth'
         if actor_path.exists():
             try:
@@ -471,14 +494,41 @@ class SACContinuousAgent:
         if opt_path.exists():
             try:
                 state = torch.load(opt_path, map_location=device, weights_only=False)
-                self.actor_optimizer.load_state_dict(state['actor_optimizer'])
-                self.critic_optimizer.load_state_dict(state['critic_optimizer'])
-                if 'alpha_optimizer' in state:
-                    self.alpha_optimizer.load_state_dict(state['alpha_optimizer'])
-                self.total_steps = state['total_steps']
-                self.episode_count = state.get('episode_count', 0)
-                print(f"[SAC] Loaded optimizer: steps={self.total_steps},"
-                      f" episodes={self.episode_count}")
+                self.total_steps = state.get('total_steps', self.total_steps)
+                self.episode_count = state.get('episode_count', self.episode_count)
+
+                loaded_optimizers = []
+
+                actor_opt_state = state.get('actor_optimizer')
+                if actor_opt_state is not None:
+                    try:
+                        self.actor_optimizer.load_state_dict(actor_opt_state)
+                        loaded_optimizers.append('actor')
+                    except Exception as e:
+                        print(f"[SAC] Skipped actor optimizer: {e}")
+
+                critic_opt_state = state.get('critic_optimizer')
+                if critic_opt_state is not None:
+                    try:
+                        self.critic_optimizer.load_state_dict(critic_opt_state)
+                        loaded_optimizers.append('critic')
+                    except Exception as e:
+                        print(f"[SAC] Skipped critic optimizer: {e}")
+
+                alpha_opt_state = state.get('alpha_optimizer')
+                if alpha_opt_state is not None:
+                    try:
+                        self.alpha_optimizer.load_state_dict(alpha_opt_state)
+                        loaded_optimizers.append('alpha')
+                    except Exception as e:
+                        print(f"[SAC] Skipped alpha optimizer: {e}")
+
+                if loaded_optimizers:
+                    print(f"[SAC] Loaded optimizer state: {', '.join(loaded_optimizers)}"
+                          f" | steps={self.total_steps}, episodes={self.episode_count}")
+                else:
+                    print(f"[SAC] Optimizer state incompatible; loaded weights only"
+                          f" | steps={self.total_steps}, episodes={self.episode_count}")
             except Exception as e:
                 print(f"[SAC] Failed to load optimizer: {e}")
 
