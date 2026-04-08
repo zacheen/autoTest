@@ -691,8 +691,12 @@ def main():
             if episode % 100 == 0:
                 for name, param in agent.actor.named_parameters():
                     writer.add_histogram(f'actor_weights/{name}', param.data, episode)
+                    if param.grad is not None:
+                        writer.add_histogram(f'actor_grads/{name}', param.grad, episode)
                 for name, param in agent.critic.named_parameters():
                     writer.add_histogram(f'critic_weights/{name}', param.data, episode)
+                    if param.grad is not None:
+                        writer.add_histogram(f'critic_grads/{name}', param.grad, episode)
 
             # CSV
             csv_row = {
