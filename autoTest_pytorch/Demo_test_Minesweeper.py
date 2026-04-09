@@ -27,9 +27,12 @@ def check_pause():
 import HTMLTestRun
 import Tool_Main
 from Gf_Except import Game_fail_Exception
+from Minesweeper_web_client import MinesweeperWebClient
 
 from Minesweeper.Minesweeper_manager import Minesweeper_manager
 from RL_Agent import get_agent
+
+WEB_API = MinesweeperWebClient(default_difficulty="Training 6x6")
 
 class Minesweeper_Begin_thread (Thread):
     def __init__(self) :
@@ -185,7 +188,7 @@ class Game_test_case(unittest.TestCase) :
             row, col = game_status.agent.action_to_grid(action)
             print(f"Step {game_status.step_count}: action={action} -> ({row},{col}) -> ", end="")
 
-            if game_status.agent.execute_action(action):
+            if WEB_API.click_cell(row, col):
                 game_status.agent.log_action_image(
                     current_screenshot, 
                     log_info, 
@@ -362,7 +365,7 @@ class Game_test_case(unittest.TestCase) :
                 break
 
             if Tool_Main.compare_sim("new_game",sys._getframe().f_code.co_name, precise = False) >= 0.97 : 
-                if get_agent().start_new_game_via_api():
+                if WEB_API.start_new_game():
                     break
     # 進入遊戲之後 用例增加區↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
 
