@@ -123,7 +123,7 @@ class Game_test_case(unittest.TestCase) :
                 self.assertTrue(False,"time_out")
                 break
             
-            if Tool_Main.compare_sim("level_beginner",sys._getframe().f_code.co_name) > 0.97 :
+            if Tool_Main.compare_sim("level_training",sys._getframe().f_code.co_name) > 0.97 :
             # if Tool_Main.compare_sim("roomLV1",sys._getframe().f_code.co_name) > 0.97 :
                 Tool_Main.click_mid("點擊房間")
                 break
@@ -150,7 +150,7 @@ class Game_test_case(unittest.TestCase) :
                 self.assertTrue(False,"time_out")
                 break
             
-            if Tool_Main.compare_sim("init_grid",sys._getframe().f_code.co_name) > 0.97 :
+            if Tool_Main.compare_sim("new_game",sys._getframe().f_code.co_name) > 0.97 :
             # if Tool_Main.compare_sim("grab_none",sys._getframe().f_code.co_name) > 0.97 :
                 Minesweeper_Begin_thread().start()
                 break
@@ -362,10 +362,10 @@ class Game_test_case(unittest.TestCase) :
     # 進入遊戲之後 用例增加區↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
 
 
-Game_envi = "Minesweeper_local_py"
+Game_envi = "Minesweeper_web"
 Tool_Main.Game_envi = Game_envi
 
-game_name = "Minesweeper"
+game_name = "Minesweeper_web"
 player_num = 1
 # 初始化全部遊戲都會用到的參數
 
@@ -392,7 +392,11 @@ if __name__=="__main__" :
     if Game_envi == "Minesweeper_local_py" :
         game_only_var.mine = Minesweeper_manager()
         game_only_var.mine.thread_start()
-        print("open the Minesweeper successfully")
+        print("now in Minesweeper_local_py successfully")
+    elif Game_envi == "Minesweeper_web" :
+        Tool_Main.open_game_web()
+        Tool_Main.login_plat()
+        print("now in Minesweeper_web successfully")
     else :
         print("打開遊戲網頁")
         Tool_Main.open_game_web()
@@ -451,11 +455,18 @@ if __name__=="__main__" :
         sleep_time = 3
         if Tool_Main.glo_var.fail_playing :
             Tool_Main.report_error(round_count)
-            game_only_var.mine.thread_stop()
+            if Game_envi == "Minesweeper_local_py" :
+                game_only_var.mine.thread_stop()
+            elif Game_envi == "Minesweeper_web" :
+                Tool_Main.close_game_web()
             Tool_Main.print_to_output("fail_playing 等待 "+str(sleep_time)+" 秒")
             time.sleep(sleep_time)
             Tool_Main.print_to_output("重新啟動")
-            game_only_var.mine.thread_start()
+            if Game_envi == "Minesweeper_local_py" :
+                game_only_var.mine.thread_start()
+            elif Game_envi == "Minesweeper_web" :
+                Tool_Main.open_game_web()
+                Tool_Main.login_plat()
             Tool_Main.glo_var.reset_var(round_count+1)
             continue
             

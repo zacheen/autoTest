@@ -21,9 +21,11 @@ import datetime
 import traceback
 
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.common.action_chains import ActionChains
+
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 
 import HTMLTestRun
@@ -36,7 +38,7 @@ import Data
 # use_sel : 
     # 0 - using mouse to click (pyautogui) : position is screen position
     # 1 - using selenium to click : position is web page position
-use_sel = 0
+use_sel = 1
 # ----------------------------------------------------------
 
 Game_envi = None
@@ -252,19 +254,21 @@ class Glo_var():
 # 打開遊戲網頁到平台登入頁面
 def open_game_web() :
     global glo_var
-    webdriver_path = Path(glo_var.user_change_path) / 'chromedriver.exe'
-    options = Options()
+
+    options = webdriver.ChromeOptions()
     # options.headless = True #Headless Browser是没有沒有圖形介面(GUI)的web瀏覽視窗
     options.add_argument("--window-size=1960,1080")
     options.add_argument('disable-infobars')
-    options.add_experimental_option('useAutomationExtension', False)
-    options.add_experimental_option('excludeSwitches', ['enable-automation'])
+    # options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    # options.add_experimental_option("useAutomationExtension", False)
     prefs = {"":""}
     prefs["credentials_enable_service"] = False
     prefs["profile.password_manager_enabled"] = False
     options.add_experimental_option("prefs", prefs)
     # 設定瀏覽器設定值為不出現此瀏覽器正透過自動化視窗控制
-    glo_var.game_driver = webdriver.Chrome(executable_path=str(webdriver_path), options=options) #透過設定值開啟瀏覽器
+    options = webdriver.ChromeOptions()
+    service = Service(ChromeDriverManager().install())
+    glo_var.game_driver = webdriver.Chrome(service=service, options=options)
     glo_var.game_driver.maximize_window() #全螢幕
 
     # 記得這邊一定要用 pyautogui.click
@@ -296,6 +300,8 @@ def login_plat() :
         # ???網址
         glo_var.game_driver.get("https://h5bt.cqgame.games/h5/BT02/?language=zh-cn&?token=guest")
         # 要開到遊戲頁面
+    elif Game_envi == "Minesweeper_web" :
+        glo_var.game_driver.get("http://127.0.0.1:8000")
     else :
         print("Game_envi error")
 
