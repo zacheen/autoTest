@@ -181,11 +181,11 @@ class Game_test_case(unittest.TestCase) :
             game_status.update_state(current_screenshot, action)
             game_status.log_info = log_info
         
-            # 4. 轉換為螢幕座標並點擊
-            click_x, click_y = game_status.agent.action_to_screen_coords(action)
-            print(f"Step {game_status.step_count}: action=({action[0]:.3f}, {action[1]:.3f}) -> ", end="")
-            
-            if Tool_Main.click((click_x, click_y), limit_region=game_status.game_region):
+            # 4. 將 36-class action 透過 API 打到網頁版遊戲
+            row, col = game_status.agent.action_to_grid(action)
+            print(f"Step {game_status.step_count}: action={action} -> ({row},{col}) -> ", end="")
+
+            if game_status.agent.execute_action(action):
                 game_status.agent.log_action_image(
                     current_screenshot, 
                     log_info, 
@@ -342,7 +342,7 @@ class Game_test_case(unittest.TestCase) :
                 #         print("等待剩餘時間 : " + str(total_wait_time-x))
                 #     time.sleep(1)
                 # KPSZNN_End_thread().start() # I need to lock here (after screen shot then I can click)
-                Tool_Main.click_mid("關閉確認")
+                # Tool_Main.click_mid("關閉確認") # website version don't have confirm button
                 Tool_Main.glo_var.end_time[Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len] = str(datetime.datetime.now().strftime(Tool_Main.format_for_db_time))
                 Tool_Main.print_to_output("此局結束時間 : " + Tool_Main.glo_var.end_time[Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len])
                 break
@@ -357,8 +357,8 @@ class Game_test_case(unittest.TestCase) :
                 break
 
             if Tool_Main.compare_sim("new_game",sys._getframe().f_code.co_name, precise = False) >= 0.97 : 
-                Tool_Main.click_mid("新遊戲")
-                break
+                if get_agent().start_new_game_via_api():
+                    break
     # 進入遊戲之後 用例增加區↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
 
 
@@ -458,7 +458,7 @@ if __name__=="__main__" :
             if Game_envi == "Minesweeper_local_py" :
                 game_only_var.mine.thread_stop()
             elif Game_envi == "Minesweeper_web" :
-                Tool_Main.close_game_web()
+                Tool_Main.glo_var.game_driver.quit()
             Tool_Main.print_to_output("fail_playing 等待 "+str(sleep_time)+" 秒")
             time.sleep(sleep_time)
             Tool_Main.print_to_output("重新啟動")

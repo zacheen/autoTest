@@ -7,6 +7,7 @@ import numpy as np
 import cv2
 import os
 import random
+import hashlib
 import shutil
 from collections import defaultdict, deque
 from PIL import Image
@@ -52,6 +53,23 @@ TARGET_UPDATE_FREQ = 50   # Hard copy target network every N training steps (DDQ
 LR_DDQN = 5e-5           # DDQN learning rate (lower than SAC for stability)
 IMAGE_SIZE = (640, 640)
 
+# Visual DDQN (YOLO -> Transformer -> 36-class)
+VISUAL_GRID_H = 6
+VISUAL_GRID_W = 6
+VISUAL_NUM_ACTIONS = VISUAL_GRID_H * VISUAL_GRID_W
+VISUAL_BATCH_SIZE = 2
+VISUAL_D_MODEL = 128
+VISUAL_NHEAD = 4
+VISUAL_BACKBONE_LAYERS = 2
+VISUAL_POLICY_LAYERS = 2
+VISUAL_FF_DIM = 256
+VISUAL_DROPOUT = 0.1
+VISUAL_HEAD_HIDDEN = 128
+LR_VISUAL_YOLO = 1e-5
+LR_VISUAL_POLICY = 5e-5
+VISUAL_BUFFER_CAPACITY = 512
+VISUAL_SAVE_CAPACITY = 128
+
 # YOLO11n layer indices (discovered via forward pass)
 # Layer 4: C3k2, output 128ch x 80x80 (mid-layer, spatial detail)
 # Layer 6: C3k2, output 128ch x 40x40 (last backbone layer, semantic)
@@ -60,6 +78,7 @@ YOLO_LAST_LAYER_IDX = 6
 YOLO_MID_CHANNELS = 128
 YOLO_LAST_CHANNELS = 128
 FUSED_CHANNELS = YOLO_MID_CHANNELS + YOLO_LAST_CHANNELS  # 256
+YOLO_LAST_FEATURE_SIZE = 40
 
 # Stage 1 預訓練參數
 GRID_STATE_CHANNELS = 12  # one-hot channel 數量 (MinesweeperLogic.NUM_CHANNELS)
@@ -70,6 +89,9 @@ ACTION_LOG_PATH = Path("./models/action_logs")
 REPLAY_SAVE_PATH = Path("./models/replay_buffer")
 REPLAY_PERSISTENT_PATH = Path("./models/replay_buffer_save")
 MODEL_SAVE_PATH = Path("./models")
+VISUAL_MODEL_PATH = Path("./models/visual_transformer_6x6")
+VISUAL_REPLAY_PATH = VISUAL_MODEL_PATH / "replay_buffer"
+VISUAL_REPLAY_PERSISTENT_PATH = VISUAL_MODEL_PATH / "replay_buffer_save"
 
 # Stage 1 paths
 STAGE1_MODEL_PATH = Path("./models/stage1")
@@ -2655,16 +2677,756 @@ class SACAgent:
         print(f"Action log saved: {filename}")
 
 
+class YOLO11nLastFeatureExtractor(nn.Module):
+    """Return the last YOLO11n backbone feature map (40x40)."""
+
+    def __init__(self, model_path='yolo11n.pt'):
+        super().__init__()
+        yolo = YOLO(model_path)
+        self.backbone_layers = nn.ModuleList(
+            yolo.model.model[idx] for idx in range(YOLO_LAST_LAYER_IDX + 1)
+        )
+        self._verify_shapes()
+
+    def forward(self, x):
+        for layer in self.backbone_layers:
+            x = layer(x)
+        return x
+
+    def _verify_shapes(self):
+        dummy = torch.randn(1, 3, *IMAGE_SIZE)
+        with torch.no_grad():
+            features = self.forward(dummy)
+
+        _, channels, height, width = features.shape
+        assert channels == YOLO_LAST_CHANNELS, (
+            f"Expected {YOLO_LAST_CHANNELS} channels, got {channels}"
+        )
+        assert height == YOLO_LAST_FEATURE_SIZE and width == YOLO_LAST_FEATURE_SIZE, (
+            f"Expected {YOLO_LAST_FEATURE_SIZE}x{YOLO_LAST_FEATURE_SIZE}, got {height}x{width}"
+        )
+
+
+class VisualDiscreteQNetwork(nn.Module):
+    """YOLO last features -> understanding backbone -> policy backbone -> 36 logits."""
+
+    def __init__(
+        self,
+        grid_h=VISUAL_GRID_H,
+        grid_w=VISUAL_GRID_W,
+        d_model=VISUAL_D_MODEL,
+        nhead=VISUAL_NHEAD,
+        backbone_layers=VISUAL_BACKBONE_LAYERS,
+        policy_layers=VISUAL_POLICY_LAYERS,
+        dim_feedforward=VISUAL_FF_DIM,
+        dropout=VISUAL_DROPOUT,
+        head_hidden=VISUAL_HEAD_HIDDEN,
+    ):
+        super().__init__()
+        self.grid_h = grid_h
+        self.grid_w = grid_w
+        self.feature_h = YOLO_LAST_FEATURE_SIZE
+        self.feature_w = YOLO_LAST_FEATURE_SIZE
+        self.d_model = d_model
+
+        self.feature_extractor = YOLO11nLastFeatureExtractor()
+        self.input_proj = nn.Conv2d(YOLO_LAST_CHANNELS, d_model, kernel_size=1)
+        self.input_fc = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+        )
+
+        backbone_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+        )
+        self.backbone_transformer = nn.TransformerEncoder(backbone_layer, num_layers=backbone_layers)
+
+        self.policy_fc = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+        )
+
+        policy_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+        )
+        self.policy_transformer = nn.TransformerEncoder(policy_layer, num_layers=policy_layers)
+        self.output_norm = nn.LayerNorm(d_model)
+
+        self.row_embed = nn.Embedding(self.feature_h, d_model // 2)
+        self.col_embed = nn.Embedding(self.feature_w, d_model // 2)
+        rows = torch.arange(self.feature_h).unsqueeze(1).expand(self.feature_h, self.feature_w).reshape(-1)
+        cols = torch.arange(self.feature_w).unsqueeze(0).expand(self.feature_h, self.feature_w).reshape(-1)
+        self.register_buffer('row_indices', rows)
+        self.register_buffer('col_indices', cols)
+
+        self.cell_pool = nn.AdaptiveAvgPool2d((grid_h, grid_w))
+        self.cell_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, head_hidden),
+            nn.GELU(),
+            nn.Linear(head_hidden, 1),
+        )
+
+    def get_spatial_tokens(self, state):
+        features = self.feature_extractor(state)
+        x = self.input_proj(features)
+        batch_size = x.size(0)
+        tokens = x.flatten(2).transpose(1, 2)
+
+        pos = torch.cat([
+            self.row_embed(self.row_indices),
+            self.col_embed(self.col_indices),
+        ], dim=-1)
+        tokens = tokens + pos.unsqueeze(0)
+        tokens = self.input_fc(tokens)
+        tokens = self.backbone_transformer(tokens)
+        tokens = self.policy_fc(tokens)
+        tokens = self.policy_transformer(tokens)
+        tokens = self.output_norm(tokens)
+        return tokens.reshape(batch_size, self.feature_h, self.feature_w, self.d_model)
+
+    def get_cell_embeddings(self, state):
+        tokens_2d = self.get_spatial_tokens(state)
+        spatial = tokens_2d.permute(0, 3, 1, 2)
+        pooled = self.cell_pool(spatial)
+        return pooled.flatten(2).transpose(1, 2)
+
+    def forward(self, state):
+        cell_embeddings = self.get_cell_embeddings(state)
+        logits = self.cell_head(cell_embeddings).squeeze(-1)
+        return logits
+
+
+class VisualReplayBuffer:
+    """Disk-backed replay buffer specialized for screenshot tensors."""
+
+    def __init__(self, max_size=VISUAL_BUFFER_CAPACITY, save_dir=VISUAL_REPLAY_PATH):
+        self.max_size = max_size
+        self.save_dir = Path(save_dir)
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.ptr = 0
+        self.size_count = 0
+        self.index = []
+
+    def _save_image_tensor(self, tensor, path):
+        uint8_tensor = tensor.detach().cpu().clamp(0, 1).mul(255).to(torch.uint8)
+        torch.save(uint8_tensor, path)
+
+    def _load_image_tensor(self, path):
+        return torch.load(path).float() / 255.0
+
+    def store(self, state_tensor, action, next_state_tensor, reward, done):
+        idx = self.ptr
+        state_path = self.save_dir / f"state_{idx}.pt"
+        self._save_image_tensor(state_tensor, state_path)
+
+        next_state_path = None
+        if next_state_tensor is not None:
+            next_state_path = self.save_dir / f"next_state_{idx}.pt"
+            self._save_image_tensor(next_state_tensor, next_state_path)
+
+        entry = {
+            'state_path': str(state_path),
+            'action': int(action),
+            'next_state_path': str(next_state_path) if next_state_path else None,
+            'reward': float(reward),
+            'done': bool(done),
+        }
+
+        if len(self.index) < self.max_size:
+            self.index.append(entry)
+        else:
+            self.index[self.ptr] = entry
+
+        self.ptr = (self.ptr + 1) % self.max_size
+        self.size_count = min(self.size_count + 1, self.max_size)
+
+    def sample(self, batch_size):
+        indices = np.random.randint(0, self.size_count, size=batch_size)
+
+        states, actions, next_states, rewards, dones = [], [], [], [], []
+        for idx in indices:
+            entry = self.index[idx]
+            states.append(self._load_image_tensor(entry['state_path']))
+            actions.append(entry['action'])
+
+            if entry['next_state_path']:
+                next_states.append(self._load_image_tensor(entry['next_state_path']))
+            else:
+                next_states.append(torch.zeros(3, *IMAGE_SIZE))
+
+            rewards.append(entry['reward'])
+            dones.append(float(entry['done']))
+
+        return (
+            torch.stack(states).to(device),
+            torch.tensor(actions, dtype=torch.long, device=device),
+            torch.stack(next_states).to(device),
+            torch.tensor(rewards, dtype=torch.float32, device=device).unsqueeze(1),
+            torch.tensor(dones, dtype=torch.float32, device=device).unsqueeze(1),
+        )
+
+    def size(self):
+        return self.size_count
+
+
+class VisualDiscreteAgent:
+    """Visual DDQN agent: screenshot -> YOLO tokens -> transformers -> 36-class click."""
+
+    def __init__(self, screen_region):
+        self.screen_region = screen_region
+        self.grid_h = VISUAL_GRID_H
+        self.grid_w = VISUAL_GRID_W
+        self.num_actions = VISUAL_NUM_ACTIONS
+
+        self.q_network = VisualDiscreteQNetwork(grid_h=self.grid_h, grid_w=self.grid_w).to(device)
+        self.q_target = VisualDiscreteQNetwork(grid_h=self.grid_h, grid_w=self.grid_w).to(device)
+        self.q_target.load_state_dict(self.q_network.state_dict())
+        self.q_target.eval()
+
+        yolo_param_ids = {id(param) for param in self.q_network.feature_extractor.parameters()}
+        policy_params = [param for param in self.q_network.parameters() if id(param) not in yolo_param_ids]
+        self.optimizer = optim.AdamW([
+            {'params': self.q_network.feature_extractor.parameters(), 'lr': LR_VISUAL_YOLO},
+            {'params': policy_params, 'lr': LR_VISUAL_POLICY},
+        ])
+        self.scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
+
+        self.replay_buffer = VisualReplayBuffer()
+        self.total_it = 0
+        self.episode_count = 0
+        self.epsilon = 0.30
+        self.epsilon_min = 0.05
+        self.epsilon_decay_episodes = 5000
+        self.blocked_actions_by_state = {}
+        self.max_blocked_state_entries = 256
+
+        self.transform = transforms.Compose([
+            transforms.Resize(IMAGE_SIZE),
+            transforms.ToTensor(),
+        ])
+
+        VISUAL_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        self._io_log = open(VISUAL_MODEL_PATH / 'train_io_log.txt', 'a', encoding='utf-8')
+        self._io_log.write(f"\n{'='*60}\n")
+        self._io_log.write(f"Session started: {datetime.datetime.now().isoformat()}\n")
+        self._io_log.write(f"{'='*60}\n")
+        self._io_log.flush()
+
+        self.try_load_model()
+        atexit.register(self.save_persistent)
+        atexit.register(self._close_io_log)
+
+    def preprocess_screen(self, screenshot_path):
+        try:
+            image = Image.open(screenshot_path).convert('RGB')
+            return self.transform(image)
+        except Exception as e:
+            print(f"[VisualDDQN] Error preprocessing screen: {e}")
+            return torch.zeros((3, *IMAGE_SIZE))
+
+    def action_to_grid(self, action_id):
+        row = int(action_id) // self.grid_w
+        col = int(action_id) % self.grid_w
+        return row, col
+
+    def action_to_screen_coords(self, action_id):
+        row, col = self.action_to_grid(action_id)
+        x, y, width, height = self.screen_region
+        cell_w = width / self.grid_w
+        cell_h = height / self.grid_h
+        return int(x + (col + 0.5) * cell_w), int(y + (row + 0.5) * cell_h)
+
+    def _state_key(self, state):
+        state_uint8 = state.detach().cpu().clamp(0, 1).mul(255).to(torch.uint8).numpy()
+        return hashlib.sha1(state_uint8.tobytes()).hexdigest()
+
+    def block_action_for_state(self, state, action_id):
+        state_key = self._state_key(state)
+        blocked = self.blocked_actions_by_state.setdefault(state_key, set())
+        blocked.add(int(action_id))
+
+        while len(self.blocked_actions_by_state) > self.max_blocked_state_entries:
+            self.blocked_actions_by_state.pop(next(iter(self.blocked_actions_by_state)))
+
+        row, col = self.action_to_grid(action_id)
+        print(f"[VisualDDQN] Block invalid action {action_id} -> ({row},{col}) for current state")
+
+    def select_action(self, state, add_noise=True):
+        state_key = self._state_key(state)
+        blocked_actions = self.blocked_actions_by_state.get(state_key, set())
+        available_actions = [idx for idx in range(self.num_actions) if idx not in blocked_actions]
+
+        if not available_actions:
+            self.blocked_actions_by_state.pop(state_key, None)
+            blocked_actions = set()
+            available_actions = list(range(self.num_actions))
+
+        if add_noise and random.random() < self.epsilon:
+            action_id = random.choice(available_actions)
+            row, col = self.action_to_grid(action_id)
+            return action_id, {
+                'action_id': action_id,
+                'row': row,
+                'col': col,
+                'selected_q': None,
+                'top_actions': [],
+                'source': 'epsilon',
+                'blocked_actions': sorted(blocked_actions),
+            }
+
+        state_batch = state.unsqueeze(0).to(device)
+        self.q_network.eval()
+        with torch.no_grad():
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
+                q_logits = self.q_network(state_batch).squeeze(0)
+            masked_logits = q_logits.clone()
+            if blocked_actions:
+                blocked_idx = torch.tensor(sorted(blocked_actions), dtype=torch.long, device=masked_logits.device)
+                masked_logits[blocked_idx] = float('-inf')
+
+            action_id = int(masked_logits.argmax().item())
+            topk = min(5, len(available_actions))
+            top_vals, top_idx = torch.topk(masked_logits, k=topk)
+        self.q_network.train()
+
+        row, col = self.action_to_grid(action_id)
+        top_actions = []
+        for value, idx in zip(top_vals.tolist(), top_idx.tolist()):
+            top_row, top_col = self.action_to_grid(idx)
+            top_actions.append((idx, top_row, top_col, float(value)))
+
+        return action_id, {
+            'action_id': action_id,
+            'row': row,
+            'col': col,
+            'selected_q': float(q_logits[action_id].item()),
+            'top_actions': top_actions,
+            'source': 'greedy',
+            'blocked_actions': sorted(blocked_actions),
+        }
+
+    def execute_action(self, action_id):
+        row, col = self.action_to_grid(action_id)
+
+        try:
+            import Tool_Main
+
+            driver = getattr(Tool_Main.glo_var, 'game_driver', None)
+            if driver is None:
+                print("[VisualDDQN] Browser driver not ready")
+                return False
+
+            result = driver.execute_async_script(
+                """
+                const row = arguments[0];
+                const col = arguments[1];
+                const done = arguments[arguments.length - 1];
+                let gameId = window.localStorage.getItem('minesweeper-web-game-id');
+
+                const ensureGame = gameId
+                    ? Promise.resolve(gameId)
+                    : fetch('/api/games', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({difficulty: 'Training 6x6'}),
+                    })
+                        .then(resp => resp.json())
+                        .then(data => {
+                            if (!data.game_id) {
+                                throw new Error('Failed to create Training 6x6 game');
+                            }
+                            window.localStorage.setItem('minesweeper-web-game-id', data.game_id);
+                            return data.game_id;
+                        });
+
+                ensureGame
+                    .then(id => fetch(`/api/games/${id}/click`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({row, col}),
+                    }))
+                    .then(resp => resp.json())
+                    .then(data => {
+                        if (data.error) {
+                            throw new Error(data.error);
+                        }
+                        done({ok: true, data});
+                    })
+                    .catch(err => done({ok: false, error: String(err)}));
+                """,
+                row,
+                col,
+            )
+
+            if result and result.get('ok'):
+                driver.refresh()
+                return True
+
+            print(f"[VisualDDQN] API click failed: {result}")
+            return False
+        except Exception as e:
+            print(f"[VisualDDQN] API click exception: {e}")
+            return False
+
+    def start_new_game_via_api(self, difficulty='Training 6x6'):
+        try:
+            import Tool_Main
+
+            driver = getattr(Tool_Main.glo_var, 'game_driver', None)
+            if driver is None:
+                print("[VisualDDQN] Browser driver not ready for new game")
+                return False
+
+            result = driver.execute_async_script(
+                """
+                const difficulty = arguments[0];
+                const done = arguments[arguments.length - 1];
+
+                fetch('/api/games', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({difficulty}),
+                })
+                    .then(resp => resp.json())
+                    .then(data => {
+                        if (!data.game_id) {
+                            throw new Error('Failed to create new game');
+                        }
+                        window.localStorage.setItem('minesweeper-web-game-id', data.game_id);
+                        done({ok: true, data});
+                    })
+                    .catch(err => done({ok: false, error: String(err)}));
+                """,
+                difficulty,
+            )
+
+            if result and result.get('ok'):
+                driver.refresh()
+                return True
+
+            print(f"[VisualDDQN] New game API failed: {result}")
+            return False
+        except Exception as e:
+            print(f"[VisualDDQN] New game API exception: {e}")
+            return False
+
+    def store_transition(self, state, action, next_state, reward, done):
+        self.replay_buffer.store(state.cpu(), int(action), next_state.cpu() if next_state is not None else None, reward, done)
+
+    def train_step(self):
+        if self.replay_buffer.size() < VISUAL_BATCH_SIZE:
+            return None
+
+        self.total_it += 1
+        state, action, next_state, reward, done = self.replay_buffer.sample(VISUAL_BATCH_SIZE)
+
+        with torch.no_grad():
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
+                next_online_q = self.q_network(next_state)
+                next_best_action = next_online_q.argmax(dim=1, keepdim=True)
+                next_target_q = self.q_target(next_state).gather(1, next_best_action)
+                target = reward + (1 - done) * GAMMA * next_target_q
+
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
+            q_logits = self.q_network(state)
+            q_taken = q_logits.gather(1, action.unsqueeze(1))
+            loss = F.smooth_l1_loss(q_taken, target)
+
+        self.optimizer.zero_grad(set_to_none=True)
+        self.scaler.scale(loss).backward()
+        self.scaler.unscale_(self.optimizer)
+        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+
+        if self.total_it % TARGET_UPDATE_FREQ == 0:
+            self.q_target.load_state_dict(self.q_network.state_dict())
+            self.q_target.eval()
+
+        with torch.no_grad():
+            q_mean = q_taken.mean().item()
+            q0 = q_logits[0]
+            top_vals, top_idx = torch.topk(q0, k=min(5, self.num_actions))
+            top_actions = [
+                (int(idx), *self.action_to_grid(int(idx)), float(val))
+                for val, idx in zip(top_vals.tolist(), top_idx.tolist())
+            ]
+
+        self._io_log.write(
+            f"[Step {self.total_it}] {datetime.datetime.now().strftime('%H:%M:%S')}\n"
+            f"  reward_mean={reward.mean().item():.4f} | done_rate={done.mean().item():.4f}\n"
+            f"  action_batch={action.tolist()}\n"
+            f"  q_top5={top_actions}\n"
+            f"  loss={loss.item():.6f} | q_mean={q_mean:.6f} | epsilon={self.epsilon:.4f}\n"
+            f"---\n"
+        )
+        self._io_log.flush()
+
+        return {
+            'loss': loss.item(),
+            'q_mean': q_mean,
+        }
+
+    def reset_episode(self):
+        pass
+
+    def on_episode_end(self):
+        self.episode_count += 1
+        decay_progress = min(self.episode_count / self.epsilon_decay_episodes, 1.0)
+        self.epsilon = self.epsilon_min + (0.30 - self.epsilon_min) * (1.0 - decay_progress)
+        self._save_model()
+        if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
+            print(f"[VisualDDQN] Periodic save at episode {self.episode_count} | epsilon={self.epsilon:.4f}")
+            self.save_persistent()
+
+    def _save_model(self):
+        VISUAL_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        torch.save(self.q_network.state_dict(), VISUAL_MODEL_PATH / 'q_network.pth')
+        torch.save(self.q_target.state_dict(), VISUAL_MODEL_PATH / 'q_target.pth')
+        torch.save({
+            'optimizer': self.optimizer.state_dict(),
+            'scaler': self.scaler.state_dict(),
+            'total_it': self.total_it,
+            'episode_count': self.episode_count,
+            'epsilon': self.epsilon,
+        }, VISUAL_MODEL_PATH / 'optimizer_state.pth')
+
+    def save_persistent(self):
+        buf = self.replay_buffer
+        if buf.size_count == 0:
+            return
+
+        reward_groups = defaultdict(list)
+        for idx in range(buf.size_count):
+            reward_groups[buf.index[idx]['reward']].append(idx)
+
+        target = min(VISUAL_SAVE_CAPACITY, buf.size_count)
+        selected_indices = []
+        remaining = target
+        groups = sorted(reward_groups.items(), key=lambda item: len(item[1]))
+        for group_idx, (_, indices) in enumerate(groups):
+            if group_idx == len(groups) - 1:
+                count = remaining
+            else:
+                count = round(len(indices) / buf.size_count * target)
+            count = min(count, len(indices), remaining)
+            selected_indices.extend(random.sample(indices, count))
+            remaining -= count
+            if remaining <= 0:
+                break
+
+        VISUAL_REPLAY_PERSISTENT_PATH.mkdir(parents=True, exist_ok=True)
+        for file_path in VISUAL_REPLAY_PERSISTENT_PATH.glob("*.pt"):
+            file_path.unlink()
+
+        persistent_index = []
+        save_idx = 0
+        for old_idx in selected_indices:
+            old_entry = buf.index[old_idx]
+
+            state_src = Path(old_entry['state_path'])
+            if not state_src.exists():
+                continue
+
+            state_dst = VISUAL_REPLAY_PERSISTENT_PATH / f"state_{save_idx}.pt"
+            shutil.copy2(str(state_src), str(state_dst))
+
+            next_state_dst = None
+            if old_entry['next_state_path']:
+                next_src = Path(old_entry['next_state_path'])
+                if next_src.exists():
+                    next_state_dst = VISUAL_REPLAY_PERSISTENT_PATH / f"next_state_{save_idx}.pt"
+                    shutil.copy2(str(next_src), str(next_state_dst))
+
+            persistent_index.append({
+                'state_path': str(state_dst),
+                'action': old_entry['action'],
+                'next_state_path': str(next_state_dst) if next_state_dst else None,
+                'reward': old_entry['reward'],
+                'done': old_entry['done'],
+            })
+            save_idx += 1
+
+        torch.save({
+            'persistent_index': persistent_index,
+            'total_it': self.total_it,
+            'episode_count': self.episode_count,
+            'epsilon': self.epsilon,
+        }, VISUAL_MODEL_PATH / 'training_state.pth')
+
+    def try_load_model(self):
+        q_path = VISUAL_MODEL_PATH / 'q_network.pth'
+        if q_path.exists():
+            try:
+                self.q_network.load_state_dict(torch.load(q_path, map_location=device))
+                print("[VisualDDQN] Loaded Q-Network")
+            except Exception as e:
+                print(f"[VisualDDQN] Failed to load Q-Network: {e}")
+
+        q_target_path = VISUAL_MODEL_PATH / 'q_target.pth'
+        if q_target_path.exists():
+            try:
+                self.q_target.load_state_dict(torch.load(q_target_path, map_location=device))
+                print("[VisualDDQN] Loaded Q-Target")
+            except Exception as e:
+                print(f"[VisualDDQN] Failed to load Q-Target: {e}")
+
+        opt_path = VISUAL_MODEL_PATH / 'optimizer_state.pth'
+        if opt_path.exists():
+            try:
+                state = torch.load(opt_path, map_location=device, weights_only=False)
+                self.optimizer.load_state_dict(state['optimizer'])
+                if 'scaler' in state:
+                    self.scaler.load_state_dict(state['scaler'])
+                self.total_it = state.get('total_it', 0)
+                self.episode_count = state.get('episode_count', 0)
+                self.epsilon = state.get('epsilon', self.epsilon)
+                print(
+                    f"[VisualDDQN] Loaded optimizer: total_it={self.total_it}, "
+                    f"episode={self.episode_count}, epsilon={self.epsilon:.4f}"
+                )
+            except Exception as e:
+                print(f"[VisualDDQN] Failed to load optimizer state: {e}")
+
+        training_state_path = VISUAL_MODEL_PATH / 'training_state.pth'
+        if training_state_path.exists():
+            try:
+                state = torch.load(training_state_path, map_location=device, weights_only=False)
+                persistent_index = state.get('persistent_index', [])
+                if persistent_index:
+                    self._load_persistent_buffer(persistent_index)
+            except Exception as e:
+                print(f"[VisualDDQN] Failed to load replay buffer: {e}")
+
+    def _load_persistent_buffer(self, persistent_index):
+        VISUAL_REPLAY_PATH.mkdir(parents=True, exist_ok=True)
+        for file_path in VISUAL_REPLAY_PATH.glob("*.pt"):
+            file_path.unlink()
+
+        loaded_count = 0
+        for entry in persistent_index[:self.replay_buffer.max_size]:
+            state_src = Path(entry['state_path'])
+            if not state_src.exists():
+                continue
+
+            state_dst = VISUAL_REPLAY_PATH / f"state_{loaded_count}.pt"
+            shutil.copy2(str(state_src), str(state_dst))
+
+            next_state_dst = None
+            if entry['next_state_path']:
+                next_src = Path(entry['next_state_path'])
+                if next_src.exists():
+                    next_state_dst = VISUAL_REPLAY_PATH / f"next_state_{loaded_count}.pt"
+                    shutil.copy2(str(next_src), str(next_state_dst))
+
+            runtime_entry = {
+                'state_path': str(state_dst),
+                'action': int(entry['action']),
+                'next_state_path': str(next_state_dst) if next_state_dst else None,
+                'reward': float(entry['reward']),
+                'done': bool(entry['done']),
+            }
+            self.replay_buffer.index.append(runtime_entry)
+            loaded_count += 1
+
+        self.replay_buffer.ptr = loaded_count % self.replay_buffer.max_size
+        self.replay_buffer.size_count = loaded_count
+        print(f"[VisualDDQN] Loaded {loaded_count} replay buffer entries")
+
+    def _close_io_log(self):
+        if self._io_log and not self._io_log.closed:
+            self._io_log.close()
+
+    def log_action_image(self, state, log_info, step_count, reward=None):
+        if not LOG_ACTIONS or log_info is None:
+            return
+
+        from PIL import ImageDraw, ImageFont
+
+        ACTION_LOG_PATH.mkdir(parents=True, exist_ok=True)
+        img_array = state.detach().cpu().clamp(0, 1).mul(255).byte().numpy().transpose(1, 2, 0)
+        img = Image.fromarray(img_array)
+        img_w, img_h = img.size
+        cell_w = img_w / self.grid_w
+        cell_h = img_h / self.grid_h
+
+        draw = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype("arial.ttf", 12)
+        except Exception:
+            font = ImageFont.load_default()
+
+        row = log_info['row']
+        col = log_info['col']
+        left = int(col * cell_w)
+        top = int(row * cell_h)
+        right = int((col + 1) * cell_w)
+        bottom = int((row + 1) * cell_h)
+        draw.rectangle([left, top, right, bottom], outline='red', width=4)
+
+        for grid_row in range(1, self.grid_h):
+            y = int(grid_row * cell_h)
+            draw.line([0, y, img_w, y], fill='white', width=1)
+        for grid_col in range(1, self.grid_w):
+            x = int(grid_col * cell_w)
+            draw.line([x, 0, x, img_h], fill='white', width=1)
+
+        text_lines = [
+            f"Step: {step_count}",
+            f"Action: {log_info['action_id']} -> ({row}, {col})",
+            f"Source: {log_info.get('source', 'unknown')}",
+        ]
+        if log_info.get('blocked_actions'):
+            text_lines.append(f"Blocked: {log_info['blocked_actions']}")
+        if log_info.get('selected_q') is not None:
+            text_lines.append(f"Selected Q: {log_info['selected_q']:.4f}")
+        if reward is not None:
+            text_lines.append(f"Reward: {reward:.1f}")
+        if log_info.get('top_actions'):
+            top_desc = ", ".join(
+                f"{idx}:({r},{c})={val:.3f}"
+                for idx, r, c, val in log_info['top_actions'][:3]
+            )
+            text_lines.append(f"Top: {top_desc}")
+
+        text_y = 5
+        for line in text_lines:
+            bbox = draw.textbbox((5, text_y), line, font=font)
+            draw.rectangle(bbox, fill='black')
+            draw.text((5, text_y), line, fill='white', font=font)
+            text_y += 15
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{timestamp}_step_{step_count:04d}.png"
+        img.save(ACTION_LOG_PATH / filename)
+        print(f"Action log saved: {filename}")
+
+
 _agent = None
 def get_agent(screen_region=None):
-    """Get or create the singleton SACAgent instance.
+    """Get or create the singleton visual DDQN agent.
 
     Args:
         screen_region: tuple (x, y, w, h) defining the game area
     Returns:
-        SACAgent instance
+        VisualDiscreteAgent instance
     """
     global _agent
     if _agent is None:
-        _agent = SACAgent(screen_region)
+        _agent = VisualDiscreteAgent(screen_region)
     return _agent
