@@ -272,6 +272,10 @@ def open_game_web() :
     # 記得這邊一定要用 pyautogui.click
     # 網頁置頂
     pyautogui.click(21, 21) #點擊溜覽器視窗頁面，確保置頂
+    time.sleep(1)
+    full_screen()
+    # open_book_mark()
+    login_plat()
 
     glo_var.actionChains = ActionChains(glo_var.game_driver)
 
@@ -280,9 +284,6 @@ def open_game_web() :
     # print(main_windows) 
     # all_windows = glo_var.game_driver.window_handles
     # print(all_windows)
-
-    login_plat()
-    full_screen()
 
 # open game to desktop ############################################################################################################################################################################
 # 使用 glo_var讀取的資料 登入一部的登入平台
@@ -314,8 +315,13 @@ def switch_to_game_web():
 
 def full_screen() :
     global glo_var
-    # glo_var.game_driver.maximize_window() # still have the top bar
-    glo_var.game_driver.fullscreen_window() # F11 full screen
+    # driver.refresh() will disable fullscreen setting
+    glo_var.game_driver.maximize_window() # still have the top bar
+    # glo_var.game_driver.fullscreen_window() # F11 full screen
+
+    # using hotkey to swtich to fullscreen
+    pyautogui.hotkey("f11")
+
 
 def open_book_mark():
     pyautogui.hotkey("ctrl","shift","b")
