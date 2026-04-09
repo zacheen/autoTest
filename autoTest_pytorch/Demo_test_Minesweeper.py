@@ -193,10 +193,9 @@ class Game_test_case(unittest.TestCase) :
                 )
                 break
 
-            # if click position is out of game_region
-            # really negitive reward and keep looping
-            print("Model decided to click in invalid position")
+            print("API action failed")
             game_status.reward = -1.0
+            game_status.agent.block_action_for_state(game_status.current_pic, game_status.action)
             
             game_status.agent.log_action_image(
                 current_screenshot, 
@@ -221,7 +220,10 @@ class Game_test_case(unittest.TestCase) :
         # 訓練
         loss_info = game_status.agent.train_step()
         if loss_info:
-            print(f"Loss - Critic: {loss_info['critic_loss']:.4f}, Actor: {loss_info['actor_loss']:.4f}")
+            if 'critic_loss' in loss_info and 'actor_loss' in loss_info:
+                print(f"Loss - Critic: {loss_info['critic_loss']:.4f}, Actor: {loss_info['actor_loss']:.4f}")
+            else:
+                print(f"Loss: {loss_info['loss']:.4f}, Q Mean: {loss_info['q_mean']:.4f}")
 
     class Game_status():
         def __init__(self):
@@ -300,6 +302,7 @@ class Game_test_case(unittest.TestCase) :
                     game_status.game_over = 1
                     print("獲勝！")
 
+                game_status.agent.clear_blocked_actions(reason="screen changed after valid click")
                 self.update_model(game_status)
                 if not game_status.game_over :
                     self.decide_next_step_and_play(game_status)
@@ -314,6 +317,8 @@ class Game_test_case(unittest.TestCase) :
                 game_status.step_count += 1
                 game_status.reward = -1.0
                 print("無效點擊（畫面無變化）")
+                if game_status.current_pic is not None and game_status.action is not None:
+                    game_status.agent.block_action_for_state(game_status.current_pic, game_status.action)
                 self.update_model(game_status)
                 if game_status.step_count > game_status.max_steps:
                     Tool_Main.glo_var.fail_playing = True

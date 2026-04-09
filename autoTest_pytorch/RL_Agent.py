@@ -2912,8 +2912,8 @@ class VisualDiscreteAgent:
         self.epsilon = 0.30
         self.epsilon_min = 0.05
         self.epsilon_decay_episodes = 5000
-        self.blocked_actions_by_state = {}
-        self.max_blocked_state_entries = 256
+        self.current_state_key = None
+        self.blocked_actions_current_state = set()
 
         self.transform = transforms.Compose([
             transforms.Resize(IMAGE_SIZE),
@@ -2955,24 +2955,35 @@ class VisualDiscreteAgent:
         state_uint8 = state.detach().cpu().clamp(0, 1).mul(255).to(torch.uint8).numpy()
         return hashlib.sha1(state_uint8.tobytes()).hexdigest()
 
+    def clear_blocked_actions(self, reason="state changed"):
+        if self.blocked_actions_current_state:
+            print(f"[VisualDDQN] Clear blocked actions ({reason}): {sorted(self.blocked_actions_current_state)}")
+        self.blocked_actions_current_state.clear()
+        self.current_state_key = None
+
     def block_action_for_state(self, state, action_id):
         state_key = self._state_key(state)
-        blocked = self.blocked_actions_by_state.setdefault(state_key, set())
-        blocked.add(int(action_id))
+        if self.current_state_key != state_key:
+            self.current_state_key = state_key
+            self.blocked_actions_current_state.clear()
 
-        while len(self.blocked_actions_by_state) > self.max_blocked_state_entries:
-            self.blocked_actions_by_state.pop(next(iter(self.blocked_actions_by_state)))
-
+        self.blocked_actions_current_state.add(int(action_id))
         row, col = self.action_to_grid(action_id)
         print(f"[VisualDDQN] Block invalid action {action_id} -> ({row},{col}) for current state")
 
     def select_action(self, state, add_noise=True):
         state_key = self._state_key(state)
-        blocked_actions = self.blocked_actions_by_state.get(state_key, set())
+        if self.current_state_key != state_key:
+            if self.current_state_key is not None:
+                self.clear_blocked_actions(reason="new screenshot state")
+            self.current_state_key = state_key
+
+        blocked_actions = set(self.blocked_actions_current_state)
         available_actions = [idx for idx in range(self.num_actions) if idx not in blocked_actions]
 
         if not available_actions:
-            self.blocked_actions_by_state.pop(state_key, None)
+            self.clear_blocked_actions(reason="all actions blocked")
+            self.current_state_key = state_key
             blocked_actions = set()
             available_actions = list(range(self.num_actions))
 
