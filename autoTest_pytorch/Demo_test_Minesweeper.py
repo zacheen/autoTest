@@ -244,7 +244,7 @@ class Game_test_case(unittest.TestCase) :
 
             # Since might due to unexpected reason, we are not able to keep playing the game
             # EX: cover by other window, the game crush or close ...
-            self.max_steps = 20
+            self.max_steps = 60
             self.step_count = 0 # can I use the step in agent??
 
             self.game_over = 0 # Since this will pass into the model, and 0 represents not game over, 1 represents game over
@@ -400,13 +400,9 @@ if __name__=="__main__" :
         print("now in Minesweeper_local_py successfully")
     elif Game_envi == "Minesweeper_web" :
         Tool_Main.open_game_web()
-        Tool_Main.login_plat()
         print("now in Minesweeper_web successfully")
     else :
-        print("打開遊戲網頁")
-        Tool_Main.open_game_web()
-        print("登入遊戲平台")
-        Tool_Main.login_plat()
+        raise Exception(f"Game_envi {Game_envi} doesn't exist!")
 
 
     # 這裡是無窮while迴圈 要讓他可以一直執行
@@ -471,7 +467,6 @@ if __name__=="__main__" :
                 game_only_var.mine.thread_start()
             elif Game_envi == "Minesweeper_web" :
                 Tool_Main.open_game_web()
-                Tool_Main.login_plat()
             Tool_Main.glo_var.reset_var(round_count+1)
             continue
             

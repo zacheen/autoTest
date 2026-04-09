@@ -254,7 +254,7 @@ class Glo_var():
 # 打開遊戲網頁到平台登入頁面
 def open_game_web() :
     global glo_var
-
+    print("open browser")
     options = webdriver.ChromeOptions()
     # options.headless = True #Headless Browser是没有沒有圖形介面(GUI)的web瀏覽視窗
     options.add_argument("--window-size=1960,1080")
@@ -266,21 +266,12 @@ def open_game_web() :
     prefs["profile.password_manager_enabled"] = False
     options.add_experimental_option("prefs", prefs)
     # 設定瀏覽器設定值為不出現此瀏覽器正透過自動化視窗控制
-    options = webdriver.ChromeOptions()
     service = Service(ChromeDriverManager().install())
     glo_var.game_driver = webdriver.Chrome(service=service, options=options)
-    glo_var.game_driver.maximize_window() #全螢幕
 
     # 記得這邊一定要用 pyautogui.click
     # 網頁置頂
     pyautogui.click(21, 21) #點擊溜覽器視窗頁面，確保置頂
-    # 叫出書籤欄
-    # pyautogui.hotkey("ctrl","shift","b")
-    pyautogui.moveTo(952, 21) #定義為初始位置，避免滑鼠在溜覽器任意位置內出現提示訊息影響辨識或截圖
-    time.sleep(1)
-    pyautogui.hotkey("f11")
-
-    print(glo_var.game_driver.get_window_size())
 
     glo_var.actionChains = ActionChains(glo_var.game_driver)
 
@@ -290,20 +281,20 @@ def open_game_web() :
     # all_windows = glo_var.game_driver.window_handles
     # print(all_windows)
 
+    login_plat()
+    full_screen()
+
 # open game to desktop ############################################################################################################################################################################
 # 使用 glo_var讀取的資料 登入一部的登入平台
-# ?? 大改
 def login_plat() :
     global glo_var #將全域變數導入func，以便後續取用
+    print("login platform")
     if Game_envi == "CQ9" :
-        # 開啟該網頁連結
-        # ???網址
         glo_var.game_driver.get("https://h5bt.cqgame.games/h5/BT02/?language=zh-cn&?token=guest")
-        # 要開到遊戲頁面
     elif Game_envi == "Minesweeper_web" :
         glo_var.game_driver.get("http://127.0.0.1:8000")
     else :
-        print("Game_envi error")
+        raise Exception(f"Game_envi {Game_envi} doesn't exist!")
 
 # 這個是因為有時候登入平台會開新分頁 所以會有這個
 # 如果會的話在畫面讀取完成後要執行這個才可以用selenium操控
@@ -320,6 +311,14 @@ def switch_to_game_web():
     glo_var.game_driver.switch_to.window(all_windows[-1])
 
     # pyautogui.click(21, 21) #點擊溜覽器視窗頁面，確保置頂
+
+def full_screen() :
+    global glo_var
+    # glo_var.game_driver.maximize_window() # still have the top bar
+    glo_var.game_driver.fullscreen_window() # F11 full screen
+
+def open_book_mark():
+    pyautogui.hotkey("ctrl","shift","b")
 
 # 記錄錯誤時間 並輸出到 user_change//error.txt
 # round_num 用來記錄是哪一回合出錯
