@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minesweeper Web</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="page-shell">
+        <header class="window-frame">
+            <div class="window-titlebar">
+                <div class="window-title">Minesweeper Web</div>
+                <div class="window-caption">API connected</div>
+            </div>
+
+            <div class="toolbar">
+                <button class="action-button new-game" id="new-game-button" type="button">New Game</button>
+                <div class="difficulty-group" id="difficulty-group"></div>
+            </div>
+
+            <div class="info-row">
+                <div class="info-box">
+                    <span class="info-label">Mines</span>
+                    <span class="info-value info-value-danger" id="mine-counter">010</span>
+                </div>
+                <div class="status-box" id="status-text">Ready</div>
+                <div class="info-box">
+                    <span class="info-label">Time</span>
+                    <span class="info-value info-value-success" id="timer">000</span>
+                </div>
+            </div>
+
+            <main class="board-stage">
+                <div class="board-shell">
+                    <div class="board-grid" id="board"></div>
+                </div>
+            </main>
+        </header>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

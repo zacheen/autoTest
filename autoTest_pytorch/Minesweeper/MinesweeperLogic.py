@@ -4,9 +4,13 @@
 """
 
 import random
-import torch
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
+
+try:
+    import torch
+except ImportError:  # pragma: no cover - torch is optional for the web UI runtime
+    torch = None
 
 
 # Grid state 常數 (給 get_grid_state 用)
@@ -170,7 +174,7 @@ class MinesweeperLogic:
             grid.append(row)
         return grid
 
-    def get_grid_state_tensor(self) -> torch.Tensor:
+    def get_grid_state_tensor(self):
         """取得 one-hot 編碼的 grid state tensor。
 
         Returns:
@@ -180,6 +184,9 @@ class MinesweeperLogic:
                 channel 2-10: 數字 0-8
                 channel 11: 地雷 (只有 game_over 時才可見)
         """
+        if torch is None:
+            raise ImportError("torch is required to call get_grid_state_tensor().")
+
         tensor = torch.zeros(NUM_CHANNELS, self.rows, self.cols, dtype=torch.float32)
 
         for r in range(self.rows):
