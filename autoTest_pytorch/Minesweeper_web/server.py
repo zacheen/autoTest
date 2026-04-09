@@ -147,7 +147,7 @@ def get_difficulties():
 @app.post("/api/games")
 def create_game():
     payload = request.get_json(silent=True) or {}
-    difficulty = payload.get("difficulty", "Beginner")
+    difficulty = payload.get("difficulty", "Training 6x6")
 
     if difficulty not in DIFFICULTIES:
         return _json_error("Unknown difficulty.", 400)

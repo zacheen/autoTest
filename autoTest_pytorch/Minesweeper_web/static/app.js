@@ -14,7 +14,7 @@ const cellSymbols = {
 };
 
 let availableDifficulties = {};
-let selectedDifficulty = "Beginner";
+let selectedDifficulty = "Training 6x6";
 let currentGame = null;
 let timerIntervalId = null;
 let localElapsed = 0;
