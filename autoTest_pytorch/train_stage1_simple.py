@@ -151,31 +151,22 @@ def run_demo_at_save(logic, agent):
         f.write(f"{'='*50}\n")
 
 
-def squash_reward(r):
-    """Rainbow DQN 風格的 reward 壓縮，把 reward 壓到 [-1, +1] 附近。
-
-    公式: sign(r) * (√(|r|+1) - 1) + 0.001 * r
-    效果: +20 → +3.6, +6 → +1.6, +4 → +1.2, -3 → -1.0
-    """
-    return np.sign(r) * (np.sqrt(abs(r) + 1) - 1) + 0.001 * r
-
-
 def compute_reward(result):
-    """計算 reward（壓縮後）。
+    """Reward values after applying the old squash transform.
 
-    4 個分類:
-        +20.0 → +3.60   WIN
-        +3.0  → +1.00   有效點擊（翻開新格子）
-        -3.0  → -1.00   踩雷
-        -2.95 → -0.99   無效點擊（點已翻開格）
+    4 cases:
+        +3.6  WIN
+        +1.0  valid click
+        -1.0  mine
+        -0.98 invalid click
     """
     if not result.changed:
-        return squash_reward(-2.95)
+        return -0.98
     if result.win:
-        return squash_reward(20.0)
+        return 3.6
     if result.game_over:
-        return squash_reward(-3.0)
-    return squash_reward(3.0)
+        return -1.0
+    return 1.0
 
 
 def run_episode(logic, agent, add_noise=True):

@@ -33,6 +33,10 @@ from Minesweeper.Minesweeper_manager import Minesweeper_manager
 from RL_Agent import get_agent
 
 WEB_API = MinesweeperWebClient(default_difficulty="Training 6x6")
+REWARD_VALID_CLICK = 1.0
+REWARD_INVALID_CLICK = -0.98
+REWARD_LOSE = -1.0
+REWARD_WIN = 3.6
 
 class Minesweeper_Begin_thread (Thread):
     def __init__(self) :
@@ -274,7 +278,6 @@ class Game_test_case(unittest.TestCase) :
         Tool_Main.glo_var.s_record_time()
         UI_waiting_time = 1
         game_status = Game_test_case.Game_status()
-        game_status.valid_click_reward = 2  # escalating: starts at 2, +2 each valid click
         game_status.noise = True  # SAC handles exploration via stochastic policy
         time.sleep(UI_waiting_time)
         self.decide_next_step_and_play(game_status)
@@ -306,20 +309,19 @@ class Game_test_case(unittest.TestCase) :
                 # case : something changed
                 # game status for valid click
                 game_status.step_count += 1
-                game_status.reward = game_status.valid_click_reward
-                game_status.valid_click_reward += 2
+                game_status.reward = REWARD_VALID_CLICK
                 print("有效點擊！")
                 time.sleep(UI_waiting_time)
 
                 # 檢查輸了
                 if Tool_Main.compare_sim("lose", sys._getframe().f_code.co_name, precise=True) >= 0.9:
-                    game_status.reward = -10.0
+                    game_status.reward = REWARD_LOSE
                     game_status.game_over = 1
                     print("踩到地雷！")
 
                 # 檢查贏了
                 elif Tool_Main.compare_sim("win", sys._getframe().f_code.co_name, precise=True) >= 0.9:
-                    game_status.reward = 20.0
+                    game_status.reward = REWARD_WIN
                     game_status.game_over = 1
                     game_status.won = True
                     print("獲勝！")
@@ -337,7 +339,7 @@ class Game_test_case(unittest.TestCase) :
 
                 # case : nothing change after a period
                 game_status.step_count += 1
-                game_status.reward = -1.0
+                game_status.reward = REWARD_INVALID_CLICK
                 game_status.invalid_click_count += 1
                 print("無效點擊（畫面無變化）")
                 if game_status.current_pic is not None and game_status.action is not None:
