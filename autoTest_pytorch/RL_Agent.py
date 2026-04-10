@@ -2689,6 +2689,8 @@ class YOLO11nLastFeatureExtractor(nn.Module):
         self.backbone_layers = nn.ModuleList(
             yolo.model.model[idx] for idx in range(YOLO_LAST_LAYER_IDX + 1)
         )
+        for param in self.backbone_layers.parameters():
+            param.requires_grad_(True)
         self._verify_shapes()
 
     def forward(self, x):
@@ -3083,6 +3085,7 @@ class VisualDiscreteAgent:
                 self.q_network.col_embed,
             ])
         )
+        yolo_debug = self._module_grad_debug(self.q_network.feature_extractor)
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
@@ -3108,6 +3111,12 @@ class VisualDiscreteAgent:
             f"  grad_norm_total={float(grad_norm_total):.6f} | "
             f"yolo={grad_norm_yolo:.6f} | backbone={grad_norm_backbone:.6f} | "
             f"policy={grad_norm_policy:.6f} | head={grad_norm_head:.6f}\n"
+            f"  yolo_debug="
+            f"params:{yolo_debug['param_count']} | "
+            f"requires_grad:{yolo_debug['requires_grad_count']} | "
+            f"grad_params:{yolo_debug['grad_param_count']} | "
+            f"grad_elems:{yolo_debug['grad_element_count']} | "
+            f"nan_grads:{yolo_debug['nan_grad_count']}\n"
             f"---\n"
         )
         self._io_log.flush()
@@ -3122,6 +3131,20 @@ class VisualDiscreteAgent:
         self.tb_writer.add_scalar('grad/backbone_norm', grad_norm_backbone, self.total_it)
         self.tb_writer.add_scalar('grad/policy_norm', grad_norm_policy, self.total_it)
         self.tb_writer.add_scalar('grad/head_norm', grad_norm_head, self.total_it)
+        self.tb_writer.add_scalar('debug/yolo_param_count', yolo_debug['param_count'], self.total_it)
+        self.tb_writer.add_scalar('debug/yolo_requires_grad_param_count', yolo_debug['requires_grad_count'], self.total_it)
+        self.tb_writer.add_scalar('debug/yolo_grad_param_count', yolo_debug['grad_param_count'], self.total_it)
+        self.tb_writer.add_scalar('debug/yolo_grad_element_count', yolo_debug['grad_element_count'], self.total_it)
+        self.tb_writer.add_scalar('debug/yolo_nan_grad_count', yolo_debug['nan_grad_count'], self.total_it)
+
+        if yolo_debug['grad_param_count'] == 0 and self.total_it <= 10:
+            print(
+                "[VisualDDQN][DEBUG] YOLO grad missing: "
+                f"params={yolo_debug['param_count']}, "
+                f"requires_grad={yolo_debug['requires_grad_count']}, "
+                f"grad_params={yolo_debug['grad_param_count']}, "
+                f"nan_grads={yolo_debug['nan_grad_count']}"
+            )
 
         if self.total_it % VISUAL_HISTOGRAM_EVERY == 0:
             self._log_tensorboard_histograms(self.total_it)
@@ -3315,6 +3338,31 @@ class VisualDiscreteAgent:
                 continue
             grad_sq_sum += float(param.grad.detach().float().pow(2).sum().item())
         return grad_sq_sum ** 0.5
+
+    def _module_grad_debug(self, module):
+        param_count = 0
+        requires_grad_count = 0
+        grad_param_count = 0
+        grad_element_count = 0
+        nan_grad_count = 0
+
+        for param in module.parameters():
+            param_count += 1
+            if param.requires_grad:
+                requires_grad_count += 1
+            if param.grad is None:
+                continue
+            grad_param_count += 1
+            grad_element_count += int(param.grad.numel())
+            nan_grad_count += int(torch.isnan(param.grad).sum().item())
+
+        return {
+            'param_count': param_count,
+            'requires_grad_count': requires_grad_count,
+            'grad_param_count': grad_param_count,
+            'grad_element_count': grad_element_count,
+            'nan_grad_count': nan_grad_count,
+        }
 
     def _log_tensorboard_histograms(self, global_step):
         module_groups = {
