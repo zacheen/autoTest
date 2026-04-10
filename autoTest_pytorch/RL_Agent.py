@@ -59,10 +59,10 @@ VISUAL_GRID_H = 6
 VISUAL_GRID_W = 6
 VISUAL_NUM_ACTIONS = VISUAL_GRID_H * VISUAL_GRID_W
 VISUAL_BATCH_SIZE = 2
-VISUAL_D_MODEL = 128
+VISUAL_D_MODEL = 64
 VISUAL_NHEAD = 4
-VISUAL_BACKBONE_LAYERS = 2
-VISUAL_POLICY_LAYERS = 2
+VISUAL_BACKBONE_LAYERS = 4
+VISUAL_POLICY_LAYERS = 0
 VISUAL_FF_DIM = 256
 VISUAL_DROPOUT = 0.1
 VISUAL_HEAD_HIDDEN = 128
@@ -2719,8 +2719,8 @@ class YOLO11nLastFeatureExtractor(nn.Module):
         )
 
 
-class VisualDiscreteQNetwork(nn.Module):
-    """YOLO last features -> understanding backbone -> policy backbone -> 36 logits."""
+class VisualTransformerBackbone(nn.Module):
+    """YOLO features -> token adapter -> same transformer backbone style as TransformerActorNetwork."""
 
     def __init__(
         self,
@@ -2728,28 +2728,29 @@ class VisualDiscreteQNetwork(nn.Module):
         grid_w=VISUAL_GRID_W,
         d_model=VISUAL_D_MODEL,
         nhead=VISUAL_NHEAD,
-        backbone_layers=VISUAL_BACKBONE_LAYERS,
-        policy_layers=VISUAL_POLICY_LAYERS,
+        num_layers=VISUAL_BACKBONE_LAYERS,
         dim_feedforward=VISUAL_FF_DIM,
         dropout=VISUAL_DROPOUT,
-        head_hidden=VISUAL_HEAD_HIDDEN,
     ):
         super().__init__()
         self.grid_h = grid_h
         self.grid_w = grid_w
-        self.feature_h = YOLO_LAST_FEATURE_SIZE
-        self.feature_w = YOLO_LAST_FEATURE_SIZE
-        self.d_model = d_model
+        self.num_tokens = grid_h * grid_w
 
         self.feature_extractor = YOLO11nLastFeatureExtractor()
-        self.input_proj = nn.Conv2d(YOLO_LAST_CHANNELS, d_model, kernel_size=1)
-        self.input_fc = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, d_model),
+        self.cell_pool = nn.AdaptiveAvgPool2d((grid_h, grid_w))
+
+        self.token_embed = nn.Sequential(
+            nn.LayerNorm(YOLO_LAST_CHANNELS),
+            nn.Linear(YOLO_LAST_CHANNELS, d_model),
             nn.GELU(),
+            nn.Linear(d_model, d_model),
         )
 
-        backbone_layer = nn.TransformerEncoderLayer(
+        self.row_embed = nn.Embedding(grid_h, d_model // 2)
+        self.col_embed = nn.Embedding(grid_w, d_model // 2)
+
+        encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
@@ -2757,70 +2758,31 @@ class VisualDiscreteQNetwork(nn.Module):
             activation='gelu',
             batch_first=True,
         )
-        self.backbone_transformer = nn.TransformerEncoder(backbone_layer, num_layers=backbone_layers)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        self.policy_fc = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, d_model),
-            nn.GELU(),
-            nn.Linear(d_model, d_model),
-            nn.GELU(),
-        )
-
-        policy_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            activation='gelu',
-            batch_first=True,
-        )
-        self.policy_transformer = nn.TransformerEncoder(policy_layer, num_layers=policy_layers)
-        self.output_norm = nn.LayerNorm(d_model)
-
-        self.row_embed = nn.Embedding(self.feature_h, d_model // 2)
-        self.col_embed = nn.Embedding(self.feature_w, d_model // 2)
-        rows = torch.arange(self.feature_h).unsqueeze(1).expand(self.feature_h, self.feature_w).reshape(-1)
-        cols = torch.arange(self.feature_w).unsqueeze(0).expand(self.feature_h, self.feature_w).reshape(-1)
+        rows = torch.arange(grid_h).unsqueeze(1).expand(grid_h, grid_w).reshape(-1)
+        cols = torch.arange(grid_w).unsqueeze(0).expand(grid_h, grid_w).reshape(-1)
         self.register_buffer('row_indices', rows)
         self.register_buffer('col_indices', cols)
 
-        self.cell_pool = nn.AdaptiveAvgPool2d((grid_h, grid_w))
-        self.cell_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, head_hidden),
-            nn.GELU(),
-            nn.Linear(head_hidden, 1),
-        )
-
-    def get_spatial_tokens(self, state):
+    def _embed(self, state):
         features = self.feature_extractor(state)
-        x = self.input_proj(features)
-        batch_size = x.size(0)
-        tokens = x.flatten(2).transpose(1, 2)
-
+        pooled = self.cell_pool(features)
+        tokens = pooled.permute(0, 2, 3, 1).reshape(state.size(0), self.num_tokens, YOLO_LAST_CHANNELS)
+        x = self.token_embed(tokens)
         pos = torch.cat([
             self.row_embed(self.row_indices),
             self.col_embed(self.col_indices),
         ], dim=-1)
-        tokens = tokens + pos.unsqueeze(0)
-        tokens = self.input_fc(tokens)
-        tokens = self.backbone_transformer(tokens)
-        tokens = self.policy_fc(tokens)
-        tokens = self.policy_transformer(tokens)
-        tokens = self.output_norm(tokens)
-        return tokens.reshape(batch_size, self.feature_h, self.feature_w, self.d_model)
+        return x + pos.unsqueeze(0)
 
-    def get_cell_embeddings(self, state):
-        tokens_2d = self.get_spatial_tokens(state)
-        spatial = tokens_2d.permute(0, 3, 1, 2)
-        pooled = self.cell_pool(spatial)
-        return pooled.flatten(2).transpose(1, 2)
+    def get_features(self, state):
+        x = self._embed(state)
+        x = self.transformer(x)
+        return x
 
     def forward(self, state):
-        cell_embeddings = self.get_cell_embeddings(state)
-        logits = self.cell_head(cell_embeddings).squeeze(-1)
-        return logits
+        return self.get_features(state)
 
 
 class VisualReplayBuffer:
@@ -3089,16 +3051,18 @@ class VisualDiscreteAgent:
         self.grid_w = VISUAL_GRID_W
         self.num_actions = VISUAL_NUM_ACTIONS
 
-        self.q_network = VisualDiscreteQNetwork(grid_h=self.grid_h, grid_w=self.grid_w).to(device)
-        self.q_target = VisualDiscreteQNetwork(grid_h=self.grid_h, grid_w=self.grid_w).to(device)
+        self.backbone = VisualTransformerBackbone(grid_h=self.grid_h, grid_w=self.grid_w).to(device)
+        self.q_network = DuelingQNetwork(d_model=VISUAL_D_MODEL, grid_h=self.grid_h, grid_w=self.grid_w).to(device)
+        self.q_target = DuelingQNetwork(d_model=VISUAL_D_MODEL, grid_h=self.grid_h, grid_w=self.grid_w).to(device)
         self.q_target.load_state_dict(self.q_network.state_dict())
         self.q_target.eval()
 
-        yolo_param_ids = {id(param) for param in self.q_network.feature_extractor.parameters()}
-        policy_params = [param for param in self.q_network.parameters() if id(param) not in yolo_param_ids]
+        yolo_param_ids = {id(param) for param in self.backbone.feature_extractor.parameters()}
+        shared_params = list(self.backbone.parameters()) + list(self.q_network.parameters())
+        adapter_and_q_params = [param for param in shared_params if id(param) not in yolo_param_ids]
         self.optimizer = optim.AdamW([
-            {'params': self.q_network.feature_extractor.parameters(), 'lr': LR_VISUAL_YOLO},
-            {'params': policy_params, 'lr': LR_VISUAL_POLICY},
+            {'params': self.backbone.feature_extractor.parameters(), 'lr': LR_VISUAL_YOLO},
+            {'params': adapter_and_q_params, 'lr': LR_VISUAL_POLICY},
         ])
         self.scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
 
@@ -3207,10 +3171,13 @@ class VisualDiscreteAgent:
             }
 
         state_batch = state.unsqueeze(0).to(device)
+        self.backbone.eval()
         self.q_network.eval()
         with torch.no_grad():
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
-                q_logits = self.q_network(state_batch).squeeze(0)
+                features = self.backbone.get_features(state_batch)
+                q_2d = self.q_network(features).squeeze(0)
+            q_logits = q_2d.view(-1)
             masked_logits = q_logits.clone()
             if blocked_actions:
                 blocked_idx = torch.tensor(sorted(blocked_actions), dtype=torch.long, device=masked_logits.device)
@@ -3219,6 +3186,7 @@ class VisualDiscreteAgent:
             action_id = int(masked_logits.argmax().item())
             topk = min(5, len(available_actions))
             top_vals, top_idx = torch.topk(masked_logits, k=topk)
+        self.backbone.train()
         self.q_network.train()
         self.greedy_action_count += 1
 
@@ -3248,17 +3216,30 @@ class VisualDiscreteAgent:
 
         self.total_it += 1
         state, action, next_state, reward, done, sample_indices = self.replay_buffer.sample(VISUAL_BATCH_SIZE)
+        batch_size = state.size(0)
 
         with torch.no_grad():
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
-                next_online_q = self.q_network(next_state)
-                next_best_action = next_online_q.argmax(dim=1, keepdim=True)
-                next_target_q = self.q_target(next_state).gather(1, next_best_action)
+                next_features = self.backbone.get_features(next_state)
+                next_online_q_2d = self.q_network(next_features)
+                next_online_q_flat = next_online_q_2d.view(batch_size, -1)
+                next_best_flat = next_online_q_flat.argmax(dim=1)
+                next_best_rows = next_best_flat // self.grid_w
+                next_best_cols = next_best_flat % self.grid_w
+                next_target_q_2d = self.q_target(next_features)
+                next_target_q = next_target_q_2d[
+                    torch.arange(batch_size, device=device), next_best_rows, next_best_cols
+                ].unsqueeze(1)
                 target = reward + (1 - done) * GAMMA * next_target_q
 
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
-            q_logits = self.q_network(state)
-            q_taken = q_logits.gather(1, action.unsqueeze(1))
+            features = self.backbone.get_features(state)
+            q_2d = self.q_network(features)
+            row_idx = action // self.grid_w
+            col_idx = action % self.grid_w
+            q_taken = q_2d[
+                torch.arange(batch_size, device=device), row_idx, col_idx
+            ].unsqueeze(1)
             loss = F.smooth_l1_loss(q_taken, target)
             td_error = (q_taken.detach() - target.detach()).abs()
 
@@ -3267,23 +3248,15 @@ class VisualDiscreteAgent:
         self.optimizer.zero_grad(set_to_none=True)
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
-        grad_norm_total = torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
-        grad_norm_yolo = self._module_grad_norm(self.q_network.feature_extractor)
-        grad_norm_backbone = self._module_grad_norm(self.q_network.backbone_transformer)
-        grad_norm_policy = self._module_grad_norm(self.q_network.policy_transformer)
-        grad_norm_head = self._module_grad_norm(
-            nn.ModuleList([
-                self.q_network.input_proj,
-                self.q_network.input_fc,
-                self.q_network.policy_fc,
-                self.q_network.output_norm,
-                self.q_network.cell_pool,
-                self.q_network.cell_head,
-                self.q_network.row_embed,
-                self.q_network.col_embed,
-            ])
+        grad_norm_total = torch.nn.utils.clip_grad_norm_(
+            list(self.backbone.parameters()) + list(self.q_network.parameters()),
+            max_norm=1.0,
         )
-        yolo_debug = self._module_grad_debug(self.q_network.feature_extractor)
+        grad_norm_yolo = self._module_grad_norm(self.backbone.feature_extractor)
+        grad_norm_backbone = self._module_grad_norm(self.backbone.transformer)
+        grad_norm_policy = self._module_grad_norm(self.backbone.token_embed)
+        grad_norm_head = self._module_grad_norm(self.q_network)
+        yolo_debug = self._module_grad_debug(self.backbone.feature_extractor)
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
@@ -3293,7 +3266,7 @@ class VisualDiscreteAgent:
 
         with torch.no_grad():
             q_mean = q_taken.mean().item()
-            q0 = q_logits[0]
+            q0 = q_2d[0].view(-1)
             top_vals, top_idx = torch.topk(q0, k=min(5, self.num_actions))
             top_actions = [
                 (int(idx), *self.action_to_grid(int(idx)), float(val))
@@ -3375,6 +3348,7 @@ class VisualDiscreteAgent:
 
     def _save_model(self):
         VISUAL_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        torch.save(self.backbone.state_dict(), VISUAL_MODEL_PATH / 'backbone.pth')
         torch.save(self.q_network.state_dict(), VISUAL_MODEL_PATH / 'q_network.pth')
         torch.save(self.q_target.state_dict(), VISUAL_MODEL_PATH / 'q_target.pth')
         torch.save({
@@ -3449,6 +3423,14 @@ class VisualDiscreteAgent:
         }, VISUAL_MODEL_PATH / 'training_state.pth')
 
     def try_load_model(self):
+        backbone_path = VISUAL_MODEL_PATH / 'backbone.pth'
+        if backbone_path.exists():
+            try:
+                self.backbone.load_state_dict(torch.load(backbone_path, map_location=device))
+                print("[VisualDDQN] Loaded Backbone")
+            except Exception as e:
+                print(f"[VisualDDQN] Failed to load Backbone: {e}")
+
         q_path = VISUAL_MODEL_PATH / 'q_network.pth'
         if q_path.exists():
             try:
@@ -3577,34 +3559,24 @@ class VisualDiscreteAgent:
 
     def _log_tensorboard_histograms(self, global_step):
         module_groups = {
-            'weights/yolo': self.q_network.feature_extractor,
-            'weights/backbone': self.q_network.backbone_transformer,
-            'weights/policy': self.q_network.policy_transformer,
-            'weights/head': nn.ModuleList([
-                self.q_network.input_proj,
-                self.q_network.input_fc,
-                self.q_network.policy_fc,
-                self.q_network.output_norm,
-                self.q_network.cell_pool,
-                self.q_network.cell_head,
-                self.q_network.row_embed,
-                self.q_network.col_embed,
+            'weights/yolo': self.backbone.feature_extractor,
+            'weights/backbone': self.backbone.transformer,
+            'weights/policy': nn.ModuleList([
+                self.backbone.token_embed,
+                self.backbone.row_embed,
+                self.backbone.col_embed,
             ]),
+            'weights/head': self.q_network,
         }
         grad_groups = {
-            'grads/yolo': self.q_network.feature_extractor,
-            'grads/backbone': self.q_network.backbone_transformer,
-            'grads/policy': self.q_network.policy_transformer,
-            'grads/head': nn.ModuleList([
-                self.q_network.input_proj,
-                self.q_network.input_fc,
-                self.q_network.policy_fc,
-                self.q_network.output_norm,
-                self.q_network.cell_pool,
-                self.q_network.cell_head,
-                self.q_network.row_embed,
-                self.q_network.col_embed,
+            'grads/yolo': self.backbone.feature_extractor,
+            'grads/backbone': self.backbone.transformer,
+            'grads/policy': nn.ModuleList([
+                self.backbone.token_embed,
+                self.backbone.row_embed,
+                self.backbone.col_embed,
             ]),
+            'grads/head': self.q_network,
         }
 
         for tag, module in module_groups.items():
