@@ -3074,7 +3074,6 @@ class VisualDiscreteAgent:
         self.epsilon_decay_episodes = 5000
         self.current_state_key = None
         self.blocked_actions_current_state = set()
-        self.greedy_action_count = 0
 
         self.transform = transforms.Compose([
             transforms.Resize(IMAGE_SIZE),
@@ -3166,7 +3165,7 @@ class VisualDiscreteAgent:
                 'selected_q': None,
                 'top_actions': [],
                 'source': 'epsilon',
-                'greedy_index': None,
+                'candidate_rank': len(blocked_actions) + 1,
                 'blocked_actions': sorted(blocked_actions),
             }
 
@@ -3188,7 +3187,6 @@ class VisualDiscreteAgent:
             top_vals, top_idx = torch.topk(masked_logits, k=topk)
         self.backbone.train()
         self.q_network.train()
-        self.greedy_action_count += 1
 
         row, col = self.action_to_grid(action_id)
         top_actions = []
@@ -3203,7 +3201,7 @@ class VisualDiscreteAgent:
             'selected_q': float(q_logits[action_id].item()),
             'top_actions': top_actions,
             'source': 'greedy',
-            'greedy_index': self.greedy_action_count,
+            'candidate_rank': len(blocked_actions) + 1,
             'blocked_actions': sorted(blocked_actions),
         }
 
@@ -3328,7 +3326,7 @@ class VisualDiscreteAgent:
         }
 
     def reset_episode(self):
-        self.greedy_action_count = 0
+        pass
 
     def log_episode_metrics(self, win, invalid_click_rate):
         next_episode = self.episode_count + 1
@@ -3633,10 +3631,13 @@ class VisualDiscreteAgent:
         text_lines = [
             f"Step: {step_count}",
             f"Action: {log_info['action_id']} -> ({row}, {col})",
-            f"Source: {log_info.get('source', 'unknown')}",
+            (
+                f"Source: {log_info.get('source', 'unknown')} "
+                f"#{log_info['candidate_rank']}"
+                if log_info.get('candidate_rank') is not None
+                else f"Source: {log_info.get('source', 'unknown')}"
+            ),
         ]
-        if log_info.get('greedy_index') is not None:
-            text_lines.append(f"Greedy #: {log_info['greedy_index']}")
         if log_info.get('blocked_actions'):
             text_lines.append(f"Blocked: {log_info['blocked_actions']}")
         if log_info.get('selected_q') is not None:
