@@ -70,6 +70,13 @@ LR_VISUAL_YOLO = 1e-5
 LR_VISUAL_POLICY = 5e-5
 VISUAL_BUFFER_CAPACITY = 512
 VISUAL_SAVE_CAPACITY = 128
+VISUAL_BUFFER_OVERFLOW = 500
+VISUAL_PER_ALPHA = 0.6
+VISUAL_PER_UNIFORM_MIX = 0.2
+VISUAL_PRIORITY_MIN = 0.05
+VISUAL_PRIORITY_MAX = 5.0
+VISUAL_PRIORITY_EPS = 1e-3
+VISUAL_AGE_DECAY = 0.002
 
 # YOLO11n layer indices (discovered via forward pass)
 # Layer 4: C3k2, output 128ch x 80x80 (mid-layer, spatial detail)
@@ -2819,13 +2826,17 @@ class VisualDiscreteQNetwork(nn.Module):
 class VisualReplayBuffer:
     """Disk-backed replay buffer specialized for screenshot tensors."""
 
+    REWARD_TYPES = ('win', 'lose', 'invalid', 'progress', 'other')
+
     def __init__(self, max_size=VISUAL_BUFFER_CAPACITY, save_dir=VISUAL_REPLAY_PATH):
         self.max_size = max_size
+        self.overflow_margin = VISUAL_BUFFER_OVERFLOW
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
-        self.ptr = 0
         self.size_count = 0
         self.index = []
+        self.next_storage_id = 0
+        self.insert_counter = 0
 
     def _save_image_tensor(self, tensor, path):
         uint8_tensor = tensor.detach().cpu().clamp(0, 1).mul(255).to(torch.uint8)
@@ -2834,37 +2845,216 @@ class VisualReplayBuffer:
     def _load_image_tensor(self, path):
         return torch.load(path).float() / 255.0
 
+    def _reward_type(self, reward, done):
+        reward = float(reward)
+        if done and reward >= 20.0:
+            return 'win'
+        if done and reward <= -10.0:
+            return 'lose'
+        if reward < 0:
+            return 'invalid'
+        if reward > 0:
+            return 'progress'
+        return 'other'
+
+    def _validate_transition(self, state_tensor, action, next_state_tensor, reward, done):
+        if not torch.is_tensor(state_tensor) or state_tensor.shape != (3, *IMAGE_SIZE):
+            return False
+        if next_state_tensor is not None:
+            if not torch.is_tensor(next_state_tensor) or next_state_tensor.shape != (3, *IMAGE_SIZE):
+                return False
+        if not np.isfinite(float(reward)):
+            return False
+        if not isinstance(action, (int, np.integer)) or not (0 <= int(action) < VISUAL_NUM_ACTIONS):
+            return False
+        if bool(done) and next_state_tensor is not None:
+            return False
+        if (not bool(done)) and next_state_tensor is None:
+            return False
+        if next_state_tensor is not None and float(reward) > 0:
+            if torch.equal(
+                state_tensor.detach().cpu().clamp(0, 1),
+                next_state_tensor.detach().cpu().clamp(0, 1)
+            ):
+                return False
+        return True
+
+    def _safe_unlink(self, path_str):
+        if not path_str:
+            return
+        path = Path(path_str)
+        if path.exists():
+            path.unlink()
+
+    def _delete_entry_files(self, entry):
+        self._safe_unlink(entry.get('state_path'))
+        self._safe_unlink(entry.get('next_state_path'))
+
+    def _effective_priority(self, entry):
+        base_priority = float(np.clip(entry.get('priority', 1.0), VISUAL_PRIORITY_MIN, VISUAL_PRIORITY_MAX))
+        age = max(0, self.insert_counter - entry.get('insert_order', 0))
+        aged_priority = base_priority / (1.0 + VISUAL_AGE_DECAY * age)
+        return max(VISUAL_PRIORITY_MIN, aged_priority)
+
+    def _prune_if_needed(self):
+        if self.size_count <= self.max_size + self.overflow_margin:
+            return
+
+        bucket_quota = max(1, self.max_size // len(self.REWARD_TYPES))
+        grouped_entries = {reward_type: [] for reward_type in self.REWARD_TYPES}
+        for entry in self.index:
+            grouped_entries.setdefault(entry['reward_type'], []).append(entry)
+
+        selected_ids = set()
+        survivors = []
+        leftovers = []
+
+        for reward_type in self.REWARD_TYPES:
+            entries = grouped_entries.get(reward_type, [])
+            entries.sort(key=self._effective_priority, reverse=True)
+            keep = entries[:bucket_quota]
+            spill = entries[bucket_quota:]
+            survivors.extend(keep)
+            selected_ids.update(entry['storage_id'] for entry in keep)
+            leftovers.extend(spill)
+
+        remaining_slots = max(0, self.max_size - len(survivors))
+        if remaining_slots > 0 and leftovers:
+            leftovers.sort(key=self._effective_priority, reverse=True)
+            extra = leftovers[:remaining_slots]
+            survivors.extend(extra)
+            selected_ids.update(entry['storage_id'] for entry in extra)
+
+        old_entries = self.index
+        self.index = survivors[:self.max_size]
+        self.size_count = len(self.index)
+
+        for entry in old_entries:
+            if entry['storage_id'] not in selected_ids:
+                self._delete_entry_files(entry)
+
+    def _sample_from_bucket(self, entries, count):
+        if count <= 0 or not entries:
+            return []
+
+        num_uniform = min(len(entries), int(round(count * VISUAL_PER_UNIFORM_MIX)))
+        num_priority = max(0, count - num_uniform)
+
+        chosen = []
+        available = list(entries)
+
+        if num_uniform > 0:
+            uniform_pick = random.sample(available, k=min(num_uniform, len(available)))
+            chosen.extend(uniform_pick)
+            chosen_ids = {entry['storage_id'] for entry in uniform_pick}
+            available = [entry for entry in available if entry['storage_id'] not in chosen_ids]
+
+        if num_priority > 0 and available:
+            priorities = np.array(
+                [self._effective_priority(entry) for entry in available],
+                dtype=np.float64,
+            )
+            priorities = np.power(np.maximum(priorities, VISUAL_PRIORITY_MIN), VISUAL_PER_ALPHA)
+            prob_sum = priorities.sum()
+            if prob_sum <= 0 or not np.isfinite(prob_sum):
+                priority_pick = random.choices(available, k=min(num_priority, len(available)))
+            else:
+                probabilities = priorities / prob_sum
+                replace = len(available) < num_priority
+                indices = np.random.choice(
+                    len(available),
+                    size=num_priority if replace else min(num_priority, len(available)),
+                    replace=replace,
+                    p=probabilities,
+                )
+                priority_pick = [available[int(idx)] for idx in np.atleast_1d(indices)]
+            chosen.extend(priority_pick)
+
+        while len(chosen) < count:
+            chosen.append(random.choice(entries))
+
+        return chosen[:count]
+
+    def update_priorities(self, sample_indices, td_errors):
+        if sample_indices is None or td_errors is None:
+            return
+
+        td_values = td_errors.detach().float().view(-1).cpu().tolist()
+        for idx, td_error in zip(sample_indices, td_values):
+            if not (0 <= int(idx) < len(self.index)):
+                continue
+            priority = abs(float(td_error)) + VISUAL_PRIORITY_EPS
+            self.index[int(idx)]['priority'] = float(np.clip(priority, VISUAL_PRIORITY_MIN, VISUAL_PRIORITY_MAX))
+
     def store(self, state_tensor, action, next_state_tensor, reward, done):
-        idx = self.ptr
-        state_path = self.save_dir / f"state_{idx}.pt"
+        action = int(action)
+        done = bool(done)
+        reward = float(reward)
+
+        if not self._validate_transition(state_tensor, action, next_state_tensor, reward, done):
+            return
+
+        storage_id = self.next_storage_id
+        self.next_storage_id += 1
+        state_path = self.save_dir / f"state_{storage_id}.pt"
         self._save_image_tensor(state_tensor, state_path)
 
         next_state_path = None
         if next_state_tensor is not None:
-            next_state_path = self.save_dir / f"next_state_{idx}.pt"
+            next_state_path = self.save_dir / f"next_state_{storage_id}.pt"
             self._save_image_tensor(next_state_tensor, next_state_path)
 
+        self.insert_counter += 1
         entry = {
+            'storage_id': storage_id,
             'state_path': str(state_path),
-            'action': int(action),
+            'action': action,
             'next_state_path': str(next_state_path) if next_state_path else None,
-            'reward': float(reward),
-            'done': bool(done),
+            'reward': reward,
+            'done': done,
+            'reward_type': self._reward_type(reward, done),
+            'priority': float(np.clip(abs(reward) + 1.0, VISUAL_PRIORITY_MIN, VISUAL_PRIORITY_MAX)),
+            'insert_order': self.insert_counter,
         }
 
-        if len(self.index) < self.max_size:
-            self.index.append(entry)
-        else:
-            self.index[self.ptr] = entry
-
-        self.ptr = (self.ptr + 1) % self.max_size
-        self.size_count = min(self.size_count + 1, self.max_size)
+        self.index.append(entry)
+        self.size_count = len(self.index)
+        self._prune_if_needed()
 
     def sample(self, batch_size):
-        indices = np.random.randint(0, self.size_count, size=batch_size)
+        if self.size_count <= 0:
+            raise RuntimeError("VisualReplayBuffer is empty")
+
+        grouped_indices = {reward_type: [] for reward_type in self.REWARD_TYPES}
+        for idx, entry in enumerate(self.index):
+            grouped_indices.setdefault(entry['reward_type'], []).append(idx)
+
+        non_empty_groups = [indices for indices in grouped_indices.values() if indices]
+        base_count = max(1, batch_size // max(1, len(non_empty_groups)))
+        selected_indices = []
+
+        for indices in non_empty_groups:
+            take = min(base_count, len(indices))
+            bucket_entries = [self.index[idx] for idx in indices]
+            sampled_entries = self._sample_from_bucket(bucket_entries, take)
+            selected_indices.extend(
+                next(i for i in indices if self.index[i]['storage_id'] == entry['storage_id'])
+                for entry in sampled_entries
+            )
+
+        while len(selected_indices) < batch_size:
+            fallback_entry = self._sample_from_bucket(self.index, 1)[0]
+            selected_indices.append(
+                next(
+                    i for i, entry in enumerate(self.index)
+                    if entry['storage_id'] == fallback_entry['storage_id']
+                )
+            )
+
+        selected_indices = selected_indices[:batch_size]
 
         states, actions, next_states, rewards, dones = [], [], [], [], []
-        for idx in indices:
+        for idx in selected_indices:
             entry = self.index[idx]
             states.append(self._load_image_tensor(entry['state_path']))
             actions.append(entry['action'])
@@ -2883,6 +3073,7 @@ class VisualReplayBuffer:
             torch.stack(next_states).to(device),
             torch.tensor(rewards, dtype=torch.float32, device=device).unsqueeze(1),
             torch.tensor(dones, dtype=torch.float32, device=device).unsqueeze(1),
+            selected_indices,
         )
 
     def size(self):
@@ -2919,6 +3110,7 @@ class VisualDiscreteAgent:
         self.epsilon_decay_episodes = 5000
         self.current_state_key = None
         self.blocked_actions_current_state = set()
+        self.greedy_action_count = 0
 
         self.transform = transforms.Compose([
             transforms.Resize(IMAGE_SIZE),
@@ -3010,6 +3202,7 @@ class VisualDiscreteAgent:
                 'selected_q': None,
                 'top_actions': [],
                 'source': 'epsilon',
+                'greedy_index': None,
                 'blocked_actions': sorted(blocked_actions),
             }
 
@@ -3027,6 +3220,7 @@ class VisualDiscreteAgent:
             topk = min(5, len(available_actions))
             top_vals, top_idx = torch.topk(masked_logits, k=topk)
         self.q_network.train()
+        self.greedy_action_count += 1
 
         row, col = self.action_to_grid(action_id)
         top_actions = []
@@ -3041,6 +3235,7 @@ class VisualDiscreteAgent:
             'selected_q': float(q_logits[action_id].item()),
             'top_actions': top_actions,
             'source': 'greedy',
+            'greedy_index': self.greedy_action_count,
             'blocked_actions': sorted(blocked_actions),
         }
 
@@ -3052,7 +3247,7 @@ class VisualDiscreteAgent:
             return None
 
         self.total_it += 1
-        state, action, next_state, reward, done = self.replay_buffer.sample(VISUAL_BATCH_SIZE)
+        state, action, next_state, reward, done, sample_indices = self.replay_buffer.sample(VISUAL_BATCH_SIZE)
 
         with torch.no_grad():
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
@@ -3065,6 +3260,9 @@ class VisualDiscreteAgent:
             q_logits = self.q_network(state)
             q_taken = q_logits.gather(1, action.unsqueeze(1))
             loss = F.smooth_l1_loss(q_taken, target)
+            td_error = (q_taken.detach() - target.detach()).abs()
+
+        self.replay_buffer.update_priorities(sample_indices, td_error)
 
         self.optimizer.zero_grad(set_to_none=True)
         self.scaler.scale(loss).backward()
@@ -3157,7 +3355,7 @@ class VisualDiscreteAgent:
         }
 
     def reset_episode(self):
-        pass
+        self.greedy_action_count = 0
 
     def log_episode_metrics(self, win, invalid_click_rate):
         next_episode = self.episode_count + 1
@@ -3300,33 +3498,40 @@ class VisualDiscreteAgent:
             file_path.unlink()
 
         loaded_count = 0
+        self.replay_buffer.index = []
         for entry in persistent_index[:self.replay_buffer.max_size]:
             state_src = Path(entry['state_path'])
             if not state_src.exists():
                 continue
 
-            state_dst = VISUAL_REPLAY_PATH / f"state_{loaded_count}.pt"
+            storage_id = loaded_count
+            state_dst = VISUAL_REPLAY_PATH / f"state_{storage_id}.pt"
             shutil.copy2(str(state_src), str(state_dst))
 
             next_state_dst = None
             if entry['next_state_path']:
                 next_src = Path(entry['next_state_path'])
                 if next_src.exists():
-                    next_state_dst = VISUAL_REPLAY_PATH / f"next_state_{loaded_count}.pt"
+                    next_state_dst = VISUAL_REPLAY_PATH / f"next_state_{storage_id}.pt"
                     shutil.copy2(str(next_src), str(next_state_dst))
 
             runtime_entry = {
+                'storage_id': storage_id,
                 'state_path': str(state_dst),
                 'action': int(entry['action']),
                 'next_state_path': str(next_state_dst) if next_state_dst else None,
                 'reward': float(entry['reward']),
                 'done': bool(entry['done']),
+                'reward_type': self.replay_buffer._reward_type(float(entry['reward']), bool(entry['done'])),
+                'priority': float(np.clip(abs(float(entry['reward'])) + 1.0, VISUAL_PRIORITY_MIN, VISUAL_PRIORITY_MAX)),
+                'insert_order': loaded_count + 1,
             }
             self.replay_buffer.index.append(runtime_entry)
             loaded_count += 1
 
-        self.replay_buffer.ptr = loaded_count % self.replay_buffer.max_size
         self.replay_buffer.size_count = loaded_count
+        self.replay_buffer.next_storage_id = loaded_count
+        self.replay_buffer.insert_counter = loaded_count
         print(f"[VisualDDQN] Loaded {loaded_count} replay buffer entries")
 
     def _close_io_log(self):
@@ -3458,6 +3663,8 @@ class VisualDiscreteAgent:
             f"Action: {log_info['action_id']} -> ({row}, {col})",
             f"Source: {log_info.get('source', 'unknown')}",
         ]
+        if log_info.get('greedy_index') is not None:
+            text_lines.append(f"Greedy #: {log_info['greedy_index']}")
         if log_info.get('blocked_actions'):
             text_lines.append(f"Blocked: {log_info['blocked_actions']}")
         if log_info.get('selected_q') is not None:
