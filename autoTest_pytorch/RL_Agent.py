@@ -15,6 +15,7 @@ import atexit
 import datetime
 from pathlib import Path
 from ultralytics import YOLO
+from torch.utils.tensorboard import SummaryWriter
 
 
 class ScaledSigmoid(nn.Module):
@@ -92,6 +93,8 @@ MODEL_SAVE_PATH = Path("./models")
 VISUAL_MODEL_PATH = Path("./models/visual_transformer_6x6")
 VISUAL_REPLAY_PATH = VISUAL_MODEL_PATH / "replay_buffer"
 VISUAL_REPLAY_PERSISTENT_PATH = VISUAL_MODEL_PATH / "replay_buffer_save"
+VISUAL_TENSORBOARD_DIR = VISUAL_MODEL_PATH / "tensorboard"
+VISUAL_HISTOGRAM_EVERY = 20
 
 # Stage 1 paths
 STAGE1_MODEL_PATH = Path("./models/stage1")
@@ -2921,14 +2924,22 @@ class VisualDiscreteAgent:
         ])
 
         VISUAL_MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        VISUAL_TENSORBOARD_DIR.mkdir(parents=True, exist_ok=True)
         self._io_log = open(VISUAL_MODEL_PATH / 'train_io_log.txt', 'a', encoding='utf-8')
         self._io_log.write(f"\n{'='*60}\n")
         self._io_log.write(f"Session started: {datetime.datetime.now().isoformat()}\n")
         self._io_log.write(f"{'='*60}\n")
         self._io_log.flush()
 
+        tb_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.tensorboard_log_dir = VISUAL_TENSORBOARD_DIR / tb_timestamp
+        self.tb_writer = SummaryWriter(log_dir=str(self.tensorboard_log_dir))
+        print(f"[VisualDDQN] TensorBoard: tensorboard --logdir {VISUAL_TENSORBOARD_DIR}")
+        print(f"[VisualDDQN] Current run: {self.tensorboard_log_dir}")
+
         self.try_load_model()
         atexit.register(self.save_persistent)
+        atexit.register(self._close_tb_writer)
         atexit.register(self._close_io_log)
 
     def preprocess_screen(self, screenshot_path):
@@ -3056,7 +3067,22 @@ class VisualDiscreteAgent:
         self.optimizer.zero_grad(set_to_none=True)
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
-        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
+        grad_norm_total = torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
+        grad_norm_yolo = self._module_grad_norm(self.q_network.feature_extractor)
+        grad_norm_backbone = self._module_grad_norm(self.q_network.backbone_transformer)
+        grad_norm_policy = self._module_grad_norm(self.q_network.policy_transformer)
+        grad_norm_head = self._module_grad_norm(
+            nn.ModuleList([
+                self.q_network.input_proj,
+                self.q_network.input_fc,
+                self.q_network.policy_fc,
+                self.q_network.output_norm,
+                self.q_network.cell_pool,
+                self.q_network.cell_head,
+                self.q_network.row_embed,
+                self.q_network.col_embed,
+            ])
+        )
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
@@ -3079,9 +3105,28 @@ class VisualDiscreteAgent:
             f"  action_batch={action.tolist()}\n"
             f"  q_top5={top_actions}\n"
             f"  loss={loss.item():.6f} | q_mean={q_mean:.6f} | epsilon={self.epsilon:.4f}\n"
+            f"  grad_norm_total={float(grad_norm_total):.6f} | "
+            f"yolo={grad_norm_yolo:.6f} | backbone={grad_norm_backbone:.6f} | "
+            f"policy={grad_norm_policy:.6f} | head={grad_norm_head:.6f}\n"
             f"---\n"
         )
         self._io_log.flush()
+
+        self.tb_writer.add_scalar('train/loss', loss.item(), self.total_it)
+        self.tb_writer.add_scalar('train/q_mean', q_mean, self.total_it)
+        self.tb_writer.add_scalar('train/reward_mean', reward.mean().item(), self.total_it)
+        self.tb_writer.add_scalar('train/done_rate', done.mean().item(), self.total_it)
+        self.tb_writer.add_scalar('train/epsilon', self.epsilon, self.total_it)
+        self.tb_writer.add_scalar('grad/total_norm', float(grad_norm_total), self.total_it)
+        self.tb_writer.add_scalar('grad/yolo_norm', grad_norm_yolo, self.total_it)
+        self.tb_writer.add_scalar('grad/backbone_norm', grad_norm_backbone, self.total_it)
+        self.tb_writer.add_scalar('grad/policy_norm', grad_norm_policy, self.total_it)
+        self.tb_writer.add_scalar('grad/head_norm', grad_norm_head, self.total_it)
+
+        if self.total_it % VISUAL_HISTOGRAM_EVERY == 0:
+            self._log_tensorboard_histograms(self.total_it)
+
+        self.tb_writer.flush()
 
         return {
             'loss': loss.item(),
@@ -3095,6 +3140,7 @@ class VisualDiscreteAgent:
         self.episode_count += 1
         decay_progress = min(self.episode_count / self.epsilon_decay_episodes, 1.0)
         self.epsilon = self.epsilon_min + (0.30 - self.epsilon_min) * (1.0 - decay_progress)
+        self.tb_writer.add_scalar('episode/epsilon', self.epsilon, self.episode_count)
         self._save_model()
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
             print(f"[VisualDDQN] Periodic save at episode {self.episode_count} | epsilon={self.epsilon:.4f}")
@@ -3197,8 +3243,6 @@ class VisualDiscreteAgent:
             try:
                 state = torch.load(opt_path, map_location=device, weights_only=False)
                 self.optimizer.load_state_dict(state['optimizer'])
-                if 'scaler' in state:
-                    self.scaler.load_state_dict(state['scaler'])
                 self.total_it = state.get('total_it', 0)
                 self.episode_count = state.get('episode_count', 0)
                 self.epsilon = state.get('epsilon', self.epsilon)
@@ -3206,6 +3250,8 @@ class VisualDiscreteAgent:
                     f"[VisualDDQN] Loaded optimizer: total_it={self.total_it}, "
                     f"episode={self.episode_count}, epsilon={self.epsilon:.4f}"
                 )
+                if 'scaler' in state:
+                    print("[VisualDDQN] Skip restoring GradScaler state to avoid stale AMP optimizer stage")
             except Exception as e:
                 print(f"[VisualDDQN] Failed to load optimizer state: {e}")
 
@@ -3257,6 +3303,67 @@ class VisualDiscreteAgent:
     def _close_io_log(self):
         if self._io_log and not self._io_log.closed:
             self._io_log.close()
+
+    def _close_tb_writer(self):
+        if getattr(self, 'tb_writer', None) is not None:
+            self.tb_writer.close()
+
+    def _module_grad_norm(self, module):
+        grad_sq_sum = 0.0
+        for param in module.parameters():
+            if param.grad is None:
+                continue
+            grad_sq_sum += float(param.grad.detach().float().pow(2).sum().item())
+        return grad_sq_sum ** 0.5
+
+    def _log_tensorboard_histograms(self, global_step):
+        module_groups = {
+            'weights/yolo': self.q_network.feature_extractor,
+            'weights/backbone': self.q_network.backbone_transformer,
+            'weights/policy': self.q_network.policy_transformer,
+            'weights/head': nn.ModuleList([
+                self.q_network.input_proj,
+                self.q_network.input_fc,
+                self.q_network.policy_fc,
+                self.q_network.output_norm,
+                self.q_network.cell_pool,
+                self.q_network.cell_head,
+                self.q_network.row_embed,
+                self.q_network.col_embed,
+            ]),
+        }
+        grad_groups = {
+            'grads/yolo': self.q_network.feature_extractor,
+            'grads/backbone': self.q_network.backbone_transformer,
+            'grads/policy': self.q_network.policy_transformer,
+            'grads/head': nn.ModuleList([
+                self.q_network.input_proj,
+                self.q_network.input_fc,
+                self.q_network.policy_fc,
+                self.q_network.output_norm,
+                self.q_network.cell_pool,
+                self.q_network.cell_head,
+                self.q_network.row_embed,
+                self.q_network.col_embed,
+            ]),
+        }
+
+        for tag, module in module_groups.items():
+            values = [
+                param.detach().float().reshape(-1).cpu()
+                for param in module.parameters()
+            ]
+            if values:
+                self.tb_writer.add_histogram(tag, torch.cat(values), global_step)
+
+        for tag, module in grad_groups.items():
+            values = [
+                param.grad.detach().float().reshape(-1).cpu()
+                for param in module.parameters()
+                if param.grad is not None
+            ]
+            if values:
+                self.tb_writer.add_histogram(tag, torch.cat(values), global_step)
 
     def log_action_image(self, state, log_info, step_count, reward=None):
         if not LOG_ACTIONS or log_info is None:
