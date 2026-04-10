@@ -187,6 +187,7 @@ class Game_test_case(unittest.TestCase) :
             # 4. 將 36-class action 透過 API 打到網頁版遊戲
             row, col = game_status.agent.action_to_grid(action)
             print(f"Step {game_status.step_count}: action={action} -> ({row},{col}) -> ", end="")
+            game_status.click_attempt_count += 1
 
             if WEB_API.click_cell(row, col):
                 game_status.agent.log_action_image(
@@ -198,6 +199,7 @@ class Game_test_case(unittest.TestCase) :
 
             print("API action failed")
             game_status.reward = -1.0
+            game_status.invalid_click_count += 1
             game_status.agent.block_action_for_state(game_status.current_pic, game_status.action)
             
             game_status.agent.log_action_image(
@@ -252,6 +254,9 @@ class Game_test_case(unittest.TestCase) :
 
             self.game_over = 0 # Since this will pass into the model, and 0 represents not game over, 1 represents game over
             self.reward = 0.0
+            self.invalid_click_count = 0
+            self.click_attempt_count = 0
+            self.won = False
 
         def update_state(self, new_state, new_action):
             self.previous_pic = self.current_pic
@@ -259,6 +264,11 @@ class Game_test_case(unittest.TestCase) :
 
             self.current_pic = new_state
             self.action = new_action
+
+        def invalid_click_rate(self):
+            if self.click_attempt_count <= 0:
+                return 0.0
+            return self.invalid_click_count / self.click_attempt_count
 
     def test_RL(self):
         Tool_Main.glo_var.s_record_time()
@@ -274,10 +284,18 @@ class Game_test_case(unittest.TestCase) :
             check_pause()
             time.sleep(1)
             if game_status.game_over :
+                game_status.agent.log_episode_metrics(
+                    win=game_status.won,
+                    invalid_click_rate=game_status.invalid_click_rate(),
+                )
                 game_status.agent.on_episode_end()
                 self.assertTrue(True, "game_over(really finish the game)")
                 break
             elif Tool_Main.glo_var.fail_playing :
+                game_status.agent.log_episode_metrics(
+                    win=False,
+                    invalid_click_rate=game_status.invalid_click_rate(),
+                )
                 game_status.agent.on_episode_end()
                 self.assertTrue(False, "time_out(reach max steps)")
                 break
@@ -303,6 +321,7 @@ class Game_test_case(unittest.TestCase) :
                 elif Tool_Main.compare_sim("win", sys._getframe().f_code.co_name, precise=True) >= 0.9:
                     game_status.reward = 20.0
                     game_status.game_over = 1
+                    game_status.won = True
                     print("獲勝！")
 
                 game_status.agent.clear_blocked_actions(reason="screen changed after valid click")
@@ -319,6 +338,7 @@ class Game_test_case(unittest.TestCase) :
                 # case : nothing change after a period
                 game_status.step_count += 1
                 game_status.reward = -1.0
+                game_status.invalid_click_count += 1
                 print("無效點擊（畫面無變化）")
                 if game_status.current_pic is not None and game_status.action is not None:
                     game_status.agent.block_action_for_state(game_status.current_pic, game_status.action)

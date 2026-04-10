@@ -3159,6 +3159,12 @@ class VisualDiscreteAgent:
     def reset_episode(self):
         pass
 
+    def log_episode_metrics(self, win, invalid_click_rate):
+        next_episode = self.episode_count + 1
+        self.tb_writer.add_scalar('episode/win', float(bool(win)), next_episode)
+        self.tb_writer.add_scalar('episode/invalid_click_rate', float(invalid_click_rate), next_episode)
+        self.tb_writer.flush()
+
     def on_episode_end(self):
         self.episode_count += 1
         decay_progress = min(self.episode_count / self.epsilon_decay_episodes, 1.0)
