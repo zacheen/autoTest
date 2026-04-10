@@ -1653,7 +1653,7 @@ class TransformerActorNetwork(nn.Module):
         super().__init__()
         self.grid_h = grid_h
         self.grid_w = grid_w
-        self.num_tokens = grid_h * grid_w  # 100
+        self.num_tokens = grid_h * grid_w
 
         # Token embedding: 12-d one-hot → d_model
         self.token_embed = nn.Linear(grid_channels, d_model)
@@ -1773,7 +1773,7 @@ class DuelingQNetwork(nn.Module):
         a = self.advantage_stream(features).squeeze(-1)  # (B, H*W)
 
         # Dueling: Q = V + (A - mean(A))
-        q = v + a - a.mean(dim=1, keepdim=True)  # (B, H*W)
+        q = v + (a - a.mean(dim=1, keepdim=True))  # (B, H*W)
         return q.view(-1, self.grid_h, self.grid_w)  # (B, H, W)
 
 
@@ -2784,6 +2784,23 @@ class VisualTransformerBackbone(nn.Module):
     def forward(self, state):
         return self.get_features(state)
 
+    def load_transformer_backbone_weights(self, transformer_backbone_state):
+        loaded = []
+        for key in ('row_embed.weight', 'col_embed.weight'):
+            if key in transformer_backbone_state and key in self.state_dict():
+                self.state_dict()[key].copy_(transformer_backbone_state[key])
+                loaded.append(key)
+
+        transformer_state = {
+            key[len('transformer.'):]: value
+            for key, value in transformer_backbone_state.items()
+            if key.startswith('transformer.')
+        }
+        if transformer_state:
+            self.transformer.load_state_dict(transformer_state, strict=False)
+            loaded.append('transformer.*')
+        return loaded
+
 
 class VisualReplayBuffer:
     """Disk-backed replay buffer specialized for screenshot tensors."""
@@ -3056,13 +3073,12 @@ class VisualDiscreteAgent:
         self.q_target = DuelingQNetwork(d_model=VISUAL_D_MODEL, grid_h=self.grid_h, grid_w=self.grid_w).to(device)
         self.q_target.load_state_dict(self.q_network.state_dict())
         self.q_target.eval()
+        self._load_frozen_transformer_teacher()
+        self._freeze_teacher_modules()
 
-        yolo_param_ids = {id(param) for param in self.backbone.feature_extractor.parameters()}
-        shared_params = list(self.backbone.parameters()) + list(self.q_network.parameters())
-        adapter_and_q_params = [param for param in shared_params if id(param) not in yolo_param_ids]
         self.optimizer = optim.AdamW([
             {'params': self.backbone.feature_extractor.parameters(), 'lr': LR_VISUAL_YOLO},
-            {'params': adapter_and_q_params, 'lr': LR_VISUAL_POLICY},
+            {'params': self.backbone.token_embed.parameters(), 'lr': LR_VISUAL_POLICY},
         ])
         self.scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
 
@@ -3095,9 +3111,52 @@ class VisualDiscreteAgent:
         print(f"[VisualDDQN] Current run: {self.tensorboard_log_dir}")
 
         self.try_load_model()
+        self._set_runtime_modes()
         atexit.register(self.save_persistent)
         atexit.register(self._close_tb_writer)
         atexit.register(self._close_io_log)
+
+    def _load_frozen_transformer_teacher(self):
+        backbone_path = TRANSFORMER_MODEL_PATH / 'backbone.pth'
+        if backbone_path.exists():
+            try:
+                backbone_state = torch.load(backbone_path, map_location=device)
+                loaded = self.backbone.load_transformer_backbone_weights(backbone_state)
+                print(f"[VisualDDQN] Loaded frozen teacher backbone parts: {loaded}")
+            except Exception as e:
+                print(f"[VisualDDQN] Failed to load frozen teacher backbone: {e}")
+
+        q_path = TRANSFORMER_MODEL_PATH / 'q_network.pth'
+        if q_path.exists():
+            try:
+                self.q_network.load_state_dict(torch.load(q_path, map_location=device))
+                print("[VisualDDQN] Loaded frozen teacher Q-Network")
+            except Exception as e:
+                print(f"[VisualDDQN] Failed to load frozen teacher Q-Network: {e}")
+
+        q_target_path = TRANSFORMER_MODEL_PATH / 'q_target.pth'
+        if q_target_path.exists():
+            try:
+                self.q_target.load_state_dict(torch.load(q_target_path, map_location=device))
+                print("[VisualDDQN] Loaded frozen teacher Q-Target")
+            except Exception as e:
+                print(f"[VisualDDQN] Failed to load frozen teacher Q-Target: {e}")
+
+    def _freeze_teacher_modules(self):
+        for module in (self.backbone.transformer, self.backbone.row_embed, self.backbone.col_embed):
+            for param in module.parameters():
+                param.requires_grad_(False)
+
+        for module in (self.q_network, self.q_target):
+            for param in module.parameters():
+                param.requires_grad_(False)
+
+    def _set_runtime_modes(self):
+        self.backbone.feature_extractor.train()
+        self.backbone.token_embed.train()
+        self.backbone.transformer.eval()
+        self.q_network.eval()
+        self.q_target.eval()
 
     def preprocess_screen(self, screenshot_path):
         try:
@@ -3170,8 +3229,9 @@ class VisualDiscreteAgent:
             }
 
         state_batch = state.unsqueeze(0).to(device)
-        self.backbone.eval()
-        self.q_network.eval()
+        self._set_runtime_modes()
+        self.backbone.feature_extractor.eval()
+        self.backbone.token_embed.eval()
         with torch.no_grad():
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
                 features = self.backbone.get_features(state_batch)
@@ -3185,8 +3245,7 @@ class VisualDiscreteAgent:
             action_id = int(masked_logits.argmax().item())
             topk = min(5, len(available_actions))
             top_vals, top_idx = torch.topk(masked_logits, k=topk)
-        self.backbone.train()
-        self.q_network.train()
+        self._set_runtime_modes()
 
         row, col = self.action_to_grid(action_id)
         top_actions = []
@@ -3215,6 +3274,7 @@ class VisualDiscreteAgent:
         self.total_it += 1
         state, action, next_state, reward, done, sample_indices = self.replay_buffer.sample(VISUAL_BATCH_SIZE)
         batch_size = state.size(0)
+        self._set_runtime_modes()
 
         with torch.no_grad():
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
@@ -3247,7 +3307,7 @@ class VisualDiscreteAgent:
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
         grad_norm_total = torch.nn.utils.clip_grad_norm_(
-            list(self.backbone.parameters()) + list(self.q_network.parameters()),
+            list(self.backbone.feature_extractor.parameters()) + list(self.backbone.token_embed.parameters()),
             max_norm=1.0,
         )
         grad_norm_yolo = self._module_grad_norm(self.backbone.feature_extractor)
@@ -3346,9 +3406,10 @@ class VisualDiscreteAgent:
 
     def _save_model(self):
         VISUAL_MODEL_PATH.mkdir(parents=True, exist_ok=True)
-        torch.save(self.backbone.state_dict(), VISUAL_MODEL_PATH / 'backbone.pth')
-        torch.save(self.q_network.state_dict(), VISUAL_MODEL_PATH / 'q_network.pth')
-        torch.save(self.q_target.state_dict(), VISUAL_MODEL_PATH / 'q_target.pth')
+        torch.save({
+            'feature_extractor': self.backbone.feature_extractor.state_dict(),
+            'token_embed': self.backbone.token_embed.state_dict(),
+        }, VISUAL_MODEL_PATH / 'trainable_backbone.pth')
         torch.save({
             'optimizer': self.optimizer.state_dict(),
             'scaler': self.scaler.state_dict(),
@@ -3421,29 +3482,17 @@ class VisualDiscreteAgent:
         }, VISUAL_MODEL_PATH / 'training_state.pth')
 
     def try_load_model(self):
-        backbone_path = VISUAL_MODEL_PATH / 'backbone.pth'
-        if backbone_path.exists():
+        trainable_backbone_path = VISUAL_MODEL_PATH / 'trainable_backbone.pth'
+        if trainable_backbone_path.exists():
             try:
-                self.backbone.load_state_dict(torch.load(backbone_path, map_location=device))
-                print("[VisualDDQN] Loaded Backbone")
+                state = torch.load(trainable_backbone_path, map_location=device)
+                if 'feature_extractor' in state:
+                    self.backbone.feature_extractor.load_state_dict(state['feature_extractor'])
+                if 'token_embed' in state:
+                    self.backbone.token_embed.load_state_dict(state['token_embed'])
+                print("[VisualDDQN] Loaded trainable visual backbone parts")
             except Exception as e:
-                print(f"[VisualDDQN] Failed to load Backbone: {e}")
-
-        q_path = VISUAL_MODEL_PATH / 'q_network.pth'
-        if q_path.exists():
-            try:
-                self.q_network.load_state_dict(torch.load(q_path, map_location=device))
-                print("[VisualDDQN] Loaded Q-Network")
-            except Exception as e:
-                print(f"[VisualDDQN] Failed to load Q-Network: {e}")
-
-        q_target_path = VISUAL_MODEL_PATH / 'q_target.pth'
-        if q_target_path.exists():
-            try:
-                self.q_target.load_state_dict(torch.load(q_target_path, map_location=device))
-                print("[VisualDDQN] Loaded Q-Target")
-            except Exception as e:
-                print(f"[VisualDDQN] Failed to load Q-Target: {e}")
+                print(f"[VisualDDQN] Failed to load trainable visual backbone parts: {e}")
 
         opt_path = VISUAL_MODEL_PATH / 'optimizer_state.pth'
         if opt_path.exists():
@@ -3471,6 +3520,9 @@ class VisualDiscreteAgent:
                     self._load_persistent_buffer(persistent_index)
             except Exception as e:
                 print(f"[VisualDDQN] Failed to load replay buffer: {e}")
+
+        self._freeze_teacher_modules()
+        self._set_runtime_modes()
 
     def _load_persistent_buffer(self, persistent_index):
         VISUAL_REPLAY_PATH.mkdir(parents=True, exist_ok=True)
