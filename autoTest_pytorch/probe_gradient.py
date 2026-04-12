@@ -12,10 +12,8 @@ import torch
 from pathlib import Path
 from collections import defaultdict
 
-from RL_Agent import (
-    TransformerDiscreteAgent, TRANSFORMER_MODEL_PATH, device,
-    BATCH_SIZE, GAMMA,
-)
+from RL_Agent import BATCH_SIZE, GAMMA, device
+from transformer_discrete_agent import TRANSFORMER_MODEL_PATH, TransformerDiscreteAgent
 
 REPORT_PATH = TRANSFORMER_MODEL_PATH / 'gradient_report.txt'
 

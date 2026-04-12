@@ -20,10 +20,9 @@ from pathlib import Path
 from collections import defaultdict
 
 from Minesweeper.MinesweeperLogic import MinesweeperLogic
-from RL_Agent import (
-    TransformerActorNetwork, DuelingQNetwork,
-    TRANSFORMER_MODEL_PATH, device, GRID_STATE_CHANNELS,
-)
+from RL_Agent import GRID_STATE_CHANNELS, device
+from transformer_discrete_agent import TRANSFORMER_MODEL_PATH, TransformerActorNetwork
+from transformer_shared import DuelingQNetwork
 
 REPORT_PATH = TRANSFORMER_MODEL_PATH / 'probe_report.txt'
 SEEDS = [42, 123, 7]

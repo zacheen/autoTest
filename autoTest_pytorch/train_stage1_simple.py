@@ -21,7 +21,7 @@ from pathlib import Path
 from torch.utils.tensorboard import SummaryWriter
 
 from Minesweeper.MinesweeperLogic import MinesweeperLogic
-from RL_Agent import TransformerDiscreteAgent
+from transformer_discrete_agent import TransformerDiscreteAgent
 
 # ---------- 訓練參數 ----------
 GRID_ROWS = 6
