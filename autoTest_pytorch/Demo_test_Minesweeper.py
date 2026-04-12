@@ -30,7 +30,7 @@ from Gf_Except import Game_fail_Exception
 from Minesweeper_web_client import MinesweeperWebClient
 
 from Minesweeper.Minesweeper_manager import Minesweeper_manager
-from RL_Agent import get_agent
+from visual_discrete_agent import get_agent
 
 WEB_API = MinesweeperWebClient(default_difficulty="Training 6x6")
 REWARD_VALID_CLICK = 1.0
