@@ -1670,6 +1670,16 @@ class TransformerActorNetwork(nn.Module):
             batch_first=True,
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+        )
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+        self.query_tokens = nn.Parameter(torch.randn(1, self.num_tokens, d_model) * 0.02)
 
         # Per-token output head → 1 logit per token
         self.output_head = nn.Linear(d_model, 1)
@@ -1704,6 +1714,19 @@ class TransformerActorNetwork(nn.Module):
         x = x + pos.unsqueeze(0)  # broadcast over batch
         return x
 
+    def _position_encoding(self):
+        return torch.cat([
+            self.row_embed(self.row_indices),
+            self.col_embed(self.col_indices),
+        ], dim=-1)
+
+    def _build_decoder_queries(self, batch_size):
+        return self.query_tokens.expand(batch_size, -1, -1) + self._position_encoding().unsqueeze(0)
+
+    def get_memory(self, state):
+        x = self._embed(state)
+        return self.transformer(x)
+
     def get_features(self, state):
         """提取 Transformer 特徵（供 Critic 共用）。
 
@@ -1712,9 +1735,9 @@ class TransformerActorNetwork(nn.Module):
         Returns:
             (B, 100, d_model) — Transformer 最後一層輸出
         """
-        x = self._embed(state)
-        x = self.transformer(x)
-        return x
+        memory = self.get_memory(state)
+        query_tokens = self._build_decoder_queries(state.size(0))
+        return self.decoder(query_tokens, memory)
 
     def forward(self, state):
         """
@@ -2037,8 +2060,13 @@ class TransformerDiscreteAgent:
         backbone_path = TRANSFORMER_MODEL_PATH / 'backbone.pth'
         if backbone_path.exists():
             try:
-                self.backbone.load_state_dict(torch.load(backbone_path, map_location=device))
+                backbone_state = torch.load(backbone_path, map_location=device)
+                incompatible = self.backbone.load_state_dict(backbone_state, strict=False)
                 print("[DDQN] Loaded Backbone")
+                if incompatible.missing_keys:
+                    print(f"[DDQN] Backbone missing keys: {incompatible.missing_keys}")
+                if incompatible.unexpected_keys:
+                    print(f"[DDQN] Backbone unexpected keys: {incompatible.unexpected_keys}")
             except Exception as e:
                 print(f"[DDQN] Failed to load Backbone: {e}")
 
