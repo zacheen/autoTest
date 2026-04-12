@@ -17,7 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 from ultralytics import YOLO
 
 from transformer_discrete_agent import TRANSFORMER_MODEL_PATH
-from transformer_shared import DuelingQNetwork, EncoderDecoderTransformer, TwoDimensionalPositionEmbedding
+from model_structure.transformer_shared import DuelingQNetwork, EncoderDecoderTransformer, TwoDimensionalPositionEmbedding
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

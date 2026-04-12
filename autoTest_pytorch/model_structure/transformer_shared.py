@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 
-
 class TwoDimensionalPositionEmbedding(nn.Module):
     """Learned 2D positional embedding flattened into a token sequence."""
 

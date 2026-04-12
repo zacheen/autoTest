@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from transformer_shared import DuelingQNetwork, EncoderDecoderTransformer, TwoDimensionalPositionEmbedding
+from model_structure.transformer_shared import DuelingQNetwork, EncoderDecoderTransformer, TwoDimensionalPositionEmbedding
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -128,7 +128,7 @@ class TransformerDiscreteAgent:
         self.q_target.load_state_dict(self.q_network.state_dict())
         self.q_target.eval()
 
-        from RL_Agent import PERReplayBuffer
+        from model_structure.PERReplayBuffer import PERReplayBuffer
 
         self.optimizer = optim.Adam(
             list(self.backbone.parameters()) + list(self.q_network.parameters()),
