@@ -455,6 +455,11 @@ class VisualDiscreteAgent:
         self.optimizer.zero_grad(set_to_none=True)
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
+        yolo_params_before_step = [
+            param.detach().float().cpu().clone()
+            for param in self.backbone.feature_extractor.parameters()
+            if param.requires_grad
+        ]
         grad_norm_total = torch.nn.utils.clip_grad_norm_(self.backbone.trainable_parameters(), max_norm=1.0)
         grad_norm_yolo = self._module_grad_norm(self.backbone.feature_extractor)
         grad_norm_backbone = self._module_grad_norm(self.backbone.core)
@@ -467,6 +472,10 @@ class VisualDiscreteAgent:
         yolo_debug = self._module_grad_debug(self.backbone.feature_extractor)
         self.scaler.step(self.optimizer)
         self.scaler.update()
+        yolo_param_delta = self._parameter_delta_norm(
+            self.backbone.feature_extractor,
+            yolo_params_before_step,
+        )
 
         if self.total_it % TARGET_UPDATE_FREQ == 0:
             self.q_target.load_state_dict(self.q_network.state_dict())
@@ -489,7 +498,8 @@ class VisualDiscreteAgent:
             f"  loss={loss.item():.6f} | q_mean={q_mean:.6f} | epsilon={self.epsilon:.4f}\n"
             f"  grad_norm_total={float(grad_norm_total):.6f} | "
             f"yolo={grad_norm_yolo:.6f} | backbone={grad_norm_backbone:.6f} | "
-            f"policy={grad_norm_policy:.6f} | head={grad_norm_head:.6f}\n"
+            f"policy={grad_norm_policy:.6f} | head={grad_norm_head:.6f} | "
+            f"yolo_param_delta={yolo_param_delta:.6f}\n"
             f"  yolo_debug="
             f"params:{yolo_debug['param_count']} | "
             f"requires_grad:{yolo_debug['requires_grad_count']} | "
@@ -506,6 +516,7 @@ class VisualDiscreteAgent:
         self.tb_writer.add_scalar("train/epsilon", self.epsilon, self.total_it)
         self.tb_writer.add_scalar("grad/total_norm", float(grad_norm_total), self.total_it)
         self.tb_writer.add_scalar("grad/yolo_norm", grad_norm_yolo, self.total_it)
+        self.tb_writer.add_scalar("grad/yolo_param_delta", yolo_param_delta, self.total_it)
         self.tb_writer.add_scalar("grad/backbone_norm", grad_norm_backbone, self.total_it)
         self.tb_writer.add_scalar("grad/policy_norm", grad_norm_policy, self.total_it)
         self.tb_writer.add_scalar("grad/head_norm", grad_norm_head, self.total_it)
@@ -782,6 +793,19 @@ class VisualDiscreteAgent:
             "grad_element_count": grad_element_count,
             "nan_grad_count": nan_grad_count,
         }
+
+    def _parameter_delta_norm(self, module, params_before_step):
+        delta_sq_sum = 0.0
+        before_iter = iter(params_before_step)
+        for param in module.parameters():
+            if not param.requires_grad:
+                continue
+            before = next(before_iter, None)
+            if before is None:
+                break
+            after = param.detach().float().cpu()
+            delta_sq_sum += float((after - before).pow(2).sum().item())
+        return delta_sq_sum ** 0.5
 
     def _log_tensorboard_histograms(self, global_step):
         module_groups = {
