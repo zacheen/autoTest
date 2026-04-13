@@ -128,17 +128,24 @@ class TransformerDiscreteAgent:
         self.q_target.load_state_dict(self.q_network.state_dict())
         self.q_target.eval()
 
-        from model_structure.PERReplayBuffer import PERReplayBuffer
+        from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 
         self.optimizer = optim.Adam(
             list(self.backbone.parameters()) + list(self.q_network.parameters()),
             lr=LR_DDQN,
         )
 
-        self.replay_buffer = PERReplayBuffer(capacity=PER_CAPACITY, alpha=PER_ALPHA)
+        self.replay_buffer = CategorizedReplayBuffer(
+            max_size=PER_CAPACITY,
+            storage_mode="ram",
+            win_threshold=3.0,
+            lose_threshold=-1.0, 
+            invalid_threshold=0.0,
+            alpha=PER_ALPHA,
+            beta_start=PER_BETA_START
+        )
         self.total_it = 0
         self.episode_count = 0
-        self.beta = PER_BETA_START
 
         self.epsilon = 0.3
         self.epsilon_min = 0.05
@@ -185,9 +192,12 @@ class TransformerDiscreteAgent:
             return None
 
         self.total_it += 1
+        
+        # CategorizedReplayBuffer stores beta internally if not provided, but we can still pass it explicitly
         state, action, next_state, reward, done, per_indices, is_weights = self.replay_buffer.sample(
             BATCH_SIZE,
-            beta=self.beta,
+            beta=PER_BETA_START + (PER_BETA_END - PER_BETA_START) * min(self.episode_count / 5000.0, 1.0),
+            device=device
         )
 
         action = action.long()
@@ -290,13 +300,11 @@ class TransformerDiscreteAgent:
         self.episode_count += 1
         decay_progress = min(self.episode_count / self.epsilon_decay_episodes, 1.0)
         self.epsilon = self.epsilon_min + (0.3 - self.epsilon_min) * (1.0 - decay_progress)
-        beta_progress = min(self.episode_count / 5000.0, 1.0)
-        self.beta = PER_BETA_START + (PER_BETA_END - PER_BETA_START) * beta_progress
         self._save_model()
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
             print(
                 f"[DDQN] Periodic save at episode {self.episode_count}"
-                f" | epsilon={self.epsilon:.4f} | beta={self.beta:.4f}"
+                f" | epsilon={self.epsilon:.4f}"
             )
             self.save_persistent()
 
@@ -311,7 +319,6 @@ class TransformerDiscreteAgent:
                 "total_it": self.total_it,
                 "episode_count": self.episode_count,
                 "epsilon": self.epsilon,
-                "beta": self.beta,
             },
             TRANSFORMER_MODEL_PATH / "optimizer_state.pth",
         )
@@ -322,15 +329,22 @@ class TransformerDiscreteAgent:
         if total == 0:
             return
 
-        if total <= SAVE_CAPACITY:
-            all_entries = buf.get_all_entries()
-        else:
-            all_entries = buf.get_top_entries(SAVE_CAPACITY)
+        all_entries = buf.get_all_entries()
+        
+        # Sort by priority locally to do Top-K before saving
+        all_entries_sorted = sorted(
+            all_entries, 
+            key=lambda e: buf._effective_priority(e), 
+            reverse=True
+        )
+        
+        if len(all_entries_sorted) > SAVE_CAPACITY:
+            all_entries_sorted = all_entries_sorted[:SAVE_CAPACITY]
 
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
-                "persistent_entries": all_entries,
+                "persistent_entries": all_entries_sorted,
                 "total_it": self.total_it,
                 "episode_count": self.episode_count,
             },
@@ -338,10 +352,10 @@ class TransformerDiscreteAgent:
         )
 
         saved_rewards = defaultdict(int)
-        for entry in all_entries:
+        for entry in all_entries_sorted:
             saved_rewards[entry["reward"]] += 1
         print("--- save info ---------------")
-        print(f"[DDQN] Persistent save: {len(all_entries)} entries")
+        print(f"[DDQN] Persistent save: {len(all_entries_sorted)} entries")
         print(f"[DDQN] Reward distribution: {dict(saved_rewards)}")
         print("--- save end ---------------")
 
@@ -384,12 +398,9 @@ class TransformerDiscreteAgent:
                 self.episode_count = state.get("episode_count", 0)
                 if "epsilon" in state:
                     self.epsilon = state["epsilon"]
-                if "beta" in state:
-                    self.beta = state["beta"]
                 print(
                     f"[DDQN] Loaded optimizer: total_it={self.total_it},"
-                    f" episode={self.episode_count}, epsilon={self.epsilon:.4f},"
-                    f" beta={self.beta:.4f}"
+                    f" episode={self.episode_count}, epsilon={self.epsilon:.4f}"
                 )
             except Exception as exc:
                 print(f"[DDQN] Failed to load optimizer state: {exc}")
@@ -399,16 +410,25 @@ class TransformerDiscreteAgent:
             try:
                 state = torch.load(training_state_path, map_location=device, weights_only=False)
                 persistent_entries = state.get("persistent_entries", [])
-                loaded = min(len(persistent_entries), PER_CAPACITY)
-                for idx in range(loaded):
-                    entry = persistent_entries[idx]
-                    self.replay_buffer.store(
-                        entry["state"],
-                        entry["action"],
-                        entry["next_state"],
-                        entry["reward"],
-                        entry["done"],
-                    )
+                
+                # Check format to cleanly transition if an old save has a different shape
+                if persistent_entries and isinstance(persistent_entries[0], dict) and "storage_id" in persistent_entries[0]:
+                    # Exactly load using new format
+                    self.replay_buffer.load_from_entries(persistent_entries)
+                    loaded = len(persistent_entries)
+                else:
+                    # Legacy transition format
+                    loaded = min(len(persistent_entries), PER_CAPACITY)
+                    for idx in range(loaded):
+                        entry = persistent_entries[idx]
+                        self.replay_buffer.store(
+                            entry["state"],
+                            entry["action"],
+                            entry["next_state"],
+                            entry["reward"],
+                            entry["done"],
+                        )
+                
                 if loaded > 0:
                     print(f"[DDQN] Loaded {loaded} replay buffer entries")
             except Exception as exc:
