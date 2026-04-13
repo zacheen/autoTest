@@ -620,10 +620,6 @@ class Stage1CriticNetwork(nn.Module):
         x = torch.cat([embedding, action], dim=-1)
         return self.q1(x), self.q2(x)
 
-
-class SumTree:
-
-
 class Stage1ReplayBuffer:
     """Stage 1 用的 per-class circular buffer。
 

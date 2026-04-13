@@ -502,7 +502,6 @@ class VisualDiscreteAgent:
 
         self.tb_writer.add_scalar("train/loss", loss.item(), self.total_it)
         self.tb_writer.add_scalar("train/q_mean", q_mean, self.total_it)
-        self.tb_writer.add_scalar("train/reward_mean", reward.mean().item(), self.total_it)
         self.tb_writer.add_scalar("train/done_rate", done.mean().item(), self.total_it)
         self.tb_writer.add_scalar("train/epsilon", self.epsilon, self.total_it)
         self.tb_writer.add_scalar("grad/total_norm", float(grad_norm_total), self.total_it)
@@ -538,8 +537,9 @@ class VisualDiscreteAgent:
     def reset_episode(self):
         pass
 
-    def log_episode_metrics(self, win, invalid_click_rate):
+    def log_episode_metrics(self, win, invalid_click_rate, reward_mean):
         next_episode = self.episode_count + 1
+        self.tb_writer.add_scalar("episode/reward_mean", float(reward_mean), next_episode)
         self.tb_writer.add_scalar("episode/win", float(bool(win)), next_episode)
         self.tb_writer.add_scalar("episode/invalid_click_rate", float(invalid_click_rate), next_episode)
         self.tb_writer.flush()
@@ -607,6 +607,9 @@ class VisualDiscreteAgent:
 
         persistent_index = []
         save_idx = 0
+        for old_idx in selected_indices:
+            old_entry = buf.index[old_idx]
+
             state_src = Path(old_entry["state"])
             if not state_src.exists():
                 continue

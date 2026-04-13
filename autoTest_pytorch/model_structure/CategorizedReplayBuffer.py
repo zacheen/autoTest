@@ -331,7 +331,7 @@ class CategorizedReplayBuffer:
         tensor_states = torch.stack(states).to(device) if torch.is_tensor(states[0]) else states
         tensor_next_states = torch.stack(next_states).to(device) if torch.is_tensor(next_states[0]) else next_states
         
-        tensor_actions = torch.tensor(np.array(actions), dtype=torch.float32 if not isinstance(actions[0], (int, np.integer)) else torch.long, device=device)
+        tensor_actions = torch.tensor(np.array(actions), dtype=torch.long, device=device)
         tensor_rewards = torch.tensor(rewards, dtype=torch.float32, device=device).unsqueeze(1)
         tensor_dones = torch.tensor(dones, dtype=torch.float32, device=device).unsqueeze(1)
 

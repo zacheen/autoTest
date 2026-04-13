@@ -203,6 +203,7 @@ class Game_test_case(unittest.TestCase) :
 
             print("API action failed")
             game_status.reward = -1.0
+            game_status.record_reward(game_status.reward)
             game_status.invalid_click_count += 1
             game_status.agent.block_action_for_state(game_status.current_pic, game_status.action)
             
@@ -258,6 +259,8 @@ class Game_test_case(unittest.TestCase) :
 
             self.game_over = 0 # Since this will pass into the model, and 0 represents not game over, 1 represents game over
             self.reward = 0.0
+            self.total_reward = 0.0
+            self.reward_count = 0
             self.invalid_click_count = 0
             self.click_attempt_count = 0
             self.won = False
@@ -273,6 +276,15 @@ class Game_test_case(unittest.TestCase) :
             if self.click_attempt_count <= 0:
                 return 0.0
             return self.invalid_click_count / self.click_attempt_count
+
+        def record_reward(self, reward):
+            self.total_reward += float(reward)
+            self.reward_count += 1
+
+        def average_reward(self):
+            if self.reward_count <= 0:
+                return 0.0
+            return self.total_reward / self.reward_count
 
     def test_RL(self):
         Tool_Main.glo_var.s_record_time()
@@ -290,6 +302,7 @@ class Game_test_case(unittest.TestCase) :
                 game_status.agent.log_episode_metrics(
                     win=game_status.won,
                     invalid_click_rate=game_status.invalid_click_rate(),
+                    reward_mean=game_status.average_reward(),
                 )
                 game_status.agent.on_episode_end()
                 self.assertTrue(True, "game_over(really finish the game)")
@@ -298,6 +311,7 @@ class Game_test_case(unittest.TestCase) :
                 game_status.agent.log_episode_metrics(
                     win=False,
                     invalid_click_rate=game_status.invalid_click_rate(),
+                    reward_mean=game_status.average_reward(),
                 )
                 game_status.agent.on_episode_end()
                 self.assertTrue(False, "time_out(reach max steps)")
@@ -326,6 +340,7 @@ class Game_test_case(unittest.TestCase) :
                     game_status.won = True
                     print("獲勝！")
 
+                game_status.record_reward(game_status.reward)
                 game_status.agent.clear_blocked_actions(reason="screen changed after valid click")
                 self.update_model(game_status)
                 if not game_status.game_over :
@@ -340,6 +355,7 @@ class Game_test_case(unittest.TestCase) :
                 # case : nothing change after a period
                 game_status.step_count += 1
                 game_status.reward = REWARD_INVALID_CLICK
+                game_status.record_reward(game_status.reward)
                 game_status.invalid_click_count += 1
                 print("無效點擊（畫面無變化）")
                 if game_status.current_pic is not None and game_status.action is not None:
