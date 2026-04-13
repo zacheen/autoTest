@@ -77,11 +77,10 @@ def compute_reward(result, out_of_bounds):
     """根據 ClickResult 計算 reward。
 
     Reward 階層：
-        +20  贏
-        -10  踩雷
-        +1   有效點擊（翻開新格子）
-        -2   無效點擊（已翻開、已標旗）
-        -3   超出 grid 範圍
+        +3.6  贏
+        -1.0  踩雷
+        +1.0   有效點擊（翻開新格子）
+        -0.98 無效點擊（已翻開、已標旗或超出範圍）
 
     Args:
         result: MinesweeperLogic.ClickResult (如果 out_of_bounds=True 則為 None)
@@ -90,14 +89,14 @@ def compute_reward(result, out_of_bounds):
         float: reward 值
     """
     if out_of_bounds:
-        return -3.0
+        return -0.98
     if result.win:
-        return 20.0
+        return 3.6
     if result.game_over:
-        return -3.0
+        return -1.0
     if result.changed:
-        return 3.0    # 有效點擊
-    return -2.0        # 無效點擊（已翻開、已標旗）
+        return 1.0    # 有效點擊
+    return -0.98       # 無效點擊（已翻開、已標旗）
 
 
 def run_episode(logic, agent, add_noise=True):

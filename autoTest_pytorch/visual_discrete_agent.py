@@ -210,9 +210,9 @@ class VisualReplayBuffer:
 
     def _reward_type(self, reward, done):
         reward = float(reward)
-        if done and reward >= 20.0:
+        if done and reward >= 3.0:
             return "win"
-        if done and reward <= -10.0:
+        if done and reward <= -1.0:
             return "lose"
         if reward < 0:
             return "invalid"
