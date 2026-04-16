@@ -209,10 +209,10 @@ def run_episode(logic, agent, add_noise=True):
     total_clicks = valid_clicks + invalid_clicks
     invalid_rate = invalid_clicks / total_clicks if total_clicks > 0 else 0.0
 
-    avg_loss = None
+    avg_q_loss = None
     avg_q_mean = None
     if train_info_list:
-        avg_loss = np.mean([t['loss'] for t in train_info_list])
+        avg_q_loss = np.mean([t['Q_loss'] for t in train_info_list])
         avg_q_mean = np.mean([t['q_mean'] for t in train_info_list])
 
     return {
@@ -222,7 +222,7 @@ def run_episode(logic, agent, add_noise=True):
         'invalid_rate': invalid_rate,
         'valid_clicks': valid_clicks,
         'invalid_clicks': invalid_clicks,
-        'loss': avg_loss,
+        'Q_loss': avg_q_loss,
         'q_mean': avg_q_mean,
     }
 
@@ -296,7 +296,7 @@ def main():
     csv_fields = [
         'episode', 'reward', 'steps', 'is_win', 'invalid_rate',
         'valid_clicks', 'invalid_clicks',
-        'loss', 'q_mean', 'epsilon',
+        'Q_loss', 'q_mean', 'epsilon',
         'eval_avg_reward', 'eval_win_rate', 'eval_avg_steps', 'eval_avg_invalid_rate',
         'timestamp',
     ]
@@ -327,8 +327,8 @@ def main():
             writer.add_scalar('train/episode_reward', stats['reward'], episode)
             writer.add_scalar('train/episode_steps', stats['steps'], episode)
             writer.add_scalar('train/invalid_rate', stats['invalid_rate'], episode)
-            if stats['loss'] is not None:
-                writer.add_scalar('train/loss', stats['loss'], episode)
+            if stats['Q_loss'] is not None:
+                writer.add_scalar('train/Q_loss', stats['Q_loss'], episode)
                 writer.add_scalar('train/q_mean', stats['q_mean'], episode)
 
             # CSV
@@ -340,7 +340,7 @@ def main():
                 'invalid_rate': f"{stats['invalid_rate']:.4f}",
                 'valid_clicks': stats['valid_clicks'],
                 'invalid_clicks': stats['invalid_clicks'],
-                'loss': f"{stats['loss']:.6f}" if stats['loss'] is not None else '',
+                'Q_loss': f"{stats['Q_loss']:.6f}" if stats['Q_loss'] is not None else '',
                 'q_mean': f"{stats['q_mean']:.4f}" if stats['q_mean'] is not None else '',
                 'epsilon': f"{agent.epsilon:.4f}",
                 'eval_avg_reward': '',

@@ -551,7 +551,7 @@ class VisualDiscreteAgent:
         )
         self._io_log.flush()
 
-        self.tb_writer.add_scalar("train/loss", loss.item(), self.total_it)
+        self.tb_writer.add_scalar("train/Q_loss", loss.item(), self.total_it)
         self.tb_writer.add_scalar("train/q_mean", q_mean, self.total_it)
         self.tb_writer.add_scalar("train/done_rate", done.mean().item(), self.total_it)
         self.tb_writer.add_scalar("train/epsilon", self.epsilon, self.total_it)
@@ -582,7 +582,7 @@ class VisualDiscreteAgent:
         self.tb_writer.flush()
 
         return {
-            "loss": loss.item(),
+            "Q_loss": loss.item(),
             "q_mean": q_mean,
         }
 

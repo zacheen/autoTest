@@ -338,7 +338,7 @@ class TransformerDiscreteAgent:
         self._io_log.flush()
 
         return {
-            "loss": loss.item(),
+            "Q_loss": loss.item(),
             "q_mean": q_mean,
         }
 
