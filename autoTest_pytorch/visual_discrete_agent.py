@@ -445,6 +445,7 @@ class VisualDiscreteAgent:
             last_transition["done"],
             discount=discount,
             n_steps=horizon,
+            tail_reward=last_transition["reward"],
         )
         self.n_step_buffer.popleft()
 
@@ -636,7 +637,7 @@ class VisualDiscreteAgent:
 
         reward_groups = defaultdict(list)
         for idx in range(buf.size_count):
-            reward_groups[buf.index[idx]["reward"]].append(idx)
+            reward_groups[buf.index[idx].get("tail_reward", buf.index[idx]["reward"])].append(idx)
 
         target = min(VISUAL_SAVE_CAPACITY, buf.size_count)
         selected_indices = []
@@ -683,6 +684,7 @@ class VisualDiscreteAgent:
                     "action": old_entry["action"],
                     "next_state": str(next_state_dst) if next_state_dst else None,
                     "reward": old_entry["reward"],
+                    "tail_reward": float(old_entry.get("tail_reward", old_entry["reward"])),
                     "done": old_entry["done"],
                     "discount": float(old_entry.get("discount", 1.0)),
                     "n_steps": int(old_entry.get("n_steps", 1)),
@@ -783,10 +785,14 @@ class VisualDiscreteAgent:
                 "action": int(entry["action"]),
                 "next_state": str(next_state_dst) if next_state_dst else None,
                 "reward": float(entry["reward"]),
+                "tail_reward": float(entry.get("tail_reward", entry["reward"])),
                 "done": bool(entry["done"]),
                 "discount": float(entry.get("discount", 1.0)),
                 "n_steps": int(entry.get("n_steps", 1)),
-                "reward_type": self.replay_buffer._reward_type(float(entry["reward"]), bool(entry["done"])),
+                "reward_type": self.replay_buffer._reward_type(
+                    float(entry.get("tail_reward", entry["reward"])),
+                    bool(entry["done"]),
+                ),
                 "priority": float(np.clip(abs(float(entry["reward"])) + 1.0, VISUAL_PRIORITY_MIN, VISUAL_PRIORITY_MAX)),
                 "insert_order": loaded_count + 1,
             }

@@ -228,6 +228,7 @@ class TransformerDiscreteAgent:
             last_transition["done"],
             discount=discount,
             n_steps=horizon,
+            tail_reward=last_transition["reward"],
         )
         self.n_step_buffer.popleft()
 
@@ -405,11 +406,14 @@ class TransformerDiscreteAgent:
         )
 
         saved_rewards = defaultdict(int)
+        saved_buckets = defaultdict(int)
         for entry in all_entries_sorted:
-            saved_rewards[entry["reward"]] += 1
+            saved_rewards[entry.get("tail_reward", entry["reward"])] += 1
+            saved_buckets[entry["reward_type"]] += 1
         print("--- save info ---------------")
         print(f"[DDQN] Persistent save: {len(all_entries_sorted)} entries")
-        print(f"[DDQN] Reward distribution: {dict(saved_rewards)}")
+        print(f"[DDQN] Tail reward distribution: {dict(saved_rewards)}")
+        print(f"[DDQN] Reward bucket distribution: {dict(saved_buckets)}")
         print("--- save end ---------------")
 
     def try_load_model(self):

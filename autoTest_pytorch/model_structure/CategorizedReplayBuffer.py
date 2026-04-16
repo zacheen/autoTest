@@ -214,7 +214,17 @@ class CategorizedReplayBuffer:
 
         return chosen[:count]
 
-    def store(self, state, action, next_state, reward, done, discount=1.0, n_steps=1):
+    def store(
+        self,
+        state,
+        action,
+        next_state,
+        reward,
+        done,
+        discount=1.0,
+        n_steps=1,
+        tail_reward=None,
+    ):
         """Store a transition."""
         self.insert_counter += 1
         storage_id = self.next_storage_id
@@ -225,16 +235,18 @@ class CategorizedReplayBuffer:
         if next_state is not None:
             next_state_ref = self._save_tensor(next_state, "next_state", storage_id)
 
+        bucket_reward = float(reward if tail_reward is None else tail_reward)
         entry = {
             "storage_id": storage_id,
             "state": state_ref,
             "action": action.copy() if isinstance(action, np.ndarray) else np.array(action),
             "next_state": next_state_ref,
             "reward": float(reward),
+            "tail_reward": bucket_reward,
             "done": bool(done),
             "discount": float(discount),
             "n_steps": int(max(1, n_steps)),
-            "reward_type": self._reward_type(reward, done),
+            "reward_type": self._reward_type(bucket_reward, done),
             "priority": float(np.clip(abs(float(reward)) + 1.0, self.priority_min, self.priority_max)),
             "insert_order": self.insert_counter,
         }
