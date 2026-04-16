@@ -15,7 +15,7 @@ from model_structure.transformer_shared import DuelingQNetwork, EncoderDecoderTr
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BATCH_SIZE = 128
-GAMMA = 0.9
+GAMMA = 0.7
 GRID_STATE_CHANNELS = 12
 LR_DDQN = 5e-5
 PER_CAPACITY = 10000
