@@ -167,36 +167,23 @@ class Game_test_case(unittest.TestCase) :
         # looping until find a position that is in the game_region
         while True :
             check_pause()
-            # 1. 截取當前畫面
-            game_status.save_pic_path = Tool_Main.cut_pic_data(
-                "grid_region", 
-                Tool_Main.glo_var.player_num, 
-                0, 
-                cover=True, 
-                comp=True
-            )
-        
-            # 2. 載入截圖並預處理
-            screenshot_path = game_status.save_pic_path[-1]
-            current_screenshot = game_status.agent.preprocess_screen(screenshot_path)
-        
-            # 3. 選擇動作 (輸出 [0,1] 範圍的 x, y)
+            current_screenshot = self.capture_grid_state(game_status)
+
             action, log_info = game_status.agent.select_action(
-                current_screenshot, 
+                current_screenshot,
                 add_noise=game_status.noise
             )
             game_status.update_state(current_screenshot, action)
             game_status.log_info = log_info
-        
-            # 4. 將 36-class action 透過 API 打到網頁版遊戲
+
             row, col = game_status.agent.action_to_grid(action)
             print(f"Step {game_status.step_count}: action={action} -> ({row},{col}) -> ", end="")
             game_status.click_attempt_count += 1
 
             if WEB_API.click_cell(row, col):
                 game_status.agent.log_action_image(
-                    current_screenshot, 
-                    log_info, 
+                    current_screenshot,
+                    log_info,
                     game_status.step_count
                 )
                 break
@@ -206,28 +193,42 @@ class Game_test_case(unittest.TestCase) :
             game_status.record_reward(game_status.reward)
             game_status.invalid_click_count += 1
             game_status.agent.block_action_for_state(game_status.current_pic, game_status.action)
-            
+
             game_status.agent.log_action_image(
-                current_screenshot, 
-                log_info, 
+                current_screenshot,
+                log_info,
                 game_status.step_count,
                 reward=game_status.reward
             )
-            
+
+            game_status.next_state = current_screenshot
             self.update_model(game_status)
 
-    def update_model(self, game_status):
-        # 儲存經驗
-        if game_status.previous_pic is not None and game_status.previous_action is not None:
-            game_status.agent.store_transition(
-                game_status.previous_pic,
-                game_status.previous_action,
-                game_status.current_pic if not game_status.game_over else None,
-                game_status.reward,
-                game_status.game_over
-            )
+    def capture_grid_state(self, game_status):
+        game_status.save_pic_path = Tool_Main.cut_pic_data(
+            "grid_region",
+            Tool_Main.glo_var.player_num,
+            0,
+            cover=True,
+            comp=True
+        )
+        screenshot_path = game_status.save_pic_path[-1]
+        return game_status.agent.preprocess_screen(screenshot_path)
 
-        # 訓練
+    def update_model(self, game_status):
+        state = game_status.current_pic
+        action = game_status.action
+        next_state = game_status.next_state
+        reward = game_status.reward
+        done = bool(game_status.game_over)
+        game_status.agent.store_transition(
+            state,
+            action,
+            next_state if not done else None,
+            reward,
+            done,
+        )
+
         loss_info = game_status.agent.train_step()
         if loss_info:
             if 'critic_loss' in loss_info and 'actor_loss' in loss_info:
@@ -246,10 +247,10 @@ class Game_test_case(unittest.TestCase) :
             self.agent = get_agent(grid_region)
             self.agent.reset_episode()
 
-            self.previous_pic = None
-            self.previous_action = None
+
             self.current_pic = None
             self.action = None
+            self.next_state = None
             self.log_info = None
 
             # Since might due to unexpected reason, we are not able to keep playing the game
@@ -266,9 +267,6 @@ class Game_test_case(unittest.TestCase) :
             self.won = False
 
         def update_state(self, new_state, new_action):
-            self.previous_pic = self.current_pic
-            self.previous_action = self.action
-
             self.current_pic = new_state
             self.action = new_action
 
@@ -342,6 +340,7 @@ class Game_test_case(unittest.TestCase) :
 
                 game_status.record_reward(game_status.reward)
                 game_status.agent.clear_blocked_actions(reason="screen changed after valid click")
+                game_status.next_state = self.capture_grid_state(game_status)
                 self.update_model(game_status)
                 if not game_status.game_over :
                     self.decide_next_step_and_play(game_status)
@@ -360,6 +359,7 @@ class Game_test_case(unittest.TestCase) :
                 print("無效點擊（畫面無變化）")
                 if game_status.current_pic is not None and game_status.action is not None:
                     game_status.agent.block_action_for_state(game_status.current_pic, game_status.action)
+                game_status.next_state = game_status.current_pic
                 self.update_model(game_status)
                 if game_status.step_count > game_status.max_steps:
                     Tool_Main.glo_var.fail_playing = True
