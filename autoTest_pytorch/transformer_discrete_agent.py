@@ -1,7 +1,7 @@
 import atexit
 import datetime
 import random
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +25,7 @@ PER_BETA_END = 1.0
 SAVE_CAPACITY = 2000
 SAVE_EVERY_N_EPISODES = 50
 TARGET_UPDATE_FREQ = 50
+N_STEP = 3
 
 TRANSFORMER_MODEL_PATH = Path("./models/stage1_transformer")
 TRANSFORMER_D_MODEL = 64
@@ -146,6 +147,9 @@ class TransformerDiscreteAgent:
         )
         self.total_it = 0
         self.episode_count = 0
+        self.n_step = N_STEP
+        self.n_step_gamma = GAMMA
+        self.n_step_buffer = deque()
 
         self.epsilon = 0.3
         self.epsilon_min = 0.05
@@ -184,8 +188,52 @@ class TransformerDiscreteAgent:
         return (row, col)
 
     def store_transition(self, state, action, next_state, reward, done):
-        action_arr = np.array(action, dtype=np.int64)
-        self.replay_buffer.store(state, action_arr, next_state, reward, done)
+        transition = {
+            "state": state.detach().cpu(),
+            "action": np.array(action, dtype=np.int64),
+            "next_state": next_state.detach().cpu() if next_state is not None else None,
+            "reward": float(reward),
+            "done": bool(done),
+        }
+        self.n_step_buffer.append(transition)
+
+        if len(self.n_step_buffer) >= self.n_step:
+            self._commit_n_step_transition(self.n_step)
+
+        if done:
+            self._flush_n_step_buffer()
+
+    def _commit_n_step_transition(self, horizon):
+        if not self.n_step_buffer:
+            return
+
+        horizon = min(horizon, len(self.n_step_buffer))
+        discounted_reward = 0.0
+        last_transition = None
+        for step_idx in range(horizon):
+            transition = self.n_step_buffer[step_idx]
+            discounted_reward += (self.n_step_gamma ** step_idx) * transition["reward"]
+            last_transition = transition
+            if transition["done"]:
+                horizon = step_idx + 1
+                break
+
+        first_transition = self.n_step_buffer[0]
+        discount = self.n_step_gamma ** horizon
+        self.replay_buffer.store(
+            first_transition["state"],
+            first_transition["action"],
+            last_transition["next_state"],
+            discounted_reward,
+            last_transition["done"],
+            discount=discount,
+            n_steps=horizon,
+        )
+        self.n_step_buffer.popleft()
+
+    def _flush_n_step_buffer(self):
+        while self.n_step_buffer:
+            self._commit_n_step_transition(len(self.n_step_buffer))
 
     def train_step(self):
         if self.replay_buffer.size() < BATCH_SIZE:
@@ -194,10 +242,11 @@ class TransformerDiscreteAgent:
         self.total_it += 1
         
         # CategorizedReplayBuffer stores beta internally if not provided, but we can still pass it explicitly
-        state, action, next_state, reward, done, per_indices, is_weights = self.replay_buffer.sample(
+        state, action, next_state, reward, done, per_indices, is_weights, discounts, n_steps = self.replay_buffer.sample(
             BATCH_SIZE,
             beta=PER_BETA_START + (PER_BETA_END - PER_BETA_START) * min(self.episode_count / 5000.0, 1.0),
-            device=device
+            device=device,
+            include_extra=True,
         )
 
         action = action.long()
@@ -217,7 +266,7 @@ class TransformerDiscreteAgent:
             next_q_value = next_q_target_2d[
                 torch.arange(batch_size, device=device), best_rows, best_cols
             ].unsqueeze(1)
-            target = reward + (1 - done) * GAMMA * next_q_value
+            target = reward + (1 - done) * discounts * next_q_value
 
         features = self.backbone.get_features(state)
         q_2d = self.q_network(features)
@@ -292,11 +341,15 @@ class TransformerDiscreteAgent:
             "q_mean": q_mean,
         }
 
+    def reset_episode(self):
+        self._flush_n_step_buffer()
+
     def _close_io_log(self):
         if self._io_log and not self._io_log.closed:
             self._io_log.close()
 
     def on_episode_end(self):
+        self._flush_n_step_buffer()
         self.episode_count += 1
         decay_progress = min(self.episode_count / self.epsilon_decay_episodes, 1.0)
         self.epsilon = self.epsilon_min + (0.3 - self.epsilon_min) * (1.0 - decay_progress)

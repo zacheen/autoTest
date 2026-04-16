@@ -3,7 +3,7 @@ import datetime
 import hashlib
 import random
 import shutil
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +40,7 @@ VISUAL_BACKBONE_LAYERS = 4
 VISUAL_FF_DIM = 256
 VISUAL_DROPOUT = 0.1
 VISUAL_GAMMA = 0.9
+VISUAL_N_STEP = 3
 LR_VISUAL_YOLO = 3e-5
 LR_VISUAL_POLICY = 5e-5
 VISUAL_BUFFER_CAPACITY = 2048
@@ -229,6 +230,9 @@ class VisualDiscreteAgent:
         )
         self.total_it = 0
         self.episode_count = 0
+        self.n_step = VISUAL_N_STEP
+        self.n_step_gamma = VISUAL_GAMMA
+        self.n_step_buffer = deque()
         self.epsilon = 0.30
         self.epsilon_min = 0.05
         self.epsilon_decay_episodes = 5000
@@ -313,13 +317,6 @@ class VisualDiscreteAgent:
         row = int(action_id) // self.grid_w
         col = int(action_id) % self.grid_w
         return row, col
-
-    def action_to_screen_coords(self, action_id):
-        row, col = self.action_to_grid(action_id)
-        x, y, width, height = self.screen_region
-        cell_w = width / self.grid_w
-        cell_h = height / self.grid_h
-        return int(x + (col + 0.5) * cell_w), int(y + (row + 0.5) * cell_h)
 
     def _state_key(self, state):
         state_uint8 = state.detach().cpu().clamp(0, 1).mul(255).to(torch.uint8).numpy()
@@ -408,20 +405,63 @@ class VisualDiscreteAgent:
         }
 
     def store_transition(self, state, action, next_state, reward, done):
+        transition = {
+            "state": state.detach().cpu(),
+            "action": int(action),
+            "next_state": next_state.detach().cpu() if next_state is not None else None,
+            "reward": float(reward),
+            "done": bool(done),
+        }
+        self.n_step_buffer.append(transition)
+
+        if len(self.n_step_buffer) >= self.n_step:
+            self._commit_n_step_transition(self.n_step)
+
+        if done:
+            self._flush_n_step_buffer()
+
+    def _commit_n_step_transition(self, horizon):
+        if not self.n_step_buffer:
+            return
+
+        horizon = min(horizon, len(self.n_step_buffer))
+        discounted_reward = 0.0
+        last_transition = None
+        for step_idx in range(horizon):
+            transition = self.n_step_buffer[step_idx]
+            discounted_reward += (self.n_step_gamma ** step_idx) * transition["reward"]
+            last_transition = transition
+            if transition["done"]:
+                horizon = step_idx + 1
+                break
+
+        first_transition = self.n_step_buffer[0]
+        discount = self.n_step_gamma ** horizon
         self.replay_buffer.store(
-            state.cpu(),
-            int(action),
-            next_state.cpu() if next_state is not None else None,
-            reward,
-            done,
+            first_transition["state"],
+            first_transition["action"],
+            last_transition["next_state"],
+            discounted_reward,
+            last_transition["done"],
+            discount=discount,
+            n_steps=horizon,
         )
+        self.n_step_buffer.popleft()
+
+    def _flush_n_step_buffer(self):
+        while self.n_step_buffer:
+            self._commit_n_step_transition(len(self.n_step_buffer))
 
     def train_step(self):
         if self.replay_buffer.size() < VISUAL_BATCH_SIZE:
             return None
 
         self.total_it += 1
-        state, action, next_state, reward, done, sample_indices, _ = self.replay_buffer.sample(VISUAL_BATCH_SIZE, device=device)
+        state, action, next_state, reward, done, sample_indices, _, discounts, n_steps = self.replay_buffer.sample(
+            VISUAL_BATCH_SIZE,
+            device=device,
+            include_extra=True,
+        )
         batch_size = state.size(0)
         self._set_runtime_modes()
 
@@ -437,7 +477,7 @@ class VisualDiscreteAgent:
                 next_target_q = next_target_q_2d[
                     torch.arange(batch_size, device=device), next_best_rows, next_best_cols
                 ].unsqueeze(1)
-                target = reward + (1 - done) * VISUAL_GAMMA * next_target_q
+                target = reward + (1 - done) * discounts * next_target_q
 
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == "cuda")):
             features = self.backbone.get_features(state)
@@ -546,7 +586,7 @@ class VisualDiscreteAgent:
         }
 
     def reset_episode(self):
-        pass
+        self._flush_n_step_buffer()
 
     def log_episode_metrics(self, win, invalid_click_rate, reward_mean):
         next_episode = self.episode_count + 1
@@ -556,6 +596,7 @@ class VisualDiscreteAgent:
         self.tb_writer.flush()
 
     def on_episode_end(self):
+        self._flush_n_step_buffer()
         self.episode_count += 1
         decay_progress = min(self.episode_count / self.epsilon_decay_episodes, 1.0)
         self.epsilon = self.epsilon_min + (0.30 - self.epsilon_min) * (1.0 - decay_progress)
@@ -643,6 +684,8 @@ class VisualDiscreteAgent:
                     "next_state": str(next_state_dst) if next_state_dst else None,
                     "reward": old_entry["reward"],
                     "done": old_entry["done"],
+                    "discount": float(old_entry.get("discount", 1.0)),
+                    "n_steps": int(old_entry.get("n_steps", 1)),
                     "insert_order": save_idx + 1,
                 }
             )
@@ -741,6 +784,8 @@ class VisualDiscreteAgent:
                 "next_state": str(next_state_dst) if next_state_dst else None,
                 "reward": float(entry["reward"]),
                 "done": bool(entry["done"]),
+                "discount": float(entry.get("discount", 1.0)),
+                "n_steps": int(entry.get("n_steps", 1)),
                 "reward_type": self.replay_buffer._reward_type(float(entry["reward"]), bool(entry["done"])),
                 "priority": float(np.clip(abs(float(entry["reward"])) + 1.0, VISUAL_PRIORITY_MIN, VISUAL_PRIORITY_MAX)),
                 "insert_order": loaded_count + 1,

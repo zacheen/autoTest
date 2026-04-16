@@ -214,7 +214,7 @@ class CategorizedReplayBuffer:
 
         return chosen[:count]
 
-    def store(self, state, action, next_state, reward, done):
+    def store(self, state, action, next_state, reward, done, discount=1.0, n_steps=1):
         """Store a transition."""
         self.insert_counter += 1
         storage_id = self.next_storage_id
@@ -232,6 +232,8 @@ class CategorizedReplayBuffer:
             "next_state": next_state_ref,
             "reward": float(reward),
             "done": bool(done),
+            "discount": float(discount),
+            "n_steps": int(max(1, n_steps)),
             "reward_type": self._reward_type(reward, done),
             "priority": float(np.clip(abs(float(reward)) + 1.0, self.priority_min, self.priority_max)),
             "insert_order": self.insert_counter,
@@ -253,7 +255,7 @@ class CategorizedReplayBuffer:
             priority = abs(float(td_error)) + self.priority_eps
             self.index[int(idx)]["priority"] = float(np.clip(priority, self.priority_min, self.priority_max))
 
-    def sample(self, batch_size, beta=None, device="cpu"):
+    def sample(self, batch_size, beta=None, device="cpu", include_extra=False):
         """Sample a batch of transitions. Returns importance sampling weights if beta is used.
         
         Note for specific models:
@@ -295,7 +297,7 @@ class CategorizedReplayBuffer:
 
         selected_indices = selected_indices[:batch_size]
 
-        states, actions, next_states, rewards, dones, priorities = [], [], [], [], [], []
+        states, actions, next_states, rewards, dones, priorities, discounts, n_steps = [], [], [], [], [], [], [], []
         
         for idx in selected_indices:
             entry = self.index[idx]
@@ -314,6 +316,8 @@ class CategorizedReplayBuffer:
             rewards.append(entry["reward"])
             dones.append(float(entry["done"]))
             priorities.append(self._effective_priority(entry))
+            discounts.append(float(entry.get("discount", 1.0)))
+            n_steps.append(int(entry.get("n_steps", 1)))
 
         # Important Sampling
         N = self.size_count
@@ -334,17 +338,21 @@ class CategorizedReplayBuffer:
         tensor_actions = torch.tensor(np.array(actions), dtype=torch.long, device=device)
         tensor_rewards = torch.tensor(rewards, dtype=torch.float32, device=device).unsqueeze(1)
         tensor_dones = torch.tensor(dones, dtype=torch.float32, device=device).unsqueeze(1)
+        tensor_discounts = torch.tensor(discounts, dtype=torch.float32, device=device).unsqueeze(1)
+        tensor_n_steps = torch.tensor(n_steps, dtype=torch.long, device=device).unsqueeze(1)
 
-        # To support both signatures: (states, actions, next, rewards, dones, indices, weights) is standard.
-        return (
+        result = (
             tensor_states,
             tensor_actions,
             tensor_next_states,
             tensor_rewards,
             tensor_dones,
             selected_indices,
-            weights
+            weights,
         )
+        if include_extra:
+            result = result + (tensor_discounts, tensor_n_steps)
+        return result
 
     def size(self):
         return self.size_count
