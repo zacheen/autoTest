@@ -119,7 +119,7 @@ class FQFQNetwork(nn.Module):
         grid_w=10,
         num_fractions=16,
         num_cosines=64,
-        hidden_dim=128,
+        hidden_dim=64,
     ):
         super().__init__()
         self.grid_h = grid_h
