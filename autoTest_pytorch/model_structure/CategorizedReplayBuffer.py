@@ -106,11 +106,13 @@ class CategorizedReplayBuffer:
 
     def _load_tensor(self, reference):
         if self.storage_mode == "disk":
-            tensor = torch.load(reference)
+            tensor = torch.load(reference, map_location="cpu")
             if tensor.dtype == torch.uint8:
                 return tensor.float() / 255.0
-            return tensor
+            return tensor.cpu()
         else:
+            if torch.is_tensor(reference):
+                return reference.detach().cpu().clone()
             return reference
 
     def _safe_unlink(self, path_str):
@@ -376,7 +378,15 @@ class CategorizedReplayBuffer:
 
     def load_from_entries(self, entries):
         """Load from a persistent index map structure in RAM"""
-        self.index = entries
+        normalized_entries = []
+        for entry in entries:
+            normalized_entry = dict(entry)
+            if "state" in normalized_entry:
+                normalized_entry["state"] = self._load_tensor(normalized_entry["state"])
+            if normalized_entry.get("next_state") is not None:
+                normalized_entry["next_state"] = self._load_tensor(normalized_entry["next_state"])
+            normalized_entries.append(normalized_entry)
+        self.index = normalized_entries
         self.size_count = len(self.index)
         self.next_storage_id = max([e["storage_id"] for e in self.index], default=-1) + 1
         self.insert_counter = max([e["insert_order"] for e in self.index], default=0)
