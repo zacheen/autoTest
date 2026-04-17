@@ -228,12 +228,16 @@ def run_episode(logic, agent, add_noise=True):
 
 
 def run_evaluation(logic, agent):
+    return run_fixed_policy_evaluation(logic, agent, num_episodes=EVAL_EPISODES)
+
+
+def run_fixed_policy_evaluation(logic, agent, num_episodes):
     eval_rewards = []
     eval_wins = 0
     eval_steps = []
     eval_invalid_rates = []
 
-    for _ in range(EVAL_EPISODES):
+    for _ in range(num_episodes):
         stats = run_episode(logic, agent, add_noise=False)
         eval_rewards.append(stats['reward'])
         eval_steps.append(stats['steps'])
@@ -243,7 +247,7 @@ def run_evaluation(logic, agent):
 
     return {
         'avg_reward': np.mean(eval_rewards),
-        'win_rate': eval_wins / EVAL_EPISODES * 100,
+        'win_rate': eval_wins / num_episodes * 100,
         'avg_steps': np.mean(eval_steps),
         'avg_invalid_rate': np.mean(eval_invalid_rates),
     }
@@ -376,16 +380,26 @@ def main():
                 avg_reward = np.mean(recent_rewards)
                 win_rate = np.mean(recent_wins) * 100
                 avg_steps = np.mean(recent_steps)
+                train_greedy_stats = run_fixed_policy_evaluation(
+                    logic,
+                    agent,
+                    num_episodes=LOG_INTERVAL,
+                )
                 elapsed = time.time() - start_time
                 eps_per_sec = episode / elapsed
 
                 writer.add_scalar('train/avg_reward_50', avg_reward, episode)
                 writer.add_scalar('train/win_rate_50', win_rate, episode)
+                writer.add_scalar('train_greedy/avg_reward_50', train_greedy_stats['avg_reward'], episode)
+                writer.add_scalar('train_greedy/win_rate_50', train_greedy_stats['win_rate'], episode)
+                writer.add_scalar('train_greedy/avg_steps_50', train_greedy_stats['avg_steps'], episode)
+                writer.add_scalar('train_greedy/avg_invalid_rate_50', train_greedy_stats['avg_invalid_rate'], episode)
 
                 overall_wr = total_wins / episode * 100
                 print(f"[Ep {episode:>6d}] "
                       f"Avg Reward: {avg_reward:>7.2f} | "
                       f"Win Rate(50): {win_rate:>5.1f}% | "
+                      f"Train Greedy WR(50): {train_greedy_stats['win_rate']:>5.1f}% | "
                       f"Overall WR: {overall_wr:>5.1f}% | "
                       f"Total Wins: {total_wins} | "
                       f"Speed: {eps_per_sec:.1f} ep/s | "
