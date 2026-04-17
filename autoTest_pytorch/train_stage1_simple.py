@@ -8,7 +8,7 @@ Stage 1 Transformer 實驗 — 用 self-attention 學習 Minesweeper 空間推�
   python train_stage1_simple.py
 
 監控方式：
-  tensorboard --logdir runs/stage1_transformer/
+  tensorboard --logdir ./models/stage1_transformer/tensorboard
 """
 
 import os
@@ -37,7 +37,7 @@ EVAL_INTERVAL = 100
 EVAL_EPISODES = 50
 
 # ---------- 路徑 ----------
-TENSORBOARD_DIR = Path("./runs/stage1_transformer")
+TENSORBOARD_DIR = Path("./models/stage1_transformer/tensorboard")
 CSV_LOG_PATH = Path("./models/stage1_transformer/training_log.csv")
 
 
