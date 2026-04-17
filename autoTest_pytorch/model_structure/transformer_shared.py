@@ -167,3 +167,57 @@ class FQFQNetwork(nn.Module):
             "tau_hats": tau_hats,
             "fraction_probs": fraction_probs,
         }
+
+
+class IQNQNetwork(nn.Module):
+    """IQN head: sample quantile fractions and predict per-action quantile values."""
+
+    def __init__(
+        self,
+        d_model=64,
+        grid_h=10,
+        grid_w=10,
+        num_quantiles=16,
+        num_cosines=64,
+        hidden_dim=64,
+    ):
+        super().__init__()
+        self.grid_h = grid_h
+        self.grid_w = grid_w
+        self.num_actions = grid_h * grid_w
+        self.num_quantiles = num_quantiles
+
+        self.quantile_embedding = CosineQuantileEmbedding(
+            d_model=d_model,
+            num_cosines=num_cosines,
+        )
+        self.value_head = nn.Sequential(
+            nn.Linear(d_model, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, features, num_quantiles=None, taus=None):
+        batch_size = features.size(0)
+        quantile_count = num_quantiles or self.num_quantiles
+
+        if taus is None:
+            taus = torch.rand(
+                batch_size,
+                quantile_count,
+                device=features.device,
+                dtype=features.dtype,
+            )
+        else:
+            quantile_count = taus.size(1)
+
+        tau_embeddings = self.quantile_embedding(taus)
+        fused = features.unsqueeze(2) * tau_embeddings.unsqueeze(1)
+        quantiles = self.value_head(fused).squeeze(-1)
+        q_values = quantiles.mean(dim=-1)
+
+        return {
+            "q_values": q_values.view(-1, self.grid_h, self.grid_w),
+            "quantiles": quantiles,
+            "taus": taus,
+        }

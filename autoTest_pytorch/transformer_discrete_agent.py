@@ -10,7 +10,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from model_structure.transformer_shared import EncoderDecoderTransformer, FQFQNetwork, TwoDimensionalPositionEmbedding
+from model_structure.transformer_shared import (
+    EncoderDecoderTransformer,
+    IQNQNetwork,
+    TwoDimensionalPositionEmbedding,
+)
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -26,8 +30,8 @@ SAVE_CAPACITY = 2000
 SAVE_EVERY_N_EPISODES = 50
 TARGET_UPDATE_FREQ = 50
 N_STEP = 1
-NUM_FQF_FRACTIONS = 8
-FQF_ENTROPY_COEF = 1e-3
+NUM_IQN_QUANTILES = 16
+NUM_IQN_TARGET_QUANTILES = 16
 
 TRANSFORMER_MODEL_PATH = Path("./models/stage1_transformer")
 TRANSFORMER_D_MODEL = 64
@@ -119,7 +123,7 @@ def _quantile_huber_loss(current_quantiles, target_quantiles, tau_hats):
 
 
 class TransformerDiscreteAgent:
-    """FQF agent with grid encoder-decoder transformer backbone."""
+    """IQN agent with grid encoder-decoder transformer backbone."""
 
     def __init__(self, grid_h=10, grid_w=10):
         self.grid_h = grid_h
@@ -127,17 +131,17 @@ class TransformerDiscreteAgent:
         self.num_actions = grid_h * grid_w
 
         self.backbone = TransformerActorNetwork(grid_h=grid_h, grid_w=grid_w).to(device)
-        self.q_network = FQFQNetwork(
+        self.q_network = IQNQNetwork(
             d_model=TRANSFORMER_D_MODEL,
             grid_h=grid_h,
             grid_w=grid_w,
-            num_fractions=NUM_FQF_FRACTIONS,
+            num_quantiles=NUM_IQN_QUANTILES,
         ).to(device)
-        self.q_target = FQFQNetwork(
+        self.q_target = IQNQNetwork(
             d_model=TRANSFORMER_D_MODEL,
             grid_h=grid_h,
             grid_w=grid_w,
-            num_fractions=NUM_FQF_FRACTIONS,
+            num_quantiles=NUM_IQN_TARGET_QUANTILES,
         ).to(device)
         self.q_target.load_state_dict(self.q_network.state_dict())
         self.q_target.eval()
@@ -271,25 +275,22 @@ class TransformerDiscreteAgent:
 
         with torch.no_grad():
             next_features = self.backbone.get_features(next_state)
-            next_online = self.q_network(next_features)
+            next_online = self.q_network(next_features, num_quantiles=NUM_IQN_QUANTILES)
             next_q_2d = next_online["q_values"]
             next_q_flat = next_q_2d.view(batch_size, -1)
             best_flat = next_q_flat.argmax(dim=1)
-            best_rows = best_flat // self.grid_w
-            best_cols = best_flat % self.grid_w
 
-            next_target = self.q_target(next_features)
+            next_target = self.q_target(next_features, num_quantiles=NUM_IQN_TARGET_QUANTILES)
             next_target_quantiles = next_target["quantiles"][
                 torch.arange(batch_size, device=device), best_flat
             ]
             target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
 
         features = self.backbone.get_features(state)
-        q_output = self.q_network(features)
+        q_output = self.q_network(features, num_quantiles=NUM_IQN_QUANTILES)
         q_2d = q_output["q_values"]
         q_quantiles = q_output["quantiles"]
-        tau_hats = q_output["tau_hats"]
-        fraction_probs = q_output["fraction_probs"]
+        sampled_taus = q_output["taus"]
         q_taken = q_2d[
             torch.arange(batch_size, device=device), row_idx, col_idx
         ].unsqueeze(1)
@@ -304,11 +305,9 @@ class TransformerDiscreteAgent:
         per_sample_quantile_loss = _quantile_huber_loss(
             current_quantiles=chosen_quantiles,
             target_quantiles=target_quantiles.detach(),
-            tau_hats=tau_hats.detach(),
+            tau_hats=sampled_taus.detach(),
         )
-        entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
-        per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy
-        loss = (is_weights * per_sample_loss).mean()
+        loss = (is_weights * per_sample_quantile_loss).mean()
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -363,7 +362,7 @@ class TransformerDiscreteAgent:
             f"  Q-top5: {top5_info}\n"
             f"  Q-val:  taken_mean={q_mean:.4f}"
             f" | all: min={q0_flat.min().item():.4f} max={q0_flat.max().item():.4f}\n"
-            f"  FQF:    loss={loss.item():.4f} | tau_entropy={entropy.mean().item():.4f}"
+            f"  IQN:    loss={loss.item():.4f} | quantiles={NUM_IQN_QUANTILES}"
             f" | epsilon={self.epsilon:.4f}\n"
             f"---\n"
         )
@@ -389,7 +388,7 @@ class TransformerDiscreteAgent:
         self._save_model()
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
             print(
-                f"[FQF] Periodic save at episode {self.episode_count}"
+                f"[IQN] Periodic save at episode {self.episode_count}"
                 f" | epsilon={self.epsilon:.4f}"
             )
             self.save_persistent()
@@ -397,15 +396,15 @@ class TransformerDiscreteAgent:
     def _save_model(self):
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
         torch.save(self.backbone.state_dict(), TRANSFORMER_MODEL_PATH / "backbone.pth")
-        torch.save(self.q_network.state_dict(), TRANSFORMER_MODEL_PATH / "fqf_network.pth")
-        torch.save(self.q_target.state_dict(), TRANSFORMER_MODEL_PATH / "fqf_target.pth")
+        torch.save(self.q_network.state_dict(), TRANSFORMER_MODEL_PATH / "iqn_network.pth")
+        torch.save(self.q_target.state_dict(), TRANSFORMER_MODEL_PATH / "iqn_target.pth")
         torch.save(
             {
                 "optimizer": self.optimizer.state_dict(),
                 "total_it": self.total_it,
                 "episode_count": self.episode_count,
                 "epsilon": self.epsilon,
-                "algorithm": "FQF",
+                "algorithm": "IQN",
             },
             TRANSFORMER_MODEL_PATH / "optimizer_state.pth",
         )
@@ -444,9 +443,9 @@ class TransformerDiscreteAgent:
             saved_rewards[entry.get("tail_reward", entry["reward"])] += 1
             saved_buckets[entry["reward_type"]] += 1
         print("--- save info ---------------")
-        print(f"[FQF] Persistent save: {len(all_entries_sorted)} entries")
-        print(f"[FQF] Tail reward distribution: {dict(saved_rewards)}")
-        print(f"[FQF] Reward bucket distribution: {dict(saved_buckets)}")
+        print(f"[IQN] Persistent save: {len(all_entries_sorted)} entries")
+        print(f"[IQN] Tail reward distribution: {dict(saved_rewards)}")
+        print(f"[IQN] Reward bucket distribution: {dict(saved_buckets)}")
         print("--- save end ---------------")
 
     def try_load_model(self):
@@ -455,33 +454,37 @@ class TransformerDiscreteAgent:
             try:
                 backbone_state = torch.load(backbone_path, map_location=device)
                 incompatible = self.backbone.load_backbone_state(backbone_state, strict=False)
-                print("[FQF] Loaded Backbone")
+                print("[IQN] Loaded Backbone")
                 if incompatible.missing_keys:
-                    print(f"[FQF] Backbone missing keys: {incompatible.missing_keys}")
+                    print(f"[IQN] Backbone missing keys: {incompatible.missing_keys}")
                 if incompatible.unexpected_keys:
-                    print(f"[FQF] Backbone unexpected keys: {incompatible.unexpected_keys}")
+                    print(f"[IQN] Backbone unexpected keys: {incompatible.unexpected_keys}")
             except Exception as exc:
-                print(f"[FQF] Failed to load Backbone: {exc}")
+                print(f"[IQN] Failed to load Backbone: {exc}")
 
-        q_path = TRANSFORMER_MODEL_PATH / "fqf_network.pth"
+        q_path = TRANSFORMER_MODEL_PATH / "iqn_network.pth"
         if q_path.exists():
             try:
                 self.q_network.load_state_dict(torch.load(q_path, map_location=device))
-                print("[FQF] Loaded FQF-Network")
+                print("[IQN] Loaded IQN-Network")
             except Exception as exc:
-                print(f"[FQF] Failed to load FQF-Network: {exc}")
+                print(f"[IQN] Failed to load IQN-Network: {exc}")
+        elif (TRANSFORMER_MODEL_PATH / "fqf_network.pth").exists():
+            print("[IQN] Skip legacy fqf_network.pth because FQF head shape is incompatible")
         elif (TRANSFORMER_MODEL_PATH / "q_network.pth").exists():
-            print("[FQF] Skip legacy q_network.pth because DDQN head shape is incompatible")
+            print("[IQN] Skip legacy q_network.pth because DDQN head shape is incompatible")
 
-        q_target_path = TRANSFORMER_MODEL_PATH / "fqf_target.pth"
+        q_target_path = TRANSFORMER_MODEL_PATH / "iqn_target.pth"
         if q_target_path.exists():
             try:
                 self.q_target.load_state_dict(torch.load(q_target_path, map_location=device))
-                print("[FQF] Loaded FQF-Target")
+                print("[IQN] Loaded IQN-Target")
             except Exception as exc:
-                print(f"[FQF] Failed to load FQF-Target: {exc}")
+                print(f"[IQN] Failed to load IQN-Target: {exc}")
+        elif (TRANSFORMER_MODEL_PATH / "fqf_target.pth").exists():
+            print("[IQN] Skip legacy fqf_target.pth because FQF head shape is incompatible")
         elif (TRANSFORMER_MODEL_PATH / "q_target.pth").exists():
-            print("[FQF] Skip legacy q_target.pth because DDQN head shape is incompatible")
+            print("[IQN] Skip legacy q_target.pth because DDQN head shape is incompatible")
 
         opt_path = TRANSFORMER_MODEL_PATH / "optimizer_state.pth"
         if opt_path.exists():
@@ -493,11 +496,11 @@ class TransformerDiscreteAgent:
                 if "epsilon" in state:
                     self.epsilon = state["epsilon"]
                 print(
-                    f"[FQF] Loaded optimizer: total_it={self.total_it},"
+                    f"[IQN] Loaded optimizer: total_it={self.total_it},"
                     f" episode={self.episode_count}, epsilon={self.epsilon:.4f}"
                 )
             except Exception as exc:
-                print(f"[FQF] Failed to load optimizer state: {exc}")
+                print(f"[IQN] Failed to load optimizer state: {exc}")
 
         training_state_path = TRANSFORMER_MODEL_PATH / "training_state.pth"
         if training_state_path.exists():
@@ -524,6 +527,6 @@ class TransformerDiscreteAgent:
                         )
                 
                 if loaded > 0:
-                    print(f"[FQF] Loaded {loaded} replay buffer entries")
+                    print(f"[IQN] Loaded {loaded} replay buffer entries")
             except Exception as exc:
-                print(f"[FQF] Failed to load replay buffer: {exc}")
+                print(f"[IQN] Failed to load replay buffer: {exc}")
