@@ -197,14 +197,23 @@ class IQNQNetwork(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
+    def sample_taus(self, batch_size, num_quantiles, device, dtype):
+        """Sample IQN quantile fractions from U(0, 1)."""
+        return torch.rand(
+            batch_size,
+            num_quantiles,
+            device=device,
+            dtype=dtype,
+        )
+
     def forward(self, features, num_quantiles=None, taus=None):
         batch_size = features.size(0)
         quantile_count = num_quantiles or self.num_quantiles
 
         if taus is None:
-            taus = torch.rand(
-                batch_size,
-                quantile_count,
+            taus = self.sample_taus(
+                batch_size=batch_size,
+                num_quantiles=quantile_count,
                 device=features.device,
                 dtype=features.dtype,
             )

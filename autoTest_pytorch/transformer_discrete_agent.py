@@ -30,6 +30,7 @@ SAVE_CAPACITY = 2000
 SAVE_EVERY_N_EPISODES = 50
 TARGET_UPDATE_FREQ = 50
 N_STEP = 1
+NUM_IQN_POLICY_QUANTILES = 16
 NUM_IQN_QUANTILES = 16
 NUM_IQN_TARGET_QUANTILES = 16
 
@@ -183,6 +184,14 @@ class TransformerDiscreteAgent:
         atexit.register(self.save_persistent)
         atexit.register(self._close_io_log)
 
+    def _sample_iqn_taus(self, batch_size, num_quantiles):
+        return self.q_network.sample_taus(
+            batch_size=batch_size,
+            num_quantiles=num_quantiles,
+            device=device,
+            dtype=torch.float32,
+        )
+
     def select_action(self, state, add_noise=True):
         if add_noise and random.random() < self.epsilon:
             row = random.randint(0, self.grid_h - 1)
@@ -195,7 +204,11 @@ class TransformerDiscreteAgent:
         self.q_network.eval()
         with torch.no_grad():
             features = self.backbone.get_features(state_batch)
-            q_2d = self.q_network(features)["q_values"].squeeze(0)
+            policy_taus = self._sample_iqn_taus(
+                batch_size=state_batch.size(0),
+                num_quantiles=NUM_IQN_POLICY_QUANTILES,
+            )
+            q_2d = self.q_network(features, taus=policy_taus)["q_values"].squeeze(0)
             row_q = q_2d.max(dim=1).values
             row = row_q.argmax().item()
             col = q_2d[row].argmax().item()
@@ -275,19 +288,33 @@ class TransformerDiscreteAgent:
 
         with torch.no_grad():
             next_features = self.backbone.get_features(next_state)
-            next_online = self.q_network(next_features, num_quantiles=NUM_IQN_QUANTILES)
+            next_policy_taus = self._sample_iqn_taus(
+                batch_size=batch_size,
+                num_quantiles=NUM_IQN_POLICY_QUANTILES,
+            )
+            next_online = self.q_network(next_features, taus=next_policy_taus)
             next_q_2d = next_online["q_values"]
             next_q_flat = next_q_2d.view(batch_size, -1)
             best_flat = next_q_flat.argmax(dim=1)
 
-            next_target = self.q_target(next_features, num_quantiles=NUM_IQN_TARGET_QUANTILES)
+            target_taus = self.q_target.sample_taus(
+                batch_size=batch_size,
+                num_quantiles=NUM_IQN_TARGET_QUANTILES,
+                device=device,
+                dtype=next_features.dtype,
+            )
+            next_target = self.q_target(next_features, taus=target_taus)
             next_target_quantiles = next_target["quantiles"][
                 torch.arange(batch_size, device=device), best_flat
             ]
             target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
 
         features = self.backbone.get_features(state)
-        q_output = self.q_network(features, num_quantiles=NUM_IQN_QUANTILES)
+        current_taus = self._sample_iqn_taus(
+            batch_size=batch_size,
+            num_quantiles=NUM_IQN_QUANTILES,
+        )
+        q_output = self.q_network(features, taus=current_taus)
         q_2d = q_output["q_values"]
         q_quantiles = q_output["quantiles"]
         sampled_taus = q_output["taus"]
