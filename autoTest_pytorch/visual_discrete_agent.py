@@ -220,6 +220,8 @@ class VisualDiscreteAgent:
         self.optimizer = optim.AdamW([
             {"params": self.backbone.yolo_parameters(), "lr": LR_VISUAL_YOLO},
             {"params": self.backbone.adapter_parameters(), "lr": LR_VISUAL_POLICY},
+            {"params": self.backbone.core.decoder.parameters(), "lr": LR_VISUAL_POLICY},
+            {"params": self.q_network.parameters(), "lr": LR_VISUAL_POLICY},
         ])
         self.scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
 
@@ -307,9 +309,13 @@ class VisualDiscreteAgent:
             print("[VisualFQF] Skip legacy q_target.pth because DDQN head shape is incompatible")
 
     def _freeze_teacher_modules(self):
-        for module in (self.backbone.core.transformer, self.backbone.core.decoder, self.q_network, self.q_target):
+        for module in (self.backbone.core.transformer, self.q_target):
             for param in module.parameters():
                 param.requires_grad_(False)
+
+        for module in (self.backbone.core.decoder, self.q_network):
+            for param in module.parameters():
+                param.requires_grad_(True)
 
     def _set_runtime_modes(self):
         self.backbone.feature_extractor.train()
@@ -317,8 +323,8 @@ class VisualDiscreteAgent:
         self.backbone.memory_position.train()
         self.backbone.query_position.train()
         self.backbone.core.transformer.eval()
-        self.backbone.core.decoder.eval()
-        self.q_network.eval()
+        self.backbone.core.decoder.train()
+        self.q_network.train()
         self.q_target.eval()
 
     def preprocess_screen(self, screenshot_path):
