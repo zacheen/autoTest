@@ -233,8 +233,10 @@ class Game_test_case(unittest.TestCase) :
         if loss_info:
             if 'critic_loss' in loss_info and 'actor_loss' in loss_info:
                 print(f"Loss - Critic: {loss_info['critic_loss']:.4f}, Actor: {loss_info['actor_loss']:.4f}")
+            elif 'Q_loss' in loss_info and 'q_mean' in loss_info:
+                print(f"Q Loss: {loss_info['Q_loss']:.4f}, Q Mean: {loss_info['q_mean']:.4f}")
             else:
-                print(f"Loss: {loss_info['loss']:.4f}, Q Mean: {loss_info['q_mean']:.4f}")
+                print(f"Train metrics: {loss_info}")
 
     class Game_status():
         def __init__(self):
