@@ -412,6 +412,19 @@ class VisualDiscreteAgent:
             "reward": float(reward),
             "done": bool(done),
         }
+        
+        if LOG_ACTIONS:
+            info_dict = {
+                "Action": int(action),
+                "Reward": float(reward),
+                "Done": bool(done),
+            }
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            save_path = Path("./models/store_transition_logs")
+            self._save_custom_log_image(state, action, info_dict, save_path, f"transition_{timestamp}.png")
+            if next_state is not None:
+                self._save_custom_log_image(next_state, None, None, save_path, f"transition_{timestamp}_next.png")
+
         self.n_step_buffer.append(transition)
 
         if len(self.n_step_buffer) >= self.n_step:
@@ -464,6 +477,23 @@ class VisualDiscreteAgent:
             include_extra=True,
         )
         batch_size = state.size(0)
+        
+        if False: # if LOG_ACTIONS:
+            if getattr(self, "log_train_step", True) and LOG_ACTIONS:
+                for i in range(batch_size):
+                    info_dict = {
+                        "Step": self.total_it,
+                        "Batch_Idx": i,
+                        "Action": int(action[i].item()),
+                        "Reward": float(reward[i].item()),
+                        "Done": bool(done[i].item()),
+                        "Discount": float(discounts[i].item()),
+                        "N_Steps": int(n_steps[i].item()),
+                    }
+                    save_path = Path(f"./models/train_step_logs/step_{self.total_it}/data_{i}")
+                    self._save_custom_log_image(state[i], action[i].item(), info_dict, save_path, f"train_data_{i}.png")
+                    self._save_custom_log_image(next_state[i], None, None, save_path, f"train_data_{i}_next.png")
+
         self._set_runtime_modes()
 
         with torch.no_grad():
@@ -961,6 +991,52 @@ class VisualDiscreteAgent:
         filename = f"{timestamp}_step_{step_count:04d}.png"
         img.save(ACTION_LOG_PATH / filename)
         print(f"Action log saved: {filename}")
+
+    def _save_custom_log_image(self, state, action_id, info_dict, save_path, filename):
+        from PIL import ImageDraw, ImageFont
+
+        save_path.mkdir(parents=True, exist_ok=True)
+        img_array = state.detach().cpu().clamp(0, 1).mul(255).byte().numpy().transpose(1, 2, 0)
+        img = Image.fromarray(img_array)
+        img_w, img_h = img.size
+        cell_w = img_w / self.grid_w
+        cell_h = img_h / self.grid_h
+
+        draw = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype("arial.ttf", 12)
+        except Exception:
+            font = ImageFont.load_default()
+
+        if action_id is not None:
+            row = int(action_id) // self.grid_w
+            col = int(action_id) % self.grid_w
+            left = int(col * cell_w)
+            top = int(row * cell_h)
+            right = int((col + 1) * cell_w)
+            bottom = int((row + 1) * cell_h)
+            draw.rectangle([left, top, right, bottom], outline="red", width=4)
+
+        for grid_row in range(1, self.grid_h):
+            y = int(grid_row * cell_h)
+            draw.line([0, y, img_w, y], fill="white", width=1)
+        for grid_col in range(1, self.grid_w):
+            x = int(grid_col * cell_w)
+            draw.line([x, 0, x, img_h], fill="white", width=1)
+
+        if info_dict:
+            text_lines = []
+            for k, v in info_dict.items():
+                text_lines.append(f"{k}: {v}")
+
+            text_y = 5
+            for line in text_lines:
+                bbox = draw.textbbox((5, text_y), line, font=font)
+                draw.rectangle(bbox, fill="black")
+                draw.text((5, text_y), line, fill="white", font=font)
+                text_y += 15
+
+        img.save(save_path / filename)
 
 
 _agent = None
