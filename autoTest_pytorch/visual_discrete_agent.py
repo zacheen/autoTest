@@ -536,7 +536,7 @@ class VisualDiscreteAgent:
             f"  reward_mean={reward.mean().item():.4f} | done_rate={done.mean().item():.4f}\n"
             f"  action_batch={action.tolist()}\n"
             f"  q_top5={top_actions}\n"
-            f"  loss={loss.item():.6f} | q_mean={q_mean:.6f} | epsilon={self.epsilon:.4f}\n"
+            f"  Q_loss={loss.item():.6f} | q_mean={q_mean:.6f} | epsilon={self.epsilon:.4f}\n"
             f"  grad_norm_total={float(grad_norm_total):.6f} | "
             f"yolo={grad_norm_yolo:.6f} | backbone={grad_norm_backbone:.6f} | "
             f"policy={grad_norm_policy:.6f} | head={grad_norm_head:.6f} | "
