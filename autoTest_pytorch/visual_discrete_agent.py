@@ -16,8 +16,8 @@ from PIL import Image
 from torch.utils.tensorboard import SummaryWriter
 from ultralytics import YOLO
 
-from transformer_discrete_agent import TRANSFORMER_MODEL_PATH
-from model_structure.transformer_shared import DuelingQNetwork, EncoderDecoderTransformer, TwoDimensionalPositionEmbedding
+from transformer_discrete_agent import FQF_ENTROPY_COEF, NUM_FQF_FRACTIONS, TRANSFORMER_MODEL_PATH, _quantile_huber_loss
+from model_structure.transformer_shared import EncoderDecoderTransformer, FQFQNetwork, TwoDimensionalPositionEmbedding
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -189,7 +189,7 @@ class VisualTransformerBackbone(nn.Module):
 
 
 class VisualDiscreteAgent:
-    """Visual DDQN agent: screenshot -> YOLO tokens -> frozen teacher core -> 36-class click."""
+    """Visual FQF agent: screenshot -> YOLO tokens -> frozen teacher core -> 36-class click."""
 
     def __init__(self, screen_region):
         self.screen_region = screen_region
@@ -198,8 +198,20 @@ class VisualDiscreteAgent:
         self.num_actions = VISUAL_NUM_ACTIONS
 
         self.backbone = VisualTransformerBackbone(grid_h=self.grid_h, grid_w=self.grid_w).to(device)
-        self.q_network = DuelingQNetwork(d_model=VISUAL_D_MODEL, grid_h=self.grid_h, grid_w=self.grid_w).to(device)
-        self.q_target = DuelingQNetwork(d_model=VISUAL_D_MODEL, grid_h=self.grid_h, grid_w=self.grid_w).to(device)
+        self.q_network = FQFQNetwork(
+            d_model=VISUAL_D_MODEL,
+            grid_h=self.grid_h,
+            grid_w=self.grid_w,
+            num_fractions=NUM_FQF_FRACTIONS,
+            hidden_dim=64,
+        ).to(device)
+        self.q_target = FQFQNetwork(
+            d_model=VISUAL_D_MODEL,
+            grid_h=self.grid_h,
+            grid_w=self.grid_w,
+            num_fractions=NUM_FQF_FRACTIONS,
+            hidden_dim=64,
+        ).to(device)
         self.q_target.load_state_dict(self.q_network.state_dict())
         self.q_target.eval()
         self._load_frozen_transformer_teacher()
@@ -255,8 +267,8 @@ class VisualDiscreteAgent:
         tb_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.tensorboard_log_dir = VISUAL_TENSORBOARD_DIR / tb_timestamp
         self.tb_writer = SummaryWriter(log_dir=str(self.tensorboard_log_dir))
-        print(f"[VisualDDQN] TensorBoard: tensorboard --logdir {VISUAL_TENSORBOARD_DIR}")
-        print(f"[VisualDDQN] Current run: {self.tensorboard_log_dir}")
+        print(f"[VisualFQF] TensorBoard: tensorboard --logdir {VISUAL_TENSORBOARD_DIR}")
+        print(f"[VisualFQF] Current run: {self.tensorboard_log_dir}")
 
         self.try_load_model()
         self._set_runtime_modes()
@@ -270,25 +282,29 @@ class VisualDiscreteAgent:
             try:
                 backbone_state = torch.load(backbone_path, map_location=device)
                 loaded = self.backbone.load_transformer_backbone_weights(backbone_state)
-                print(f"[VisualDDQN] Loaded frozen teacher backbone parts: {loaded}")
+                print(f"[VisualFQF] Loaded frozen teacher backbone parts: {loaded}")
             except Exception as exc:
-                print(f"[VisualDDQN] Failed to load frozen teacher backbone: {exc}")
+                print(f"[VisualFQF] Failed to load frozen teacher backbone: {exc}")
 
-        q_path = TRANSFORMER_MODEL_PATH / "q_network.pth"
+        q_path = TRANSFORMER_MODEL_PATH / "fqf_network.pth"
         if q_path.exists():
             try:
                 self.q_network.load_state_dict(torch.load(q_path, map_location=device))
-                print("[VisualDDQN] Loaded frozen teacher Q-Network")
+                print("[VisualFQF] Loaded frozen teacher FQF-Network")
             except Exception as exc:
-                print(f"[VisualDDQN] Failed to load frozen teacher Q-Network: {exc}")
+                print(f"[VisualFQF] Failed to load frozen teacher FQF-Network: {exc}")
+        elif (TRANSFORMER_MODEL_PATH / "q_network.pth").exists():
+            print("[VisualFQF] Skip legacy q_network.pth because DDQN head shape is incompatible")
 
-        q_target_path = TRANSFORMER_MODEL_PATH / "q_target.pth"
+        q_target_path = TRANSFORMER_MODEL_PATH / "fqf_target.pth"
         if q_target_path.exists():
             try:
                 self.q_target.load_state_dict(torch.load(q_target_path, map_location=device))
-                print("[VisualDDQN] Loaded frozen teacher Q-Target")
+                print("[VisualFQF] Loaded frozen teacher FQF-Target")
             except Exception as exc:
-                print(f"[VisualDDQN] Failed to load frozen teacher Q-Target: {exc}")
+                print(f"[VisualFQF] Failed to load frozen teacher FQF-Target: {exc}")
+        elif (TRANSFORMER_MODEL_PATH / "q_target.pth").exists():
+            print("[VisualFQF] Skip legacy q_target.pth because DDQN head shape is incompatible")
 
     def _freeze_teacher_modules(self):
         for module in (self.backbone.core.transformer, self.backbone.core.decoder, self.q_network, self.q_target):
@@ -310,7 +326,7 @@ class VisualDiscreteAgent:
             image = Image.open(screenshot_path).convert("RGB")
             return self.transform(image)
         except Exception as exc:
-            print(f"[VisualDDQN] Error preprocessing screen: {exc}")
+            print(f"[VisualFQF] Error preprocessing screen: {exc}")
             return torch.zeros((3, *IMAGE_SIZE))
 
     def action_to_grid(self, action_id):
@@ -324,7 +340,7 @@ class VisualDiscreteAgent:
 
     def clear_blocked_actions(self, reason="state changed"):
         if self.blocked_actions_current_state:
-            print(f"[VisualDDQN] Clear blocked actions ({reason}): {sorted(self.blocked_actions_current_state)}")
+            print(f"[VisualFQF] Clear blocked actions ({reason}): {sorted(self.blocked_actions_current_state)}")
         self.blocked_actions_current_state.clear()
         self.current_state_key = None
 
@@ -336,7 +352,7 @@ class VisualDiscreteAgent:
 
         self.blocked_actions_current_state.add(int(action_id))
         row, col = self.action_to_grid(action_id)
-        print(f"[VisualDDQN] Block invalid action {action_id} -> ({row},{col}) for current state")
+        print(f"[VisualFQF] Block invalid action {action_id} -> ({row},{col}) for current state")
 
     def select_action(self, state, add_noise=True):
         state_key = self._state_key(state)
@@ -375,7 +391,7 @@ class VisualDiscreteAgent:
         with torch.no_grad():
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == "cuda")):
                 features = self.backbone.get_features(state_batch)
-                q_2d = self.q_network(features).squeeze(0)
+                q_2d = self.q_network(features)["q_values"].squeeze(0)
             q_logits = q_2d.view(-1)
             masked_logits = q_logits.clone()
             if blocked_actions:
@@ -469,27 +485,42 @@ class VisualDiscreteAgent:
         with torch.no_grad():
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == "cuda")):
                 next_features = self.backbone.get_features(next_state)
-                next_online_q_2d = self.q_network(next_features)
+                next_online = self.q_network(next_features)
+                next_online_q_2d = next_online["q_values"]
                 next_online_q_flat = next_online_q_2d.view(batch_size, -1)
                 next_best_flat = next_online_q_flat.argmax(dim=1)
-                next_best_rows = next_best_flat // self.grid_w
-                next_best_cols = next_best_flat % self.grid_w
-                next_target_q_2d = self.q_target(next_features)
-                next_target_q = next_target_q_2d[
-                    torch.arange(batch_size, device=device), next_best_rows, next_best_cols
-                ].unsqueeze(1)
-                target = reward + (1 - done) * discounts * next_target_q
+                next_target = self.q_target(next_features)
+                next_target_quantiles = next_target["quantiles"][
+                    torch.arange(batch_size, device=device), next_best_flat
+                ]
+                target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
 
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == "cuda")):
             features = self.backbone.get_features(state)
-            q_2d = self.q_network(features)
-            row_idx = action // self.grid_w
-            col_idx = action % self.grid_w
+            q_output = self.q_network(features)
+            q_2d = q_output["q_values"]
+            q_quantiles = q_output["quantiles"]
+            tau_hats = q_output["tau_hats"]
+            fraction_probs = q_output["fraction_probs"]
+            action_flat = action.long()
+            row_idx = action_flat // self.grid_w
+            col_idx = action_flat % self.grid_w
             q_taken = q_2d[
                 torch.arange(batch_size, device=device), row_idx, col_idx
             ].unsqueeze(1)
-            loss = F.smooth_l1_loss(q_taken, target)
-            td_error = (q_taken.detach() - target.detach()).abs()
+            chosen_quantiles = q_quantiles[
+                torch.arange(batch_size, device=device), action_flat
+            ]
+            per_sample_quantile_loss = _quantile_huber_loss(
+                current_quantiles=chosen_quantiles.float(),
+                target_quantiles=target_quantiles.detach().float(),
+                tau_hats=tau_hats.detach().float(),
+            )
+            entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
+            per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy.float()
+            loss = per_sample_loss.mean()
+            target_mean = target_quantiles.mean(dim=1, keepdim=True)
+            td_error = (q_taken.detach().float() - target_mean.detach().float()).abs()
 
         self.replay_buffer.update_priorities(sample_indices, td_error)
 
@@ -569,7 +600,7 @@ class VisualDiscreteAgent:
 
         if yolo_debug["grad_param_count"] == 0 and self.total_it <= 10:
             print(
-                "[VisualDDQN][DEBUG] YOLO grad missing: "
+                "[VisualFQF][DEBUG] YOLO grad missing: "
                 f"params={yolo_debug['param_count']}, "
                 f"requires_grad={yolo_debug['requires_grad_count']}, "
                 f"grad_params={yolo_debug['grad_param_count']}, "
@@ -604,7 +635,7 @@ class VisualDiscreteAgent:
         self.tb_writer.add_scalar("episode/epsilon", self.epsilon, self.episode_count)
         self._save_model()
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
-            print(f"[VisualDDQN] Periodic save at episode {self.episode_count} | epsilon={self.epsilon:.4f}")
+            print(f"[VisualFQF] Periodic save at episode {self.episode_count} | epsilon={self.epsilon:.4f}")
             self.save_persistent()
 
     def _save_model(self):
@@ -718,9 +749,9 @@ class VisualDiscreteAgent:
                     self.backbone.query_position.load_state_dict(state["query_position"])
                 if "query_tokens" in state and tuple(state["query_tokens"].shape) == tuple(self.backbone.query_tokens.shape):
                     self.backbone.query_tokens.data.copy_(state["query_tokens"].to(self.backbone.query_tokens.device))
-                print("[VisualDDQN] Loaded trainable visual backbone parts")
+                print("[VisualFQF] Loaded trainable visual backbone parts")
             except Exception as exc:
-                print(f"[VisualDDQN] Failed to load trainable visual backbone parts: {exc}")
+                print(f"[VisualFQF] Failed to load trainable visual backbone parts: {exc}")
 
         opt_path = VISUAL_MODEL_PATH / "optimizer_state.pth"
         if opt_path.exists():
@@ -731,13 +762,13 @@ class VisualDiscreteAgent:
                 self.episode_count = state.get("episode_count", 0)
                 self.epsilon = state.get("epsilon", self.epsilon)
                 print(
-                    f"[VisualDDQN] Loaded optimizer: total_it={self.total_it}, "
+                    f"[VisualFQF] Loaded optimizer: total_it={self.total_it}, "
                     f"episode={self.episode_count}, epsilon={self.epsilon:.4f}"
                 )
                 if "scaler" in state:
-                    print("[VisualDDQN] Skip restoring GradScaler state to avoid stale AMP optimizer stage")
+                    print("[VisualFQF] Skip restoring GradScaler state to avoid stale AMP optimizer stage")
             except Exception as exc:
-                print(f"[VisualDDQN] Failed to load optimizer state: {exc}")
+                print(f"[VisualFQF] Failed to load optimizer state: {exc}")
 
         training_state_path = VISUAL_MODEL_PATH / "training_state.pth"
         if training_state_path.exists():
@@ -747,7 +778,7 @@ class VisualDiscreteAgent:
                 if persistent_index:
                     self._load_persistent_buffer(persistent_index)
             except Exception as exc:
-                print(f"[VisualDDQN] Failed to load replay buffer: {exc}")
+                print(f"[VisualFQF] Failed to load replay buffer: {exc}")
 
         self._freeze_teacher_modules()
         self._set_runtime_modes()
@@ -802,7 +833,7 @@ class VisualDiscreteAgent:
         self.replay_buffer.size_count = loaded_count
         self.replay_buffer.next_storage_id = loaded_count
         self.replay_buffer.insert_counter = loaded_count
-        print(f"[VisualDDQN] Loaded {loaded_count} replay buffer entries")
+        print(f"[VisualFQF] Loaded {loaded_count} replay buffer entries")
 
     def _close_io_log(self):
         if self._io_log and not self._io_log.closed:
