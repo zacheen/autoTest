@@ -31,6 +31,7 @@ class CategorizedReplayBuffer:
         priority_max: float = 5.0,
         priority_eps: float = 1e-3,
         age_decay: float = 0.002,
+        max_age: int = 2000,
         beta_start: float = 0.4,
     ):
         """
@@ -48,6 +49,7 @@ class CategorizedReplayBuffer:
             priority_max: Cap on initial priority values.
             priority_eps: Small epsilon added to TD Error to prevent 0 priority.
             age_decay: Decay factor removing priority based on how many inserts occurred since entry.
+            max_age: Hard age limit in insert steps. Entries older than this get zero effective priority.
             beta_start: Initial Importance Sampling weight factor.
         """
         self.max_size = max_size
@@ -71,6 +73,8 @@ class CategorizedReplayBuffer:
         self.priority_max = priority_max
         self.priority_eps = priority_eps
         self.age_decay = age_decay
+        self.max_age = int(max_age) if max_age is not None else 0
+        # if max_age = 0, it means no "force" age remove
         self.beta = beta_start
 
         self.size_count = 0
@@ -136,8 +140,10 @@ class CategorizedReplayBuffer:
         """Calculate the current priority of an entry after applying age decay."""
         base_priority = float(np.clip(entry.get("priority", 1.0), self.priority_min, self.priority_max))
         age = max(0, self.insert_counter - entry.get("insert_order", 0))
+        if self.max_age > 0 and age > self.max_age:
+            return 0.0
         aged_priority = base_priority / (1.0 + self.age_decay * age)
-        return max(self.priority_min, aged_priority)
+        return aged_priority
 
     def _prune_if_needed(self):
         """Reduce buffer size to max capacity by removing lowest priority entries across buckets."""
