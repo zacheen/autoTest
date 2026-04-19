@@ -247,7 +247,7 @@ class Game_test_case(unittest.TestCase) :
             done,
         )
 
-        loss_info = game_status.agent.train_step()
+        loss_info = game_status.agent.maybe_train_step(force=done)
         if loss_info:
             if 'critic_loss' in loss_info and 'actor_loss' in loss_info:
                 print(f"Loss - Critic: {loss_info['critic_loss']:.4f}, Actor: {loss_info['actor_loss']:.4f}")

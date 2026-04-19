@@ -27,7 +27,8 @@ IMAGE_SIZE = (640, 640)
 LOG_ACTIONS = True
 ACTION_LOG_PATH = Path("./models/action_logs")
 SAVE_EVERY_N_EPISODES = 50
-TARGET_UPDATE_FREQ = 50
+TRAIN_EVERY_N_STEPS = 3
+TARGET_UPDATE_FREQ = 17
 YOLO_LAST_LAYER_IDX = 6
 YOLO_LAST_CHANNELS = 128
 YOLO_LAST_FEATURE_SIZE = 40
@@ -43,8 +44,10 @@ VISUAL_FF_DIM = 256
 VISUAL_DROPOUT = 0.1
 VISUAL_GAMMA = 0.7
 VISUAL_N_STEP = 1
-LR_VISUAL_YOLO = 3e-5
-LR_VISUAL_POLICY = 5e-5
+LR_VISUAL_YOLO = 2e-5
+LR_VISUAL_ADAPTER = 3e-5
+LR_VISUAL_DECODER = 2e-5
+LR_VISUAL_HEAD = 1.5e-5
 VISUAL_BUFFER_CAPACITY = 2048
 VISUAL_SAVE_CAPACITY = 256
 VISUAL_BUFFER_OVERFLOW = 256
@@ -221,9 +224,9 @@ class VisualDiscreteAgent:
 
         self.optimizer = optim.AdamW([
             {"params": self.backbone.yolo_parameters(), "lr": LR_VISUAL_YOLO},
-            {"params": self.backbone.adapter_parameters(), "lr": LR_VISUAL_POLICY},
-            {"params": self.backbone.core.decoder.parameters(), "lr": LR_VISUAL_POLICY},
-            {"params": self.q_network.parameters(), "lr": LR_VISUAL_POLICY},
+            {"params": self.backbone.adapter_parameters(), "lr": LR_VISUAL_ADAPTER},
+            {"params": self.backbone.core.decoder.parameters(), "lr": LR_VISUAL_DECODER},
+            {"params": self.q_network.parameters(), "lr": LR_VISUAL_HEAD},
         ])
         self.scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
 
@@ -246,6 +249,8 @@ class VisualDiscreteAgent:
         )
         self.total_it = 0
         self.episode_count = 0
+        self.train_every_n_steps = TRAIN_EVERY_N_STEPS
+        self.pending_train_steps = 0
         self.n_step = VISUAL_N_STEP
         self.n_step_gamma = VISUAL_GAMMA
         self.n_step_buffer = deque()
@@ -621,6 +626,14 @@ class VisualDiscreteAgent:
             "Q_loss": loss.item(),
             "q_mean": q_mean,
         }
+
+    def maybe_train_step(self, force=False):
+        self.pending_train_steps += 1
+        if self.pending_train_steps < self.train_every_n_steps and not force:
+            return None
+
+        self.pending_train_steps = 0
+        return self.train_step()
 
     def reset_episode(self):
         self._flush_n_step_buffer()
