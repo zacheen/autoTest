@@ -19,6 +19,8 @@ from ultralytics import YOLO
 from transformer_discrete_agent import FQF_ENTROPY_COEF, NUM_FQF_FRACTIONS, TRANSFORMER_MODEL_PATH, _quantile_huber_loss
 from model_structure.transformer_shared import EncoderDecoderTransformer, FQFQNetwork, TwoDimensionalPositionEmbedding
 
+import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 IMAGE_SIZE = (640, 640)
@@ -551,6 +553,16 @@ class VisualDiscreteAgent:
         grad_norm_head = self._module_grad_norm(self.q_network)
         self.scaler.step(self.optimizer)
         self.scaler.update()
+
+        # train_step 的 scaler.update() 之後加
+        scale_value = self.scaler.get_scale()
+        self._io_log.write(f"  scaler_scale={scale_value:.1f}\n")
+        self.tb_writer.add_scalar("train/scaler_scale", scale_value, self.total_it)
+
+        # 如果 scale 掉到很低（< 256），代表 overflow 很嚴重
+        if scale_value < 256:
+            print(f"[WARNING] GradScaler scale dropped to {scale_value}, possible overflow!")
+
         yolo_param_delta = self._parameter_delta_norm(
             self.backbone.feature_extractor,
             yolo_params_before_step,
