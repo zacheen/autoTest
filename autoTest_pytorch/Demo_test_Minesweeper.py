@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 import os
 from threading import Thread, Event
 import datetime
@@ -34,7 +34,7 @@ from visual_discrete_agent import get_agent
 
 WEB_API = MinesweeperWebClient(default_difficulty="Training 6x6")
 REWARD_VALID_CLICK = 1.0
-REWARD_INVALID_CLICK = -0.98
+REWARD_INVALID_CLICK = -0.5 # design corrosponding to discount factor = 0.7
 REWARD_LOSE = -1.0
 REWARD_WIN = 3.6
 
@@ -196,7 +196,7 @@ class Game_test_case(unittest.TestCase) :
                 break
 
             print("API action failed")
-            game_status.reward = -1.0
+            game_status.reward = -0.5
             game_status.record_reward(game_status.reward)
             game_status.invalid_click_count += 1
             game_status.agent.block_action_for_state(game_status.current_pic, game_status.action)

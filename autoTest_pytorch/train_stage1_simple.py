@@ -158,10 +158,10 @@ def compute_reward(result):
         +3.6  WIN
         +1.0  valid click
         -1.0  mine
-        -0.98 invalid click
+        -0.5 invalid click
     """
     if not result.changed:
-        return -0.98
+        return -0.5 # design corrosponding to discount factor = 0.7
     if result.win:
         return 3.6
     if result.game_over:

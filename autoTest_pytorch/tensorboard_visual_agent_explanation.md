@@ -72,4 +72,4 @@ Most metrics are driven by the following reward values:
 - **Win**: `+3.6`
 - **Valid Click**: `+1.0`
 - **Mine (Loss)**: `-1.0`
-- **Invalid Click**: `-0.98` (to penalize repetitive or useless actions)
+- **Invalid Click**: `-0.5` (to penalize repetitive or useless actions)
