@@ -80,6 +80,7 @@ class CategorizedReplayBuffer:
 
 
     def _reward_type(self, reward, done):
+        """Categorize the reward into a specific bucket type (e.g., win, lose, progress)."""
         reward = float(reward)
         if done and reward >= self.win_threshold:
             return "win"
@@ -92,6 +93,7 @@ class CategorizedReplayBuffer:
         return "other"
 
     def _save_tensor(self, tensor, root_name, storage_id):
+        """Save a tensor either to disk or keep it in memory based on storage mode."""
         if self.storage_mode == "disk":
             path = self.save_dir / f"{root_name}_{storage_id}.pt"
             # If it looks like a visual image, store as uint8 to save space
@@ -105,6 +107,7 @@ class CategorizedReplayBuffer:
             return tensor.cpu().clone() if torch.is_tensor(tensor) else tensor
 
     def _load_tensor(self, reference):
+        """Load and return a tensor from disk, or return the memory reference directly."""
         if self.storage_mode == "disk":
             tensor = torch.load(reference, map_location="cpu")
             if tensor.dtype == torch.uint8:
@@ -116,6 +119,7 @@ class CategorizedReplayBuffer:
             return reference
 
     def _safe_unlink(self, path_str):
+        """Safely delete a file from disk if its path is provided and exists."""
         if not path_str:
             return
         path = Path(path_str)
@@ -123,17 +127,20 @@ class CategorizedReplayBuffer:
             path.unlink()
 
     def _delete_entry_files(self, entry):
+        """Clean up and delete disk files associated with a removed buffer entry."""
         if self.storage_mode == "disk":
             self._safe_unlink(entry.get("state"))
             self._safe_unlink(entry.get("next_state"))
 
     def _effective_priority(self, entry):
+        """Calculate the current priority of an entry after applying age decay."""
         base_priority = float(np.clip(entry.get("priority", 1.0), self.priority_min, self.priority_max))
         age = max(0, self.insert_counter - entry.get("insert_order", 0))
         aged_priority = base_priority / (1.0 + self.age_decay * age)
         return max(self.priority_min, aged_priority)
 
     def _prune_if_needed(self):
+        """Reduce buffer size to max capacity by removing lowest priority entries across buckets."""
         if self.size_count <= self.max_size + self.overflow_margin:
             return
 
@@ -172,6 +179,7 @@ class CategorizedReplayBuffer:
                 self._delete_entry_files(entry)
 
     def _sample_from_bucket(self, entries, count):
+        """Sample a specific number of entries from a single category bucket."""
         if count <= 0 or not entries:
             return []
 
@@ -369,6 +377,7 @@ class CategorizedReplayBuffer:
         return result
 
     def size(self):
+        """Return the current total number of entries in the buffer."""
         return self.size_count
 
     def get_all_entries(self):
