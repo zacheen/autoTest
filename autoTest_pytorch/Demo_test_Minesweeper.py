@@ -196,7 +196,7 @@ class Game_test_case(unittest.TestCase) :
                 break
 
             print("API action failed")
-            game_status.reward = -0.5
+            game_status.reward = REWARD_INVALID_CLICK
             game_status.record_reward(game_status.reward)
             game_status.invalid_click_count += 1
             game_status.agent.block_action_for_state(game_status.current_pic, game_status.action)

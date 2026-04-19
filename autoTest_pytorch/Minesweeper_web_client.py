@@ -68,7 +68,7 @@ class MinesweeperWebClient:
             )
 
             if result and result.get("ok"):
-                driver.refresh()
+                driver.refresh() # will wait until the page is loaded
                 return result
 
             print(f"[MinesweeperWebClient] Click API failed: {result}")
@@ -146,7 +146,7 @@ class MinesweeperWebClient:
             )
 
             if result and result.get("ok"):
-                driver.refresh()
+                driver.refresh() # will wait until the page is loaded
                 return True
 
             print(f"[MinesweeperWebClient] New game API failed: {result}")
