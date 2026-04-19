@@ -652,9 +652,11 @@ class VisualDiscreteAgent:
                 "memory_position": self.backbone.memory_position.state_dict(),
                 "query_position": self.backbone.query_position.state_dict(),
                 "query_tokens": self.backbone.query_tokens.detach().cpu(),
+                "decoder": self.backbone.core.decoder.state_dict(),
             },
             VISUAL_MODEL_PATH / "trainable_backbone.pth",
         )
+        torch.save(self.q_network.state_dict(), VISUAL_MODEL_PATH / "fqf_network.pth")
         torch.save(
             {
                 "optimizer": self.optimizer.state_dict(),
@@ -754,9 +756,20 @@ class VisualDiscreteAgent:
                     self.backbone.query_position.load_state_dict(state["query_position"])
                 if "query_tokens" in state and tuple(state["query_tokens"].shape) == tuple(self.backbone.query_tokens.shape):
                     self.backbone.query_tokens.data.copy_(state["query_tokens"].to(self.backbone.query_tokens.device))
+                if "decoder" in state:
+                    self.backbone.core.decoder.load_state_dict(state["decoder"])
                 print("[VisualFQF] Loaded trainable visual backbone parts")
             except Exception as exc:
                 print(f"[VisualFQF] Failed to load trainable visual backbone parts: {exc}")
+
+        q_path = VISUAL_MODEL_PATH / "fqf_network.pth"
+        if q_path.exists():
+            try:
+                self.q_network.load_state_dict(torch.load(q_path, map_location=device))
+                self.q_target.load_state_dict(self.q_network.state_dict())
+                print("[VisualFQF] Loaded visual FQF-Network")
+            except Exception as exc:
+                print(f"[VisualFQF] Failed to load visual FQF-Network: {exc}")
 
         opt_path = VISUAL_MODEL_PATH / "optimizer_state.pth"
         if opt_path.exists():
