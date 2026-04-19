@@ -147,6 +147,8 @@ class TransformerDiscreteAgent:
         self.optimizer = optim.Adam(
             list(self.backbone.parameters()) + list(self.q_network.parameters()),
             lr=LR_DDQN,
+            foreach=False,
+            fused=False,
         )
 
         self.replay_buffer = CategorizedReplayBuffer(
@@ -310,8 +312,17 @@ class TransformerDiscreteAgent:
         per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy
         loss = (is_weights * per_sample_loss).mean()
 
+        if not torch.isfinite(loss):
+            raise RuntimeError(
+                f"Non-finite loss detected before backward: {loss.item()} "
+                f"(quantile={per_sample_quantile_loss.mean().item()}, entropy={entropy.mean().item()})"
+            )
+
         self.optimizer.zero_grad()
         loss.backward()
+        for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
+            if param.grad is not None and not torch.isfinite(param.grad).all():
+                raise RuntimeError(f"Non-finite gradient detected in parameter: {name}")
         torch.nn.utils.clip_grad_norm_(
             list(self.backbone.parameters()) + list(self.q_network.parameters()),
             max_norm=1.0,
