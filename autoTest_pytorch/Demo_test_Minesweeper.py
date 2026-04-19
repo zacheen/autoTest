@@ -180,7 +180,14 @@ class Game_test_case(unittest.TestCase) :
             print(f"Step {game_status.step_count}: action={action} -> ({row},{col}) -> ", end="")
             game_status.click_attempt_count += 1
 
-            if WEB_API.click_cell(row, col):
+            api_result = WEB_API.click_cell_with_state(row, col)
+            if api_result and api_result.get("ok"):
+                next_server_state = api_result.get("data")
+                game_status.pending_server_state = next_server_state
+                game_status.pending_board_changed = (
+                    self._board_signature(next_server_state) !=
+                    self._board_signature(game_status.server_state)
+                )
                 game_status.agent.log_action_image(
                     current_screenshot,
                     log_info,
@@ -214,6 +221,17 @@ class Game_test_case(unittest.TestCase) :
         )
         screenshot_path = game_status.save_pic_path[-1]
         return game_status.agent.preprocess_screen(screenshot_path)
+
+    def _board_signature(self, server_state):
+        if not server_state:
+            return None
+        board = server_state.get("board")
+        if board is None:
+            return None
+        return tuple(
+            tuple((cell.get("state"), cell.get("value")) for cell in row)
+            for row in board
+        )
 
     def update_model(self, game_status):
         state = game_status.current_pic
@@ -267,6 +285,9 @@ class Game_test_case(unittest.TestCase) :
             self.invalid_click_count = 0
             self.click_attempt_count = 0
             self.won = False
+            self.server_state = None
+            self.pending_server_state = None
+            self.pending_board_changed = False
 
         def update_state(self, new_state, new_action):
             self.current_pic = new_state
@@ -369,6 +390,84 @@ class Game_test_case(unittest.TestCase) :
                     self.decide_next_step_and_play(game_status)
 
     # 等待遊戲結束
+    def test_RL_server(self):
+        Tool_Main.glo_var.s_record_time()
+        UI_waiting_time = 1
+        game_status = Game_test_case.Game_status()
+        game_status.noise = True  # SAC handles exploration via stochastic policy
+        game_status.server_state = WEB_API.get_game_state()
+        time.sleep(UI_waiting_time)
+        self.decide_next_step_and_play(game_status)
+        time.sleep(UI_waiting_time)
+
+        while True:
+            check_pause()
+            time.sleep(0.1)
+            if game_status.game_over:
+                game_status.agent.log_episode_metrics(
+                    win=game_status.won,
+                    invalid_click_rate=game_status.invalid_click_rate(),
+                    reward_mean=game_status.average_reward(),
+                )
+                game_status.agent.on_episode_end()
+                self.assertTrue(True, "game_over(really finish the game)")
+                break
+            elif Tool_Main.glo_var.fail_playing:
+                game_status.agent.log_episode_metrics(
+                    win=False,
+                    invalid_click_rate=game_status.invalid_click_rate(),
+                    reward_mean=game_status.average_reward(),
+                )
+                game_status.agent.on_episode_end()
+                self.assertTrue(False, "time_out(reach max steps)")
+                break
+
+            if game_status.pending_server_state is None:
+                continue
+
+            game_status.step_count += 1
+            game_status.server_state = game_status.pending_server_state
+            game_status.pending_server_state = None
+            board_changed = game_status.pending_board_changed
+            game_status.pending_board_changed = False
+
+            server_status = game_status.server_state.get("status")
+            if server_status == "lost":
+                game_status.reward = REWARD_LOSE
+                game_status.game_over = 1
+                print("lose")
+            elif server_status == "won":
+                game_status.reward = REWARD_WIN
+                game_status.game_over = 1
+                game_status.won = True
+                print("win")
+            elif board_changed:
+                game_status.reward = REWARD_VALID_CLICK
+                print("valid click")
+            else:
+                game_status.reward = REWARD_INVALID_CLICK
+                game_status.invalid_click_count += 1
+                print("invalid click")
+
+            game_status.record_reward(game_status.reward)
+
+            if board_changed:
+                game_status.agent.clear_blocked_actions(reason="server board changed after valid click")
+                if not game_status.game_over:
+                    game_status.next_state = self.capture_grid_state(game_status)
+                else:
+                    game_status.next_state = None
+            else:
+                if game_status.current_pic is not None and game_status.action is not None:
+                    game_status.agent.block_action_for_state(game_status.current_pic, game_status.action)
+                game_status.next_state = game_status.current_pic
+
+            self.update_model(game_status)
+            if game_status.step_count > game_status.max_steps:
+                Tool_Main.glo_var.fail_playing = True
+            elif not game_status.game_over:
+                self.decide_next_step_and_play(game_status)
+
     def test_wait_result(self):
         Tool_Main.glo_var.s_record_time()
 
@@ -483,7 +582,7 @@ if __name__=="__main__" :
             # 組合要做的步驟
             during_gameing.addTest(Game_test_case("test_state_prepare"))
             during_gameing.addTest(Game_test_case("test_click_middle"))
-            during_gameing.addTest(Game_test_case("test_RL"))
+            during_gameing.addTest(Game_test_case("test_RL_server"))
             during_gameing.addTest(Game_test_case("test_wait_result"))
             during_gameing.addTest(Game_test_case("test_new_game"))
             #獲取當前時間，這樣便於下面的使用

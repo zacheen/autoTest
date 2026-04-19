@@ -247,6 +247,7 @@ class VisualDiscreteAgent:
         self.n_step = VISUAL_N_STEP
         self.n_step_gamma = VISUAL_GAMMA
         self.n_step_buffer = deque()
+        self.recent_real_rewards = deque(maxlen=100)
         self.epsilon = 0.30
         self.epsilon_min = 0.05
         self.epsilon_decay_episodes = 5000
@@ -427,6 +428,7 @@ class VisualDiscreteAgent:
         }
 
     def store_transition(self, state, action, next_state, reward, done):
+        self.recent_real_rewards.append(float(reward))
         transition = {
             "state": state.detach().cpu(),
             "action": int(action),
@@ -561,6 +563,10 @@ class VisualDiscreteAgent:
 
         with torch.no_grad():
             q_mean = q_taken.mean().item()
+            real_reward_mean = (
+                float(sum(self.recent_real_rewards) / len(self.recent_real_rewards))
+                if self.recent_real_rewards else 0.0
+            )
             q0 = q_2d[0].view(-1)
             top_vals, top_idx = torch.topk(q0, k=min(5, self.num_actions))
             top_actions = [
@@ -571,6 +577,7 @@ class VisualDiscreteAgent:
         self._io_log.write(
             f"[Step {self.total_it}] {datetime.datetime.now().strftime('%H:%M:%S')}\n"
             f"  reward_mean={reward.mean().item():.4f} | done_rate={done.mean().item():.4f}\n"
+            f"  real_reward_mean={real_reward_mean:.4f}\n"
             f"  action_batch={action.tolist()}\n"
             f"  q_top5={top_actions}\n"
             f"  Q_loss={loss.item():.6f} | q_mean={q_mean:.6f} | epsilon={self.epsilon:.4f}\n"
@@ -590,6 +597,7 @@ class VisualDiscreteAgent:
 
         self.tb_writer.add_scalar("train/Q_loss", loss.item(), self.total_it)
         self.tb_writer.add_scalar("train/q_mean", q_mean, self.total_it)
+        self.tb_writer.add_scalar("train/real_reward_mean", real_reward_mean, self.total_it)
         self.tb_writer.add_scalar("train/done_rate", done.mean().item(), self.total_it)
         self.tb_writer.add_scalar("train/epsilon", self.epsilon, self.total_it)
         self.tb_writer.add_scalar("grad/total_norm", float(grad_norm_total), self.total_it)
