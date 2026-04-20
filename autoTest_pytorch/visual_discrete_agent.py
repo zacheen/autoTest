@@ -228,7 +228,7 @@ class VisualDiscreteAgent:
             {"params": self.backbone.core.decoder.parameters(), "lr": LR_VISUAL_DECODER},
             {"params": self.q_network.parameters(), "lr": LR_VISUAL_HEAD},
         ])
-        self.scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+        self.scaler = torch.cuda.amp.GradScaler(enabled=False)
 
         from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 
@@ -498,44 +498,42 @@ class VisualDiscreteAgent:
         self._set_runtime_modes()
 
         with torch.no_grad():
-            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == "cuda")):
-                next_features = self.backbone.get_features(next_state)
-                next_online = self.q_network(next_features)
-                next_online_q_2d = next_online["q_values"]
-                next_online_q_flat = next_online_q_2d.view(batch_size, -1)
-                next_best_flat = next_online_q_flat.argmax(dim=1)
-                next_target = self.q_target(next_features)
-                next_target_quantiles = next_target["quantiles"][
-                    torch.arange(batch_size, device=device), next_best_flat
-                ]
-                target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
-
-        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == "cuda")):
-            features = self.backbone.get_features(state)
-            q_output = self.q_network(features)
-            q_2d = q_output["q_values"]
-            q_quantiles = q_output["quantiles"]
-            tau_hats = q_output["tau_hats"]
-            fraction_probs = q_output["fraction_probs"]
-            action_flat = action.long()
-            row_idx = action_flat // self.grid_w
-            col_idx = action_flat % self.grid_w
-            q_taken = q_2d[
-                torch.arange(batch_size, device=device), row_idx, col_idx
-            ].unsqueeze(1)
-            chosen_quantiles = q_quantiles[
-                torch.arange(batch_size, device=device), action_flat
+            next_features = self.backbone.get_features(next_state)
+            next_online = self.q_network(next_features)
+            next_online_q_2d = next_online["q_values"]
+            next_online_q_flat = next_online_q_2d.view(batch_size, -1)
+            next_best_flat = next_online_q_flat.argmax(dim=1)
+            next_target = self.q_target(next_features)
+            next_target_quantiles = next_target["quantiles"][
+                torch.arange(batch_size, device=device), next_best_flat
             ]
-            per_sample_quantile_loss = _quantile_huber_loss(
-                current_quantiles=chosen_quantiles.float(),
-                target_quantiles=target_quantiles.detach().float(),
-                tau_hats=tau_hats.detach().float(),
-            )
-            entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
-            per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy.float()
-            loss = per_sample_loss.mean()
-            target_mean = target_quantiles.mean(dim=1, keepdim=True)
-            td_error = (q_taken.detach().float() - target_mean.detach().float()).abs()
+            target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
+
+        features = self.backbone.get_features(state)
+        q_output = self.q_network(features)
+        q_2d = q_output["q_values"]
+        q_quantiles = q_output["quantiles"]
+        tau_hats = q_output["tau_hats"]
+        fraction_probs = q_output["fraction_probs"]
+        action_flat = action.long()
+        row_idx = action_flat // self.grid_w
+        col_idx = action_flat % self.grid_w
+        q_taken = q_2d[
+            torch.arange(batch_size, device=device), row_idx, col_idx
+        ].unsqueeze(1)
+        chosen_quantiles = q_quantiles[
+            torch.arange(batch_size, device=device), action_flat
+        ]
+        per_sample_quantile_loss = _quantile_huber_loss(
+            current_quantiles=chosen_quantiles.float(),
+            target_quantiles=target_quantiles.detach().float(),
+            tau_hats=tau_hats.detach().float(),
+        )
+        entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
+        per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy.float()
+        loss = per_sample_loss.mean()
+        target_mean = target_quantiles.mean(dim=1, keepdim=True)
+        td_error = (q_taken.detach().float() - target_mean.detach().float()).abs()
 
         self.replay_buffer.update_priorities(sample_indices, td_error)
 
