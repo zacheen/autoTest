@@ -556,6 +556,8 @@ class VisualDiscreteAgent:
             + self._module_grad_norm(self.backbone.query_position)
         )
         grad_norm_head = self._module_grad_norm(self.q_network)
+        yolo_grad_debug = self._module_grad_debug(self.backbone.feature_extractor)
+        head_grad_debug = self._module_grad_debug(self.q_network)
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
@@ -601,6 +603,8 @@ class VisualDiscreteAgent:
             f"yolo={grad_norm_yolo:.6f} | backbone={grad_norm_backbone:.6f} | "
             f"policy={grad_norm_policy:.6f} | head={grad_norm_head:.6f} | "
             f"yolo_param_delta={yolo_param_delta:.6f}\n"
+            f"  yolo_grad_debug={yolo_grad_debug}\n"
+            f"  head_grad_debug={head_grad_debug}\n"
             f"---\n"
         )
         self._io_log.flush()
@@ -616,6 +620,14 @@ class VisualDiscreteAgent:
         self.tb_writer.add_scalar("grad/backbone_norm", grad_norm_backbone, self.total_it)
         self.tb_writer.add_scalar("grad/policy_norm", grad_norm_policy, self.total_it)
         self.tb_writer.add_scalar("grad/head_norm", grad_norm_head, self.total_it)
+        self.tb_writer.add_scalar("debug/yolo_requires_grad_count", yolo_grad_debug["requires_grad_count"], self.total_it)
+        self.tb_writer.add_scalar("debug/yolo_grad_param_count", yolo_grad_debug["grad_param_count"], self.total_it)
+        self.tb_writer.add_scalar("debug/yolo_grad_element_count", yolo_grad_debug["grad_element_count"], self.total_it)
+        self.tb_writer.add_scalar("debug/yolo_nan_grad_count", yolo_grad_debug["nan_grad_count"], self.total_it)
+        self.tb_writer.add_scalar("debug/head_requires_grad_count", head_grad_debug["requires_grad_count"], self.total_it)
+        self.tb_writer.add_scalar("debug/head_grad_param_count", head_grad_debug["grad_param_count"], self.total_it)
+        self.tb_writer.add_scalar("debug/head_grad_element_count", head_grad_debug["grad_element_count"], self.total_it)
+        self.tb_writer.add_scalar("debug/head_nan_grad_count", head_grad_debug["nan_grad_count"], self.total_it)
 
         if self.total_it % VISUAL_HISTOGRAM_EVERY == 0:
             self._log_tensorboard_histograms(self.total_it)
