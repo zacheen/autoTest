@@ -27,8 +27,8 @@ IMAGE_SIZE = (640, 640)
 LOG_ACTIONS = True
 ACTION_LOG_PATH = Path("./models/action_logs")
 SAVE_EVERY_N_EPISODES = 50
-TRAIN_EVERY_N_STEPS = 3
-TARGET_UPDATE_FREQ = 17
+TRAIN_EVERY_N_STEPS = 1
+TARGET_UPDATE_FREQ = 50
 YOLO_LAST_LAYER_IDX = 6
 YOLO_LAST_CHANNELS = 128
 YOLO_LAST_FEATURE_SIZE = 40
@@ -603,8 +603,6 @@ class VisualDiscreteAgent:
             f"yolo={grad_norm_yolo:.6f} | backbone={grad_norm_backbone:.6f} | "
             f"policy={grad_norm_policy:.6f} | head={grad_norm_head:.6f} | "
             f"yolo_param_delta={yolo_param_delta:.6f}\n"
-            f"  yolo_grad_debug={yolo_grad_debug}\n"
-            f"  head_grad_debug={head_grad_debug}\n"
             f"---\n"
         )
         self._io_log.flush()
@@ -620,13 +618,7 @@ class VisualDiscreteAgent:
         self.tb_writer.add_scalar("grad/backbone_norm", grad_norm_backbone, self.total_it)
         self.tb_writer.add_scalar("grad/policy_norm", grad_norm_policy, self.total_it)
         self.tb_writer.add_scalar("grad/head_norm", grad_norm_head, self.total_it)
-        self.tb_writer.add_scalar("debug/yolo_requires_grad_count", yolo_grad_debug["requires_grad_count"], self.total_it)
-        self.tb_writer.add_scalar("debug/yolo_grad_param_count", yolo_grad_debug["grad_param_count"], self.total_it)
-        self.tb_writer.add_scalar("debug/yolo_grad_element_count", yolo_grad_debug["grad_element_count"], self.total_it)
         self.tb_writer.add_scalar("debug/yolo_nan_grad_count", yolo_grad_debug["nan_grad_count"], self.total_it)
-        self.tb_writer.add_scalar("debug/head_requires_grad_count", head_grad_debug["requires_grad_count"], self.total_it)
-        self.tb_writer.add_scalar("debug/head_grad_param_count", head_grad_debug["grad_param_count"], self.total_it)
-        self.tb_writer.add_scalar("debug/head_grad_element_count", head_grad_debug["grad_element_count"], self.total_it)
         self.tb_writer.add_scalar("debug/head_nan_grad_count", head_grad_debug["nan_grad_count"], self.total_it)
 
         if self.total_it % VISUAL_HISTOGRAM_EVERY == 0:
