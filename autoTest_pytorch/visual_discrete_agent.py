@@ -57,6 +57,7 @@ VISUAL_PRIORITY_MIN = 0.05
 VISUAL_PRIORITY_MAX = 5.0
 VISUAL_PRIORITY_EPS = 1e-3
 VISUAL_AGE_DECAY = 0.002
+VISUAL_GRAD_CLIP_NORM = 1.0
 VISUAL_HISTOGRAM_EVERY = 20
 VISUAL_MODEL_PATH = Path("./models/visual_transformer_6x6")
 VISUAL_REPLAY_PATH = VISUAL_MODEL_PATH / "replay_buffer"
@@ -545,7 +546,15 @@ class VisualDiscreteAgent:
             for param in self.backbone.feature_extractor.parameters()
             if param.requires_grad
         ]
-        grad_norm_total = torch.nn.utils.clip_grad_norm_(self.backbone.trainable_parameters(), max_norm=1.0)
+        params_to_clip = (
+            self.backbone.trainable_parameters()
+            + list(self.backbone.core.decoder.parameters())
+            + list(self.q_network.parameters())
+        )
+        grad_norm_total = torch.nn.utils.clip_grad_norm_(
+            params_to_clip,
+            max_norm=VISUAL_GRAD_CLIP_NORM,
+        )
         grad_norm_yolo = self._module_grad_norm(self.backbone.feature_extractor)
         grad_norm_backbone = self._module_grad_norm(self.backbone.core)
         grad_norm_policy = (
