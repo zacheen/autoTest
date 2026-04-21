@@ -34,7 +34,10 @@ from visual_discrete_agent import get_agent
 
 WEB_API = MinesweeperWebClient(default_difficulty="Training 6x6")
 REWARD_VALID_CLICK = 1.0
-REWARD_INVALID_CLICK = -0.5 # design corrosponding to discount factor = 0.7
+REWARD_INVALID_CLICK = -0.5 
+# design corrosponding to discount factor = 0.7
+# -0.5*0.7*0.7 + -0.5*0.7 + -0.5 = -1.095 
+# a little bit less than REWARD_LOSE, since I hope model learn not to click invalid position
 REWARD_LOSE = -1.0
 REWARD_WIN = 3.6
 
