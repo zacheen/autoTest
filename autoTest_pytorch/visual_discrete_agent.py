@@ -645,6 +645,7 @@ class VisualDiscreteAgent:
 
         if self.total_it % VISUAL_HISTOGRAM_EVERY == 0:
             self._log_tensorboard_histograms(self.total_it)
+            self._log_batchnorm_stats(self.total_it)
 
         self.tb_writer.flush()
 
@@ -691,6 +692,7 @@ class VisualDiscreteAgent:
                 "memory_position": self.backbone.memory_position.state_dict(),
                 "query_position": self.backbone.query_position.state_dict(),
                 "query_tokens": self.backbone.query_tokens.detach().cpu(),
+                "encoder": self.backbone.core.transformer.state_dict(),
                 "decoder": self.backbone.core.decoder.state_dict(),
             },
             VISUAL_MODEL_PATH / "trainable_backbone.pth",
@@ -804,6 +806,8 @@ class VisualDiscreteAgent:
                     self.backbone.query_position.load_state_dict(state["query_position"])
                 if "query_tokens" in state and tuple(state["query_tokens"].shape) == tuple(self.backbone.query_tokens.shape):
                     self.backbone.query_tokens.data.copy_(state["query_tokens"].to(self.backbone.query_tokens.device))
+                if "encoder" in state:
+                    self.backbone.core.transformer.load_state_dict(state["encoder"])
                 if "decoder" in state:
                     self.backbone.core.decoder.load_state_dict(state["decoder"])
                 print("[VisualFQF] Loaded trainable visual backbone parts")
@@ -1015,6 +1019,35 @@ class VisualDiscreteAgent:
             ]
             if values:
                 self.tb_writer.add_histogram(tag, torch.cat(values), global_step)
+
+    def _log_batchnorm_stats(self, global_step):
+        """把 YOLO backbone 所有 BatchNorm 層的 running_mean / running_var 印到 TensorBoard。
+
+        觀察目的：確認掃雷截圖的 batch stats 是否穩定。
+          - bn/running_mean_avg : 所有 BN 層的 running_mean 的全體平均值
+          - bn/running_mean_std : 各 BN 層 running_mean 的標準差（層間差異）
+          - bn/running_var_avg  : 所有 BN 層的 running_var 的全體平均值
+          - bn/running_var_std  : 各 BN 層 running_var 的標準差
+        如果這些數值在訓練過程中幾乎不動 → train() 模式穩定，不需要特別處理。
+        如果這些數值一直大幅跳動 → 考慮改回 eval() 模式凍結 BatchNorm。
+        """
+        all_means = []
+        all_vars = []
+        for m in self.backbone.feature_extractor.modules():
+            if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+                if m.running_mean is not None:
+                    all_means.append(m.running_mean.detach().float().cpu())
+                if m.running_var is not None:
+                    all_vars.append(m.running_var.detach().float().cpu())
+
+        if all_means:
+            means_cat = torch.cat(all_means)
+            self.tb_writer.add_scalar("bn/running_mean_avg", means_cat.mean().item(), global_step)
+            self.tb_writer.add_scalar("bn/running_mean_std", means_cat.std().item(), global_step)
+        if all_vars:
+            vars_cat = torch.cat(all_vars)
+            self.tb_writer.add_scalar("bn/running_var_avg", vars_cat.mean().item(), global_step)
+            self.tb_writer.add_scalar("bn/running_var_std", vars_cat.std().item(), global_step)
 
     def log_action_image(self, state, log_info, step_count, reward=None):
         if not LOG_ACTIONS or log_info is None:
