@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A generalized turn-based zero-sum game agent that uses visual perception (screen captures) and reinforcement learning to autonomously play mouse-driven games. The system captures screenshots, extracts features via a neural backbone, decides click coordinates through an RL policy, and executes actions via mouse control. Currently targeting Minesweeper as the first game, with architecture designed for game-agnostic reuse.
+A visual reinforcement learning agent for turn-based grid games using screen captures as input and discrete cell-click actions as output. The pipeline captures a screenshot of the game grid, extracts 40×40 feature tokens via a YOLO11n backbone, refines them through an encoder-decoder transformer, and selects a discrete grid-cell action (6×6 = 36 choices) via an FQF distributional Q-network. Training uses a two-stage approach: Stage 1 trains the transformer policy on symbolic game-state tensors (fast simulation); Stage 2 fine-tunes the full visual pipeline (YOLO backbone + adapter + decoder + FQF head) on real screen captures. Currently targeting Minesweeper, with architecture designed for game-agnostic reuse.
 
 ## Specialized Sub-Agents Available
 

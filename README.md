@@ -17,21 +17,20 @@ This file serves as a reference guide to navigate all project documentation.
 ## Project Status
 
 - **Previous state**: TD3 agent with ResNet18 backbone (failed — no entropy regularization, backbone too heavy)
-- **Current state**: Iterating on Stage 1 pre-training with two parallel experiments:
-  - `Stage1SACAgent`: GridEncoder + HierarchicalAttention + continuous SAC (main experiment)
-  - `SimpleDiscreteAgent`: MLP + discrete SAC (diagnostic — validates RL pipeline)
-- **Active branch**: `_test_replace_attention` — testing discrete I/O to check if RL learns
-- **Next state**: Stage 2 visual training with YOLO11n backbone (pending Stage 1 success)
+- **Stage 1 (confirmed working)**: `train_stage1_simple.py` — grid-state tensor → encoder-decoder transformer → FQF Q-network → 36 discrete actions. Learns Minesweeper policy on 6×6 board.
+- **Stage 2 (active, in progress)**: `Demo_test_Minesweeper.py` — real screen capture → YOLO11n backbone → adapter → frozen Stage 1 encoder → trained decoder + FQF head → 36 discrete actions. Input changed from grid tensor to pixel screenshot; output is discrete (not continuous).
+- **Current challenge**: Making the visual pipeline learn from screen captures (backbone fine-tuning + domain adaptation from YOLO object detection features to Minesweeper cell classification).
+- **Active branch**: `Rainbow_DQN`
 
 ## Key Entry Points
 
 | What you want to do | Start here |
 |---------------------|-----------|
 | Understand the overall system | [architecture/system-overview.md](architecture/system-overview.md) |
-| Run Stage 1 training | [development/running.md](development/running.md) → `python train_stage1.py` |
-| Run the visual agent (Stage 2) | [development/running.md](development/running.md) → `python Demo_test_Minesweeper.py` |
-| Understand RL_Agent.py classes | [development/codebase-map.md](development/codebase-map.md#rl_agentpy-all-rl-agents-and-networks) |
-| Understand the SAC redesign | [architecture/new-design-sac.md](architecture/new-design-sac.md) |
+| Run Stage 1 training (grid state) | `python autoTest_pytorch/train_stage1_simple.py` |
+| Run Stage 2 visual agent | `python autoTest_pytorch/Demo_test_Minesweeper.py` |
+| Stage 1 agent code | `autoTest_pytorch/transformer_discrete_agent.py` |
+| Stage 2 visual agent code | `autoTest_pytorch/visual_discrete_agent.py` |
 | Check known pitfalls | [LESSONS.md](LESSONS.md) |
 
 ## Legacy Components
