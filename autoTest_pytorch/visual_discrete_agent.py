@@ -1,4 +1,4 @@
-import atexit
+﻿import atexit
 import datetime
 import hashlib
 import random
@@ -21,6 +21,8 @@ from model_structure.transformer_shared import EncoderDecoderTransformer, FQFQNe
 
 import os
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 IMAGE_SIZE = (640, 640)
@@ -36,7 +38,7 @@ YOLO_LAST_FEATURE_SIZE = 40
 VISUAL_GRID_H = 6
 VISUAL_GRID_W = 6
 VISUAL_NUM_ACTIONS = VISUAL_GRID_H * VISUAL_GRID_W
-VISUAL_BATCH_SIZE = 32
+VISUAL_BATCH_SIZE = 20
 VISUAL_D_MODEL = 64
 VISUAL_NHEAD = 4
 VISUAL_BACKBONE_LAYERS = 4
@@ -58,6 +60,7 @@ VISUAL_PRIORITY_MAX = 5.0
 VISUAL_PRIORITY_EPS = 1e-3
 VISUAL_AGE_DECAY = 0.002
 VISUAL_GRAD_CLIP_NORM = 1.0
+USE_AMP = False
 VISUAL_HISTOGRAM_EVERY = 20
 VISUAL_MODEL_PATH = Path("./models/visual_transformer_6x6")
 VISUAL_REPLAY_PATH = VISUAL_MODEL_PATH / "replay_buffer"
@@ -229,7 +232,7 @@ class VisualDiscreteAgent:
             {"params": self.backbone.core.decoder.parameters(), "lr": LR_VISUAL_DECODER},
             {"params": self.q_network.parameters(), "lr": LR_VISUAL_HEAD},
         ])
-        self.scaler = torch.cuda.amp.GradScaler(enabled=False)
+        self.scaler = torch.cuda.amp.GradScaler(enabled=(USE_AMP and device.type == "cuda"))
 
         from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 
@@ -499,42 +502,44 @@ class VisualDiscreteAgent:
         self._set_runtime_modes()
 
         with torch.no_grad():
-            next_features = self.backbone.get_features(next_state)
-            next_online = self.q_network(next_features)
-            next_online_q_2d = next_online["q_values"]
-            next_online_q_flat = next_online_q_2d.view(batch_size, -1)
-            next_best_flat = next_online_q_flat.argmax(dim=1)
-            next_target = self.q_target(next_features)
-            next_target_quantiles = next_target["quantiles"][
-                torch.arange(batch_size, device=device), next_best_flat
-            ]
-            target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(USE_AMP and device.type == "cuda")):
+                next_features = self.backbone.get_features(next_state)
+                next_online = self.q_network(next_features)
+                next_online_q_2d = next_online["q_values"]
+                next_online_q_flat = next_online_q_2d.view(batch_size, -1)
+                next_best_flat = next_online_q_flat.argmax(dim=1)
+                next_target = self.q_target(next_features)
+                next_target_quantiles = next_target["quantiles"][
+                    torch.arange(batch_size, device=device), next_best_flat
+                ]
+                target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
 
-        features = self.backbone.get_features(state)
-        q_output = self.q_network(features)
-        q_2d = q_output["q_values"]
-        q_quantiles = q_output["quantiles"]
-        tau_hats = q_output["tau_hats"]
-        fraction_probs = q_output["fraction_probs"]
-        action_flat = action.long()
-        row_idx = action_flat // self.grid_w
-        col_idx = action_flat % self.grid_w
-        q_taken = q_2d[
-            torch.arange(batch_size, device=device), row_idx, col_idx
-        ].unsqueeze(1)
-        chosen_quantiles = q_quantiles[
-            torch.arange(batch_size, device=device), action_flat
-        ]
-        per_sample_quantile_loss = _quantile_huber_loss(
-            current_quantiles=chosen_quantiles.float(),
-            target_quantiles=target_quantiles.detach().float(),
-            tau_hats=tau_hats.detach().float(),
-        )
-        entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
-        per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy.float()
-        loss = per_sample_loss.mean()
-        target_mean = target_quantiles.mean(dim=1, keepdim=True)
-        td_error = (q_taken.detach().float() - target_mean.detach().float()).abs()
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(USE_AMP and device.type == "cuda")):
+            features = self.backbone.get_features(state)
+            q_output = self.q_network(features)
+            q_2d = q_output["q_values"]
+            q_quantiles = q_output["quantiles"]
+            tau_hats = q_output["tau_hats"]
+            fraction_probs = q_output["fraction_probs"]
+            action_flat = action.long()
+            row_idx = action_flat // self.grid_w
+            col_idx = action_flat % self.grid_w
+            q_taken = q_2d[
+                torch.arange(batch_size, device=device), row_idx, col_idx
+            ].unsqueeze(1)
+            chosen_quantiles = q_quantiles[
+                torch.arange(batch_size, device=device), action_flat
+            ]
+            per_sample_quantile_loss = _quantile_huber_loss(
+                current_quantiles=chosen_quantiles.float(),
+                target_quantiles=target_quantiles.detach().float(),
+                tau_hats=tau_hats.detach().float(),
+            )
+            entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
+            per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy.float()
+            loss = per_sample_loss.mean()
+            target_mean = target_quantiles.mean(dim=1, keepdim=True)
+            td_error = (q_taken.detach().float() - target_mean.detach().float()).abs()
 
         self.replay_buffer.update_priorities(sample_indices, td_error)
 
@@ -574,14 +579,12 @@ class VisualDiscreteAgent:
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        # train_step 的 scaler.update() 之後加
-        scale_value = self.scaler.get_scale()
-        self._io_log.write(f"  scaler_scale={scale_value:.1f}\n")
-        self.tb_writer.add_scalar("train/scaler_scale", scale_value, self.total_it)
-
-        # 如果 scale 掉到很低（< 256），代表 overflow 很嚴重
-        if scale_value < 256:
-            print(f"[WARNING] GradScaler scale dropped to {scale_value}, possible overflow!")
+        if self.scaler.is_enabled():
+            scale_value = self.scaler.get_scale()
+            self._io_log.write(f"  scaler_scale={scale_value:.1f}\n")
+            self.tb_writer.add_scalar("train/scaler_scale", scale_value, self.total_it)
+            if scale_value < 256:
+                print(f"[WARNING] GradScaler scale dropped to {scale_value}, possible overflow!")
 
         yolo_param_delta = self._parameter_delta_norm(
             self.backbone.feature_extractor,
@@ -1056,3 +1059,4 @@ def get_agent(screen_region=None):
     if _agent is None:
         _agent = VisualDiscreteAgent(screen_region)
     return _agent
+
