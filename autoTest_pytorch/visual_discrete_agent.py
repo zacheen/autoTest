@@ -696,6 +696,7 @@ class VisualDiscreteAgent:
             VISUAL_MODEL_PATH / "trainable_backbone.pth",
         )
         torch.save(self.q_network.state_dict(), VISUAL_MODEL_PATH / "fqf_network.pth")
+        torch.save(self.q_target.state_dict(), VISUAL_MODEL_PATH / "fqf_target.pth")
         torch.save(
             {
                 "optimizer": self.optimizer.state_dict(),
@@ -765,6 +766,14 @@ class VisualDiscreteAgent:
                     "done": old_entry["done"],
                     "discount": float(old_entry.get("discount", 1.0)),
                     "n_steps": int(old_entry.get("n_steps", 1)),
+                    "priority": float(old_entry.get("priority", VISUAL_PRIORITY_MIN)),
+                    "reward_type": old_entry.get(
+                        "reward_type",
+                        buf._reward_type(
+                            float(old_entry.get("tail_reward", old_entry["reward"])),
+                            bool(old_entry["done"]),
+                        ),
+                    ),
                     "insert_order": save_idx + 1,
                 }
             )
@@ -805,10 +814,20 @@ class VisualDiscreteAgent:
         if q_path.exists():
             try:
                 self.q_network.load_state_dict(torch.load(q_path, map_location=device))
-                self.q_target.load_state_dict(self.q_network.state_dict())
                 print("[VisualFQF] Loaded visual FQF-Network")
             except Exception as exc:
                 print(f"[VisualFQF] Failed to load visual FQF-Network: {exc}")
+
+        q_target_path = VISUAL_MODEL_PATH / "fqf_target.pth"
+        if q_target_path.exists():
+            try:
+                self.q_target.load_state_dict(torch.load(q_target_path, map_location=device))
+                print("[VisualFQF] Loaded visual FQF-Target")
+            except Exception as exc:
+                print(f"[VisualFQF] Failed to load visual FQF-Target: {exc}")
+        elif q_path.exists():
+            self.q_target.load_state_dict(self.q_network.state_dict())
+            print("[VisualFQF] fqf_target.pth missing, initialized target from fqf_network.pth")
 
         opt_path = VISUAL_MODEL_PATH / "optimizer_state.pth"
         if opt_path.exists():
@@ -823,7 +842,14 @@ class VisualDiscreteAgent:
                     f"episode={self.episode_count}, epsilon={self.epsilon:.4f}"
                 )
                 if "scaler" in state:
-                    print("[VisualFQF] Skip restoring GradScaler state to avoid stale AMP optimizer stage")
+                    if self.scaler.is_enabled():
+                        try:
+                            self.scaler.load_state_dict(state["scaler"])
+                            print("[VisualFQF] Loaded GradScaler")
+                        except Exception as scaler_exc:
+                            print(f"[VisualFQF] Failed to load GradScaler state: {scaler_exc}")
+                    else:
+                        print("[VisualFQF] AMP disabled, skipped restoring GradScaler state")
             except Exception as exc:
                 print(f"[VisualFQF] Failed to load optimizer state: {exc}")
 
@@ -881,9 +907,17 @@ class VisualDiscreteAgent:
                     float(entry.get("tail_reward", entry["reward"])),
                     bool(entry["done"]),
                 ),
-                "priority": float(np.clip(abs(float(entry["reward"])) + 1.0, VISUAL_PRIORITY_MIN, VISUAL_PRIORITY_MAX)),
+                "priority": float(
+                    np.clip(
+                        entry.get("priority", abs(float(entry["reward"])) + 1.0),
+                        VISUAL_PRIORITY_MIN,
+                        VISUAL_PRIORITY_MAX,
+                    )
+                ),
                 "insert_order": loaded_count + 1,
             }
+            if "reward_type" in entry:
+                runtime_entry["reward_type"] = entry["reward_type"]
             self.replay_buffer.index.append(runtime_entry)
             loaded_count += 1
 
