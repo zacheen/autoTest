@@ -1,0 +1,380 @@
+"""YOLO Grid-State Predictor — 監督式訓練：screenshot → 12-channel grid state。
+
+設計文件：docs/DESIGN_YOLO_GRID_PREDICTOR.md
+
+Pipeline（Phase 1 監督訓練）：
+    Screenshot (B, 3, 640, 640)
+      ↓ YOLO11n backbone（fine-tune, LR 1e-5）
+    (B, 128, 40, 40)
+      ↓ token adapter + 2D positional encoding
+    (B, 1600, d_model)                               = memory tokens
+      ↓ coord-based queries（MLP(2 → d_model)）     = H*W queries
+      ↓ Cross-Attention（2 層 TransformerDecoder，含 self-attn + cross-attn）
+    (B, H*W, d_model)
+      ↓ classification head Linear(d_model, 12)
+    (B, 12, H, W)
+
+該 tensor 可直接餵入凍結的 TransformerDiscreteAgent 做推論（Phase 2）。
+
+Size-agnostic：YOLO 輸出固定 40×40，query 由 grid(h, w) 算出正規化座標 → MLP，
+所有可學習參數都與 H、W 無關，之後改 10×10 或 16×16 不需重訓。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+from typing import Optional
+
+import torch
+import torch.nn as nn
+
+# 避免 circular import：YOLO11n extractor 與 pos-embed 從 visual_discrete_agent / shared module 匯入
+from model_structure.transformer_shared import TwoDimensionalPositionEmbedding
+
+
+# --------------------------------------------------------------------------- #
+# 12-channel 定義（須與 Minesweeper/MinesweeperLogic.py 的 get_grid_state_tensor 一致） #
+# --------------------------------------------------------------------------- #
+CH_UNREVEALED = 0
+CH_FLAGGED = 1
+CH_NUM_0 = 2           # 數字 0（全空白）
+CH_NUM_8 = 10          # 數字 8
+CH_MINE = 11           # 地雷（game over 才可見）
+NUM_CHANNELS = 12
+
+
+# --------------------------------------------------------------------------- #
+# Server API state → grid tensor                                              #
+# --------------------------------------------------------------------------- #
+def server_state_to_grid_tensor(server_state: dict) -> torch.Tensor:
+    """把 Minesweeper web API 回傳的 server_state 轉成 (H, W) 的 class-index LongTensor。
+
+    用途：監督訓練的 label（配合 CrossEntropyLoss）。
+
+    Mapping（server cell.state → 12-channel class index）：
+        "hidden"                                           → 0  (CH_UNREVEALED)
+        "flagged" / "flagged_mine" / "wrong_flag"          → 1  (CH_FLAGGED)
+        "revealed" 帶 value=n (0..8)                       → 2+n (CH_NUM_0 + n)
+        "mine" / "hit_mine"                                → 11 (CH_MINE)
+        其他未知狀態                                        → 0  (預設視為未翻開)
+
+    Args:
+        server_state: dict，包含 "board" 為 list[list[dict]]，每格有 "state" 與 "value"。
+
+    Returns:
+        torch.LongTensor，shape (H, W)，值域 [0, 11]。
+    """
+    if server_state is None:
+        raise ValueError("server_state is None")
+    board = server_state.get("board")
+    if not board:
+        raise ValueError("server_state['board'] is empty or missing")
+
+    rows = len(board)
+    cols = len(board[0])
+    label = torch.zeros(rows, cols, dtype=torch.long)
+
+    for r, row_cells in enumerate(board):
+        for c, cell in enumerate(row_cells):
+            state = cell.get("state")
+            if state == "hidden":
+                label[r, c] = CH_UNREVEALED
+            elif state in ("flagged", "flagged_mine", "wrong_flag"):
+                label[r, c] = CH_FLAGGED
+            elif state == "revealed":
+                value = cell.get("value")
+                n = int(value) if value is not None else 0
+                n = max(0, min(8, n))
+                label[r, c] = CH_NUM_0 + n
+            elif state in ("mine", "hit_mine"):
+                label[r, c] = CH_MINE
+            else:
+                label[r, c] = CH_UNREVEALED
+    return label
+
+
+# --------------------------------------------------------------------------- #
+# Dataset 蒐集器                                                               #
+# --------------------------------------------------------------------------- #
+class VisionDatasetRecorder:
+    """把 (screenshot, server_state_12ch_label) pairs 存到磁碟。
+
+    目錄結構：
+        dataset_dir/
+          ├── index.jsonl              # 每行一筆 metadata
+          ├── screenshots/
+          │   └── screen_000001.pt     # uint8 tensor (3, 640, 640)
+          └── labels/
+              └── label_000001.pt      # int64 tensor (H, W) class index 0~11
+
+    用 screenshot SHA1 hash 做去重（同一張畫面重複出現則跳過）。
+    支援續跑：開檔時會讀取 index.jsonl 統計已有筆數與 hash。
+    """
+
+    def __init__(self, dataset_dir):
+        self.dir = Path(dataset_dir)
+        self.screenshots_dir = self.dir / "screenshots"
+        self.labels_dir = self.dir / "labels"
+        self.screenshots_dir.mkdir(parents=True, exist_ok=True)
+        self.labels_dir.mkdir(parents=True, exist_ok=True)
+        self.index_path = self.dir / "index.jsonl"
+
+        self._seen_hashes: set[str] = set()
+        self.count = 0
+        if self.index_path.exists():
+            with self.index_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    self.count += 1
+                    h = entry.get("hash")
+                    if h:
+                        self._seen_hashes.add(h)
+            print(f"[VisionDataset] Resumed from {self.index_path}: {self.count} entries loaded")
+
+    @staticmethod
+    def _hash_screenshot(screen_uint8: torch.Tensor) -> str:
+        return hashlib.sha1(screen_uint8.numpy().tobytes()).hexdigest()
+
+    def record(self, screenshot: torch.Tensor, server_state: dict) -> bool:
+        """存一筆 (screenshot, label) pair。
+
+        Args:
+            screenshot: (3, 640, 640) float tensor in [0, 1]（preprocess_screen 輸出）。
+            server_state: dict from Web API。
+
+        Returns:
+            True 表示成功新增；False 表示資料無效或重複，略過。
+        """
+        if screenshot is None or server_state is None:
+            return False
+        board = server_state.get("board")
+        if not board:
+            return False
+
+        screen_cpu = screenshot.detach().cpu().clamp(0.0, 1.0)
+        screen_uint8 = (screen_cpu * 255.0).to(torch.uint8)
+        h = self._hash_screenshot(screen_uint8)
+        if h in self._seen_hashes:
+            return False
+
+        try:
+            label = server_state_to_grid_tensor(server_state)
+        except ValueError:
+            return False
+        grid_h, grid_w = int(label.shape[0]), int(label.shape[1])
+
+        idx = self.count + 1
+        screen_path = self.screenshots_dir / f"screen_{idx:06d}.pt"
+        label_path = self.labels_dir / f"label_{idx:06d}.pt"
+        torch.save(screen_uint8, screen_path)
+        torch.save(label, label_path)
+
+        entry = {
+            "id": idx,
+            "screenshot": screen_path.name,
+            "label": label_path.name,
+            "grid_h": grid_h,
+            "grid_w": grid_w,
+            "status": server_state.get("status"),
+            "hash": h,
+        }
+        with self.index_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        self._seen_hashes.add(h)
+        self.count = idx
+        return True
+
+
+# --------------------------------------------------------------------------- #
+# YOLO Grid-State Predictor 模型                                               #
+# --------------------------------------------------------------------------- #
+YOLO_FEATURE_SIZE = 40       # YOLO11n 第 6 層輸出 40x40（固定，與 screenshot 640x640 對應）
+YOLO_FEATURE_CHANNELS = 128  # 第 6 層 channel 數
+
+
+class YOLOGridStatePredictor(nn.Module):
+    """Screenshot → 12-channel grid state（size-agnostic）。
+
+    設計重點：
+      * YOLO backbone 整個跟著 fine-tune（LR 設小一點：1e-5）
+      * Query 由 grid(h, w) 座標即時算出，支援任意網格大小
+      * Cross-attention 2 層（nn.TransformerDecoder），含 self-attn + cross-attn + FFN
+      * 輸出 (B, 12, H, W) logits，配合 nn.CrossEntropyLoss（12 class 互斥）
+
+    Args:
+        d_model: 內部嵌入維度（跟 Stage 1 的 64 無關，此處只影響本模型內部容量）。
+        nhead: multi-head attention 頭數。
+        num_cross_attn_layers: cross-attention 層數（設計決定：2 層）。
+        dim_feedforward: TransformerDecoderLayer 內 FFN 維度。
+        dropout: dropout 比例。
+        num_classes: 輸出 channel 數（預設 12，對應 Minesweeper 12 個 cell class）。
+        yolo_model_path: YOLO11n checkpoint 路徑。
+    """
+
+    def __init__(
+        self,
+        d_model: int = 128,
+        nhead: int = 4,
+        num_cross_attn_layers: int = 2,
+        dim_feedforward: int = 512,
+        dropout: float = 0.1,
+        num_classes: int = NUM_CHANNELS,
+        yolo_model_path: str = "yolo11n.pt",
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.num_classes = num_classes
+        self.memory_h = YOLO_FEATURE_SIZE
+        self.memory_w = YOLO_FEATURE_SIZE
+        self.num_memory_tokens = self.memory_h * self.memory_w
+
+        # YOLO backbone（import 放在這裡避免 module import 時就載入 ultralytics / torch CUDA 初始化）
+        from visual_discrete_agent import YOLO11nLastFeatureExtractor
+        self.feature_extractor = YOLO11nLastFeatureExtractor(model_path=yolo_model_path)
+
+        # YOLO (128, 40, 40) → token sequence (1600, d_model)
+        self.token_adapter = nn.Sequential(
+            nn.LayerNorm(YOLO_FEATURE_CHANNELS),
+            nn.Linear(YOLO_FEATURE_CHANNELS, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
+        self.memory_position = TwoDimensionalPositionEmbedding(
+            self.memory_h, self.memory_w, d_model
+        )
+
+        # Coord-based query 生成器：(y_norm, x_norm) ∈ [0,1]² → d_model
+        # 這也同時扮演 query 的 positional encoding（不同 cell 座標 → 不同 query 向量）
+        self.coord_mlp = nn.Sequential(
+            nn.Linear(2, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
+
+        # Cross-Attention core：nn.TransformerDecoder（self-attn + cross-attn + FFN）x num_cross_attn_layers
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+        )
+        self.cross_attn_core = nn.TransformerDecoder(
+            decoder_layer, num_layers=num_cross_attn_layers
+        )
+
+        # Classification head：d_model → 12 class
+        self.classification_head = nn.Linear(d_model, num_classes)
+
+    # --------------------- parameter group accessors --------------------- #
+    def yolo_parameters(self):
+        return list(self.feature_extractor.parameters())
+
+    def non_yolo_parameters(self):
+        """除了 YOLO backbone 以外的所有可學習參數（adapter / coord / cross-attn / head）。"""
+        other = []
+        other += list(self.token_adapter.parameters())
+        other += list(self.memory_position.parameters())
+        other += list(self.coord_mlp.parameters())
+        other += list(self.cross_attn_core.parameters())
+        other += list(self.classification_head.parameters())
+        return other
+
+    def freeze_yolo(self):
+        for p in self.feature_extractor.parameters():
+            p.requires_grad_(False)
+
+    def unfreeze_yolo(self):
+        for p in self.feature_extractor.parameters():
+            p.requires_grad_(True)
+
+    # --------------------- forward pieces --------------------- #
+    def _build_memory(self, screenshot: torch.Tensor) -> torch.Tensor:
+        """screenshot (B, 3, 640, 640) → memory tokens (B, 1600, d_model)."""
+        features = self.feature_extractor(screenshot)  # (B, 128, 40, 40)
+        B = features.size(0)
+        tokens = (
+            features.permute(0, 2, 3, 1)
+            .reshape(B, self.num_memory_tokens, YOLO_FEATURE_CHANNELS)
+        )
+        memory = self.token_adapter(tokens)
+        memory = memory + self.memory_position().unsqueeze(0)
+        return memory
+
+    def _build_queries(
+        self,
+        grid_h: int,
+        grid_w: int,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """根據 grid(h, w) 算 cell 中心的正規化座標，透過 coord_mlp 轉成 query tokens。
+
+        Returns: (B, H*W, d_model)。每個 cell 的 query 依其 normalized position 而不同 →
+        天然具備 positional encoding 的效果（size-agnostic）。
+        """
+        ys = (torch.arange(grid_h, device=device, dtype=dtype) + 0.5) / float(grid_h)
+        xs = (torch.arange(grid_w, device=device, dtype=dtype) + 0.5) / float(grid_w)
+        yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+        coords = torch.stack([yy, xx], dim=-1).reshape(grid_h * grid_w, 2)  # (H*W, 2)
+        q = self.coord_mlp(coords)  # (H*W, d)
+        return q.unsqueeze(0).expand(batch_size, -1, -1)
+
+    def forward(
+        self,
+        screenshot: torch.Tensor,
+        grid_h: int,
+        grid_w: int,
+    ) -> torch.Tensor:
+        """
+        Args:
+            screenshot: (B, 3, 640, 640) float tensor，已正規化到 [0, 1]。
+            grid_h, grid_w: 目標網格大小。
+
+        Returns:
+            logits: (B, num_classes, grid_h, grid_w)，**尚未過 softmax**。
+            搭配 nn.CrossEntropyLoss(logits, label_HW) 做訓練。
+        """
+        memory = self._build_memory(screenshot)  # (B, 1600, d)
+        B = memory.size(0)
+        queries = self._build_queries(
+            grid_h, grid_w,
+            batch_size=B,
+            device=memory.device,
+            dtype=memory.dtype,
+        )
+        decoded = self.cross_attn_core(queries, memory)  # (B, H*W, d)
+        logits_flat = self.classification_head(decoded)  # (B, H*W, num_classes)
+        logits = logits_flat.transpose(1, 2).reshape(B, self.num_classes, grid_h, grid_w)
+        return logits
+
+    # --------------------- inference helpers --------------------- #
+    @torch.no_grad()
+    def predict_grid_state(
+        self,
+        screenshot: torch.Tensor,
+        grid_h: int,
+        grid_w: int,
+    ) -> torch.Tensor:
+        """推論介面：輸出 one-hot-like grid state tensor (B, 12, H, W)，可直接餵給 TransformerDiscreteAgent。
+
+        注意：這裡把 argmax 結果轉成 one-hot（與 MinesweeperLogic.get_grid_state_tensor 同格式）。
+        若要保留 soft distribution，改用 forward() 後手動 softmax 即可。
+        """
+        self.eval()
+        logits = self.forward(screenshot, grid_h, grid_w)
+        pred = logits.argmax(dim=1)  # (B, H, W)
+        one_hot = torch.zeros_like(logits)
+        one_hot.scatter_(1, pred.unsqueeze(1), 1.0)
+        return one_hot
