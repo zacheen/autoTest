@@ -191,7 +191,90 @@ class VisionDatasetRecorder:
 
         self._seen_hashes.add(h)
         self.count = idx
+
+        # 第 1 筆 + 之後每 50 筆的第 3 筆 (idx % 50 == 3) 存一張可視化確認圖
+        if idx == 1 or idx % 50 == 3:
+            try:
+                self._save_check_image(idx, screen_uint8, label)
+            except Exception as exc:
+                print(f"[VisionDataset] check image FAILED (idx={idx}): {exc}")
+
         return True
+
+    # ----------- label 可視化確認圖 ----------- #
+    _LABEL_SYMBOLS = {
+        0:  ("?",   (120, 120, 120)),  # unrevealed — 灰
+        1:  ("F",   (255, 180,   0)),  # flagged    — 黃
+        2:  ("·",   (200, 200, 200)),  # 數字 0 (空格) — 淡灰
+        3:  ("1",   ( 50, 130, 255)),  # 1 — 藍
+        4:  ("2",   ( 50, 180,  80)),  # 2 — 綠
+        5:  ("3",   (255,  60,  60)),  # 3 — 紅
+        6:  ("4",   (  0,   0, 160)),  # 4 — 深藍
+        7:  ("5",   (160,   0,   0)),  # 5 — 深紅
+        8:  ("6",   (  0, 180, 180)),  # 6 — 青
+        9:  ("7",   (  0,   0,   0)),  # 7 — 黑
+        10: ("8",   ( 80,  80,  80)),  # 8 — 深灰
+        11: ("M",   (255,   0, 255)),  # mine  — 紫紅
+    }
+
+    def _save_check_image(
+        self,
+        idx: int,
+        screen_uint8: torch.Tensor,
+        label: torch.Tensor,
+    ) -> None:
+        """把 screenshot 和 label 合成一張確認圖，每格左上角標示 active class 符號。
+
+        存放路徑：{dataset_dir}/check_data/check_{idx:06d}.png
+        """
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError:
+            return  # Pillow 未安裝時安靜略過
+
+        check_dir = self.dir / "check_data"
+        check_dir.mkdir(parents=True, exist_ok=True)
+
+        # screen_uint8: (3, H_img, W_img) uint8 → PIL Image
+        arr = screen_uint8.numpy().transpose(1, 2, 0)  # (H, W, 3)
+        img = Image.fromarray(arr, mode="RGB")
+        img_w, img_h = img.size
+        draw = ImageDraw.Draw(img)
+
+        try:
+            font = ImageFont.truetype("arial.ttf", 18)
+            font_large = ImageFont.truetype("arial.ttf", 22)
+        except Exception:
+            font = ImageFont.load_default()
+            font_large = font
+
+        grid_h, grid_w = int(label.shape[0]), int(label.shape[1])
+        cell_w = img_w / grid_w
+        cell_h = img_h / grid_h
+
+        # 畫格線
+        for row in range(1, grid_h):
+            y = int(row * cell_h)
+            draw.line([0, y, img_w, y], fill=(255, 255, 255), width=1)
+        for col in range(1, grid_w):
+            x = int(col * cell_w)
+            draw.line([x, 0, x, img_h], fill=(255, 255, 255), width=1)
+
+        # 每格左上角標 label
+        for r in range(grid_h):
+            for c in range(grid_w):
+                cls = int(label[r, c].item())
+                symbol, color = self._LABEL_SYMBOLS.get(cls, (str(cls), (255, 255, 255)))
+                x0 = int(c * cell_w) + 4
+                y0 = int(r * cell_h) + 3
+
+                # 黑色陰影讓文字清晰
+                draw.text((x0 + 1, y0 + 1), symbol, fill=(0, 0, 0), font=font_large)
+                draw.text((x0,     y0),     symbol, fill=color,     font=font_large)
+
+        out_path = check_dir / f"check_{idx:06d}.png"
+        img.save(str(out_path))
+        print(f"[VisionDataset] check image saved: {out_path} (idx={idx}, total={self.count})")
 
 
 # --------------------------------------------------------------------------- #
