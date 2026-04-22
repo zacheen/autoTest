@@ -497,11 +497,6 @@ class Game_test_case(unittest.TestCase) :
                     game_status.next_state = self.capture_grid_state(game_status)
                 else:
                     game_status.next_state = None
-                    # 遊戲結束時多蒐集一張 final-state 截圖 + server_state 配對，
-                    # 這些樣本包含踩雷後的 CH_MINE 或 win 完整翻開畫面，對監督訓練有價值。
-                    if COLLECT_VISION_DATASET:
-                        final_screenshot = self.capture_grid_state(game_status)
-                        self._maybe_record_vision_sample(game_status, final_screenshot)
             else:
                 if game_status.current_pic is not None and game_status.action is not None:
                     game_status.agent.block_action_for_state(game_status.current_pic, game_status.action)

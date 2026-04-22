@@ -159,6 +159,12 @@ class VisionDatasetRecorder:
         if not board:
             return False
 
+        # 踩雷後的畫面（status == "lost"）跳過：
+        # 地雷只在 game over 後才可見，實際遊玩時預測器永遠不會遇到這種狀態，
+        # 蒐集這些樣本只會讓 CH_MINE(class 11) 比例失真並浪費訓練資源。
+        if server_state.get("status") == "lost":
+            return False
+
         screen_cpu = screenshot.detach().cpu().clamp(0.0, 1.0)
         screen_uint8 = (screen_cpu * 255.0).to(torch.uint8)
         h = self._hash_screenshot(screen_uint8)
