@@ -556,10 +556,21 @@ class VisualDiscreteAgent:
             + list(self.backbone.core.decoder.parameters())
             + list(self.q_network.parameters())
         )
+        # clip 前先量各模組的真實梯度大小，用來診斷哪個模組在爆炸
+        grad_norm_yolo_pre    = self._module_grad_norm(self.backbone.feature_extractor)
+        grad_norm_decoder_pre = self._module_grad_norm(self.backbone.core.decoder)
+        grad_norm_policy_pre  = (
+            self._module_grad_norm(self.backbone.token_adapter)
+            + self._module_grad_norm(self.backbone.memory_position)
+            + self._module_grad_norm(self.backbone.query_position)
+        )
+        grad_norm_head_pre    = self._module_grad_norm(self.q_network)
+
         grad_norm_total = torch.nn.utils.clip_grad_norm_(
             params_to_clip,
             max_norm=VISUAL_GRAD_CLIP_NORM,
         )
+        # clip 後的個別 norm（原本的量測，保留做對照）
         grad_norm_yolo = self._module_grad_norm(self.backbone.feature_extractor)
         grad_norm_backbone = self._module_grad_norm(self.backbone.core)
         grad_norm_policy = (
@@ -634,6 +645,11 @@ class VisualDiscreteAgent:
         self.tb_writer.add_scalar("grad/backbone_norm", grad_norm_backbone, self.total_it)
         self.tb_writer.add_scalar("grad/policy_norm", grad_norm_policy, self.total_it)
         self.tb_writer.add_scalar("grad/head_norm", grad_norm_head, self.total_it)
+        # clip 前的真實梯度大小，用來確認哪個模組造成 total_norm 上升
+        self.tb_writer.add_scalar("grad_pre/yolo",    grad_norm_yolo_pre,    self.total_it)
+        self.tb_writer.add_scalar("grad_pre/decoder", grad_norm_decoder_pre, self.total_it)
+        self.tb_writer.add_scalar("grad_pre/policy",  grad_norm_policy_pre,  self.total_it)
+        self.tb_writer.add_scalar("grad_pre/head",    grad_norm_head_pre,    self.total_it)
         self.tb_writer.add_scalar("debug/yolo_nan_grad_count", yolo_grad_debug["nan_grad_count"], self.total_it)
         self.tb_writer.add_scalar("debug/token_adapter_nan_grad_count", token_adapter_grad_debug["nan_grad_count"], self.total_it)
         self.tb_writer.add_scalar("debug/memory_position_nan_grad_count", memory_position_grad_debug["nan_grad_count"], self.total_it)
