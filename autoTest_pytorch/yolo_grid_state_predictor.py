@@ -535,30 +535,48 @@ class VisionSupervisedDataset(Dataset):
         val_ratio: float = 0.15,
         seed: int = 42,
     ) -> tuple[list[dict], list[dict]]:
-        """讀取 index.jsonl 並隨機切成 train / val。"""
-        index_path = Path(dataset_dir) / "index.jsonl"
+        """讀取 index.jsonl，過濾掉實際檔案不存在的 entry，再切成 train / val。
+
+        手動刪除某些有問題的 .pt 檔後仍可正常執行，
+        不連續的編號（如刪了 screen_000641.pt 但保留 screen_001641.pt）不影響讀取。
+        """
+        dataset_dir = Path(dataset_dir)
+        index_path = dataset_dir / "index.jsonl"
         if not index_path.exists():
             raise FileNotFoundError(f"找不到 index.jsonl：{index_path}")
 
-        entries = []
+        screenshots_dir = dataset_dir / "screenshots"
+        labels_dir      = dataset_dir / "labels"
+
+        raw_entries: list[dict] = []
         with index_path.open("r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
                     try:
-                        entries.append(json.loads(line))
+                        raw_entries.append(json.loads(line))
                     except json.JSONDecodeError:
                         pass
 
-        if not entries:
-            raise RuntimeError("index.jsonl 是空的，請先蒐集資料")
+        # 只保留兩個 .pt 檔都存在的 entry
+        valid_entries: list[dict] = []
+        for entry in raw_entries:
+            if (
+                (screenshots_dir / entry["screenshot"]).exists()
+                and (labels_dir / entry["label"]).exists()
+            ):
+                valid_entries.append(entry)
+
+        skipped = len(raw_entries) - len(valid_entries)
+        if skipped:
+            print(f"[Dataset] Skipped {skipped} entries (files missing); {len(valid_entries)} valid")
+        if not valid_entries:
+            raise RuntimeError("有效 entry 為 0，請先蒐集資料或確認 .pt 檔路徑")
 
         rng = random.Random(seed)
-        rng.shuffle(entries)
-        n_val = max(1, int(len(entries) * val_ratio))
-        val_entries = entries[:n_val]
-        train_entries = entries[n_val:]
-        return train_entries, val_entries
+        rng.shuffle(valid_entries)
+        n_val = max(1, int(len(valid_entries) * val_ratio))
+        return valid_entries[n_val:], valid_entries[:n_val]
 
 
 # --------------------------------------------------------------------------- #
