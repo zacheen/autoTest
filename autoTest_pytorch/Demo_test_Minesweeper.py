@@ -206,6 +206,10 @@ class Game_test_case(unittest.TestCase) :
                 current_screenshot,
                 add_noise=game_status.noise
             )
+            # 診斷：比對 YOLO 預測 vs 實際 server_state，找 invalid click 根源
+            if hasattr(game_status.agent, 'log_grid_comparison') and game_status.server_state:
+                game_status.agent.log_grid_comparison(game_status.server_state, action)
+
             game_status.update_state(current_screenshot, action)
             game_status.log_info = log_info
 

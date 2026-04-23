@@ -79,6 +79,8 @@ class VisualAgentV2:
         self.current_state_key: str | None = None
 
         self.episode_count = 0
+        # select_action 時快取最後一次 YOLO 預測的 argmax (H, W)，供 log_grid_comparison 使用
+        self.last_grid_pred_argmax: torch.Tensor | None = None
 
     # ──────────────────────────── 基礎工具 ────────────────────────────
 
@@ -174,6 +176,8 @@ class VisualAgentV2:
             action_id = int(masked_q.argmax().item())
             topk = min(5, len(available))
             top_vals, top_idx = torch.topk(masked_q, k=topk)
+            # 快取供 log_grid_comparison 使用
+            self.last_grid_pred_argmax = grid_state_batch[0].argmax(dim=0).cpu()  # (H, W)
 
         row, col = self.action_to_grid(action_id)
         top_actions = [
@@ -214,6 +218,125 @@ class VisualAgentV2:
 
     def on_episode_end(self) -> None:
         pass
+
+    # ──────────────────────── Grid 比較診斷 ───────────────────────────
+
+    _CLS_SYM = ["?", "F", "0", "1", "2", "3", "4", "5", "6", "7", "8", "M"]
+
+    def log_grid_comparison(self, server_state: dict, action_id: int) -> None:
+        """將 YOLO 預測的 grid 與 server_state 實際 grid 做逐格比較，印出診斷資訊。
+
+        呼叫時機：select_action() 之後、送出點擊之前，在 server_state 還是
+        「點擊前」狀態時呼叫，才能確保 screenshot 與 server_state 同一時刻。
+        """
+        if self.last_grid_pred_argmax is None:
+            return
+        if server_state is None:
+            return
+
+        try:
+            from yolo_grid_state_predictor import server_state_to_grid_tensor
+            actual = server_state_to_grid_tensor(server_state)  # (H, W) LongTensor
+        except Exception as exc:
+            print(f"[V2 Diag] server_state_to_grid_tensor failed: {exc}")
+            return
+
+        pred = self.last_grid_pred_argmax  # (H, W)
+        H, W = pred.shape
+        if actual.shape != pred.shape:
+            print(f"[V2 Diag] shape mismatch: pred={tuple(pred.shape)} actual={tuple(actual.shape)}")
+            return
+
+        correct = (pred == actual).sum().item()
+        total = H * W
+        acc = correct / total
+
+        # 找出不一致的格子
+        mismatches = []
+        for r in range(H):
+            for c in range(W):
+                p, a = int(pred[r, c]), int(actual[r, c])
+                if p != a:
+                    mismatches.append((r, c, p, a))
+
+        # 選擇的動作格子資訊
+        act_row, act_col = self.action_to_grid(action_id)
+        pred_cls = int(pred[act_row, act_col])
+        actual_cls = int(actual[act_row, act_col])
+        # class 0 = hidden → valid click；其他 → invalid
+        is_valid_by_pred   = (pred_cls   == 0)
+        is_valid_by_actual = (actual_cls == 0)
+
+        sym = self._CLS_SYM
+
+        # ── Q-value 分析：hidden 格 vs revealed 格 ──
+        # 把 actual grid 當作 ground truth 來分類 Q 值
+        q_flat_cpu = None
+        q_hidden, q_revealed = [], []
+        try:
+            with torch.no_grad():
+                screenshot_batch = self.last_grid_pred_argmax  # 已在 select_action 快取
+                # 重新從快取的 pred argmax 還原 one-hot，再跑一次 Q-network
+                one_hot = torch.zeros(1, 12, H, W, device=device)
+                one_hot.scatter_(1, pred.unsqueeze(0).unsqueeze(0).to(device), 1.0)
+                feats = self.stage1.backbone.get_features(one_hot)
+                q_2d = self.stage1.q_network(feats)["q_values"].squeeze(0).cpu()  # (H, W)
+                q_flat_cpu = q_2d.view(-1)
+            for r in range(H):
+                for c in range(W):
+                    q_val = float(q_2d[r, c])
+                    if int(actual[r, c]) == 0:   # hidden
+                        q_hidden.append((r, c, q_val))
+                    else:                        # revealed / flagged
+                        q_revealed.append((r, c, q_val))
+        except Exception as exc:
+            print(f"[V2 Diag] Q re-compute failed: {exc}")
+
+        # ── 印出診斷 ──
+        sep = "─" * 60
+        print(sep)
+        print(f"[V2 Diag] YOLO acc={acc:.1%} ({correct}/{total})  action={action_id}->({act_row},{act_col})")
+
+        # 逐格比對表（YOLO pred | Actual | Q-value）
+        print(f"  {'YOLO':^{W*2}}   {'Actual':^{W*2}}   Q-values (row by row)")
+        for r in range(H):
+            yolo_row   = " ".join(sym[int(pred[r, c])]   for c in range(W))
+            actual_row = " ".join(sym[int(actual[r, c])] for c in range(W))
+            if q_flat_cpu is not None:
+                q_row = " ".join(f"{float(q_2d[r, c]):+.2f}" for c in range(W))
+            else:
+                q_row = "n/a"
+            marker = " ←" if r == act_row else ""
+            print(f"  {yolo_row}   {actual_row}   {q_row}{marker}")
+
+        # 錯誤格子
+        if mismatches:
+            mismatch_strs = [f"({r},{c}) YOLO={sym[p]} actual={sym[a]}" for r, c, p, a in mismatches]
+            print(f"  Mismatch: {', '.join(mismatch_strs)}")
+        else:
+            print(f"  Mismatch: none")
+
+        # Q-value 統計
+        if q_hidden or q_revealed:
+            avg_q_hidden   = sum(v for _, _, v in q_hidden)   / len(q_hidden)   if q_hidden   else float("nan")
+            avg_q_revealed = sum(v for _, _, v in q_revealed) / len(q_revealed) if q_revealed else float("nan")
+            print(f"  Q hidden({len(q_hidden)}셀) avg={avg_q_hidden:+.4f} | "
+                  f"revealed({len(q_revealed)}셀) avg={avg_q_revealed:+.4f}")
+            if q_hidden and q_revealed and avg_q_hidden <= avg_q_revealed:
+                print(f"  !! Agent 偏好 revealed 格（Q_hidden <= Q_revealed）← Stage1 權重可能未正確載入")
+
+        # 選擇格診斷
+        action_note = f"YOLO={sym[pred_cls]} actual={sym[actual_cls]}"
+        if not is_valid_by_actual and is_valid_by_pred:
+            verdict = "YOLO 誤判 ← YOLO 錯誤"
+        elif not is_valid_by_actual and not is_valid_by_pred:
+            verdict = "YOLO 正確但 Agent 仍選此格 ← Agent 錯誤"
+        elif is_valid_by_actual:
+            verdict = "OK (hidden cell)"
+        else:
+            verdict = "unknown"
+        print(f"  Action cell: {action_note} → {verdict}")
+        print(sep)
 
     # ──────────────────────── 動作記錄圖 ──────────────────────────────
 
