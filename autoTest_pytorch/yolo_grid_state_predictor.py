@@ -504,30 +504,49 @@ class VisionSupervisedDataset(Dataset):
     每個 sample 回傳 (screenshot_float, label_long)：
         screenshot_float : torch.float32, shape (3, 640, 640), 值域 [0, 1]
         label_long       : torch.int64,   shape (H, W),        值域 [0, 11]
+
+    Args:
+        cache_in_ram: True 時在 __init__ 把所有樣本載入 RAM，消除磁碟 I/O 瓶頸。
+                      每張截圖約 1.2 MB（uint8），5000 筆 ≈ 5.9 GB，請先確認 RAM 夠用。
     """
 
-    def __init__(self, dataset_dir: Path, entries: list[dict]):
-        self.screenshots_dir = dataset_dir / "screenshots"
-        self.labels_dir = dataset_dir / "labels"
+    def __init__(self, dataset_dir: Path, entries: list[dict], cache_in_ram: bool = False):
+        self.screenshots_dir = Path(dataset_dir) / "screenshots"
+        self.labels_dir = Path(dataset_dir) / "labels"
         self.entries = entries
+        self._cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+
+        if cache_in_ram:
+            n = len(entries)
+            mb = n * 3 * 640 * 640 / 1024 / 1024
+            print(f"[Dataset] Caching {n} samples into RAM (~{mb:.0f} MB uint8)…")
+            for i, entry in enumerate(entries):
+                screen_u8 = torch.load(
+                    self.screenshots_dir / entry["screenshot"], map_location="cpu", weights_only=True
+                )
+                label = torch.load(
+                    self.labels_dir / entry["label"], map_location="cpu", weights_only=True
+                )
+                self._cache[i] = (screen_u8, label)
+                if (i + 1) % 500 == 0:
+                    print(f"  cached {i + 1}/{n}…")
+            print(f"[Dataset] Cache complete.")
 
     def __len__(self) -> int:
         return len(self.entries)
 
     def __getitem__(self, idx: int):
-        entry = self.entries[idx]
-        screen_uint8 = torch.load(
-            self.screenshots_dir / entry["screenshot"],
-            map_location="cpu",
-            weights_only=True,
-        )
-        label = torch.load(
-            self.labels_dir / entry["label"],
-            map_location="cpu",
-            weights_only=True,
-        )
-        screenshot = screen_uint8.float() / 255.0
-        return screenshot, label
+        if self._cache:
+            screen_uint8, label = self._cache[idx]
+        else:
+            entry = self.entries[idx]
+            screen_uint8 = torch.load(
+                self.screenshots_dir / entry["screenshot"], map_location="cpu", weights_only=True
+            )
+            label = torch.load(
+                self.labels_dir / entry["label"], map_location="cpu", weights_only=True
+            )
+        return screen_uint8.float() / 255.0, label
 
     @staticmethod
     def load_and_split(
@@ -599,7 +618,13 @@ class YOLOGridStateTrainer:
     PHASE2_EPOCHS = 40     # 解凍 YOLO 後繼續訓練的 epochs
     VAL_RATIO     = 0.15
     SEED          = 42
-    NUM_WORKERS   = 0      # Windows 多進程容易出問題，預設 0
+    # DataLoader 並行讀取數量。
+    # 0 = 主進程序列讀取（GPU 使用率低）；2~4 = worker 預取，GPU 利用率高。
+    # Windows 需要 if __name__ guard（已有），可安全設為 2。
+    NUM_WORKERS   = 2
+    # True = 啟動時把全部資料載入 RAM，徹底消除磁碟 I/O。
+    # 每張截圖 ~1.2 MB(uint8)，5000 筆 ≈ 5.9 GB，請確認 RAM 夠用再開。
+    CACHE_IN_RAM  = False
 
     def __init__(
         self,
@@ -621,19 +646,27 @@ class YOLOGridStateTrainer:
         )
         print(f"[Trainer] Dataset: train={len(train_entries)}, val={len(val_entries)}")
 
+        use_pin  = self.device.type == "cuda"
+        use_pw   = self.NUM_WORKERS > 0   # persistent_workers 需要 num_workers > 0
+        pf       = 4 if self.NUM_WORKERS > 0 else None  # prefetch_factor per worker
+
         self.train_loader = DataLoader(
-            VisionSupervisedDataset(self.dataset_dir, train_entries),
+            VisionSupervisedDataset(self.dataset_dir, train_entries, cache_in_ram=self.CACHE_IN_RAM),
             batch_size=self.BATCH_SIZE,
             shuffle=True,
             num_workers=self.NUM_WORKERS,
-            pin_memory=(self.device.type == "cuda"),
+            pin_memory=use_pin,
+            persistent_workers=use_pw,
+            prefetch_factor=pf,
         )
         self.val_loader = DataLoader(
-            VisionSupervisedDataset(self.dataset_dir, val_entries),
+            VisionSupervisedDataset(self.dataset_dir, val_entries, cache_in_ram=self.CACHE_IN_RAM),
             batch_size=self.BATCH_SIZE,
             shuffle=False,
             num_workers=self.NUM_WORKERS,
-            pin_memory=(self.device.type == "cuda"),
+            pin_memory=use_pin,
+            persistent_workers=use_pw,
+            prefetch_factor=pf,
         )
 
         # 模型 + loss
@@ -838,6 +871,13 @@ if __name__ == "__main__":
     # ---- 選擇性覆蓋超參數 ----
     # YOLOGridStateTrainer.PHASE1_EPOCHS = 15
     # YOLOGridStateTrainer.BATCH_SIZE    = 4
+    #
+    # GPU 使用率低（~10%）的調整建議：
+    #   1. NUM_WORKERS=2 已預設開啟（worker 預取消除磁碟等待）
+    #   2. RAM 充裕（>10 GB 可用）時開 CACHE_IN_RAM：
+    #      YOLOGridStateTrainer.CACHE_IN_RAM = True
+    #   3. GPU VRAM 充裕時加大 batch：
+    #      YOLOGridStateTrainer.BATCH_SIZE = 16
 
     trainer = YOLOGridStateTrainer(
         dataset_dir    = DATASET_DIR,
