@@ -31,8 +31,6 @@ from Minesweeper_web_client import MinesweeperWebClient
 
 from Minesweeper.Minesweeper_manager import Minesweeper_manager
 from visual_discrete_agent_v2 import get_agent
-from pathlib import Path
-from yolo_grid_state_predictor import VisionDatasetRecorder
 
 WEB_API = MinesweeperWebClient(default_difficulty="Training 6x6")
 REWARD_VALID_CLICK = 1.0
@@ -43,11 +41,6 @@ REWARD_INVALID_CLICK = -0.5
 REWARD_LOSE = -1.0
 REWARD_WIN = 3.6
 
-# === 監督式 vision dataset 蒐集開關 ===
-# True 時，會在跑 RL demo 的同時把 (screenshot, server_state → 12ch label) 存到 VISION_DATASET_PATH
-# 給 autoTest_pytorch/yolo_grid_state_predictor.py 的 YOLOGridStatePredictor 做監督訓練。
-COLLECT_VISION_DATASET = True
-VISION_DATASET_PATH = Path("./datasets/vision_supervised")
 
 class Minesweeper_Begin_thread (Thread):
     def __init__(self) :
@@ -173,43 +166,16 @@ class Game_test_case(unittest.TestCase) :
                 Minesweeper_Begin_thread().start()
                 break
 
-    def _maybe_record_vision_sample(self, game_status, screenshot):
-        """當 COLLECT_VISION_DATASET=True 且 server_state 可用時，存一筆 (screenshot, label)。
-
-        去重由 VisionDatasetRecorder 內部的 hash 處理，重複畫面會被自動跳過。
-        """
-        if not COLLECT_VISION_DATASET:
-            return
-        recorder = getattr(game_status, "vision_recorder", None)
-        if recorder is None:
-            return
-        if screenshot is None or game_status.server_state is None:
-            return
-        try:
-            added = recorder.record(screenshot, game_status.server_state)
-            if added and recorder.count % 50 == 0:
-                print(f"[VisionDataset] collected {recorder.count} samples so far")
-        except Exception as exc:
-            print(f"[VisionDataset] record failed: {exc}")
-
     def decide_next_step_and_play(self, game_status):
         Tool_Main.glo_var.s_record_time()
         # looping until find a position that is in the game_region
         while True :
             check_pause()
             current_screenshot = self.capture_grid_state(game_status)
-            # 在這個時刻，current_screenshot 對應的是尚未點擊前的畫面，
-            # 而 game_status.server_state 也還沒被 pending 更新 → 兩者成對，可直接蒐集。
-            self._maybe_record_vision_sample(game_status, current_screenshot)
-
             action, log_info = game_status.agent.select_action(
                 current_screenshot,
                 add_noise=game_status.noise
             )
-            # 診斷：比對 YOLO 預測 vs 實際 server_state，找 invalid click 根源
-            if hasattr(game_status.agent, 'log_grid_comparison') and game_status.server_state:
-                game_status.agent.log_grid_comparison(game_status.server_state, action)
-
             game_status.update_state(current_screenshot, action)
             game_status.log_info = log_info
 
@@ -325,13 +291,6 @@ class Game_test_case(unittest.TestCase) :
             self.server_state = None
             self.pending_server_state = None
             self.pending_board_changed = False
-
-            # Vision dataset recorder（給 YOLOGridStatePredictor 做監督訓練用）。
-            # Flag 在模組頂層 COLLECT_VISION_DATASET 控制是否啟用。
-            self.vision_recorder = (
-                VisionDatasetRecorder(VISION_DATASET_PATH)
-                if COLLECT_VISION_DATASET else None
-            )
 
         def update_state(self, new_state, new_action):
             self.current_pic = new_state
