@@ -1,266 +1,337 @@
 # Design: YOLO Grid-State Predictor + Stage 1 Agent
 
-> 這份文件是 2026-04-22 session 的設計討論產出，供新 session 接續。
-> 讀完這份後應該能直接開始實作。
+> 最後更新：2026-04-23 session
+> 上一份版本（2026-04-22）記錄診斷過程，本份記錄**已實作完成的內容**與**下一步**。
+> 新 session 讀完本文件後可直接進入「9. 新 Session 起手指引」。
 
 ---
 
-## 1. 背景與動機
+## 1. 背景與動機（為什麼不繼續端到端訓練）
 
-### 1.1 目前的問題
+現有的 `visual_discrete_agent.py` 端到端訓練（截圖 → YOLO → Transformer → FQF）學不起來，診斷結果：
 
-現有的 `visual_discrete_agent.py` 端到端訓練（截圖 → YOLO → Transformer → FQF）**學不起來**，經過這次 session 的診斷：
+- BN stats 穩定（已用 TensorBoard `bn/*` 確認，變動 < 0.002，**不是 BN 問題**）
+- `grad_pre/yolo`（clip 前）5 → 10，spike > 20；其他模組 ~5 → **YOLO 是梯度爆炸源**
+- 根本原因：Frozen Encoder 用 36 個 grid token 訓練，現在收到 1600 個 YOLO token，**attention 完全錯位**，梯度穿過錯的 attention 傳到 YOLO 後被扭曲放大
 
-- BatchNorm stats 穩定（不是 BN 問題，已加 `bn/*` TensorBoard 監控確認）
-- `total_norm`（clip 前）持續上升 5 → 10，但個別 `grad/*_norm`（clip 後）穩定 — 代表梯度真實大小在爆
-- 加了 `grad_pre/*` 監控後發現 **YOLO 的 pre-clip 梯度最大**（5→10），其他三個（decoder/policy/head）都在 5 附近，spike 會突破 20
-- 最可能的根因：**Frozen Encoder 是用 36 個 grid token 訓練的，現在收到 1600 個 YOLO token，attention 完全錯位**。梯度穿過這個「錯的 attention」傳到 YOLO 被扭曲放大
+**解法：解耦成兩個獨立子問題**
 
-### 1.2 為什麼改走這個設計
-
-把問題解耦成兩個獨立子問題：
-
-| 子問題 | 新方法 | 為什麼比端到端好 |
-|------|------|---------------|
-| 看懂畫面：screenshot → 遊戲狀態 | 監督式學習，server API 當 ground truth | 有明確 label，比 RL 好訓練 |
-| 玩遊戲：遊戲狀態 → action | 直接用 `TransformerDiscreteAgent`（Stage 1 已訓好） | 不用重訓 |
-
-**重點洞察：** `TransformerDiscreteAgent` 的輸入是 12-channel grid state tensor。如果 YOLO 能預測出這個 tensor，直接接上去就能玩。
+| 子問題 | 新方法 | 優點 |
+|------|------|------|
+| 看懂畫面：screenshot → grid state | 監督式學習，server API 當 ground truth | 有明確 label，訓練穩定 |
+| 玩遊戲：grid state → action | 直接用 Stage 1 已訓好的 `TransformerDiscreteAgent`（凍住） | 不用重訓 |
 
 ---
 
-## 2. 架構設計
+## 2. 架構設計（已確定）
 
 ### 2.1 Pipeline 總覽
 
 ```
-┌─ Phase 1: 監督式訓練 YOLOGridStatePredictor ──────┐
-│  data: (screenshot, server_state → 12ch tensor)  │
-│  loss: CrossEntropy per cell                      │
-└──────────────────┬────────────────────────────────┘
+┌─ Phase 1: 監督式訓練 YOLOGridStatePredictor ──────────┐
+│  data: Demo 跑 RL 時順便蒐集 (screenshot, label)      │
+│  label: server_state → (H, W) class index 0~10       │
+│  loss: CrossEntropyLoss                               │
+└──────────────────┬────────────────────────────────────┘
                    ↓
-┌─ Phase 2: 組合部署 ────────────────────────────────┐
-│  Screenshot                                        │
-│    ↓ YOLOGridStatePredictor（訓練好，是否凍住看表現）│
-│  Predicted grid state (B, 12, H, W)                │
-│    ↓ TransformerDiscreteAgent（Stage 1，凍住）     │
-│  Q-values → action                                 │
-└────────────────────────────────────────────────────┘
+┌─ Phase 2: 組合部署 ─────────────────────────────────── ┐
+│  Screenshot                                            │
+│    ↓ YOLOGridStatePredictor（訓練好）                  │
+│  Predicted grid state (B, 12, H, W)                    │
+│    ↓ TransformerDiscreteAgent（Stage 1，凍住）         │
+│  Q-values → action                                     │
+└────────────────────────────────────────────────────────┘
 
-Phase 3（RL fine-tune）: 延後決定，前兩階段做完再說
+Phase 3（RL fine-tune）: 延後決定，組合後實測勝率再說
 ```
 
-### 2.2 YOLOGridStatePredictor 架構
+### 2.2 YOLOGridStatePredictor 架構（已實作）
 
 ```
 Screenshot (B, 3, 640, 640)
-    ↓ YOLO11n backbone（YOLO11nLastFeatureExtractor，會 fine-tune）
-(B, 128, 40, 40)                          ← 固定 1600 tokens，跟網格大小無關
-    ↓ Token adapter：LayerNorm + Linear(128→d) + GELU + Linear(d→d)
-    ↓ + 2D positional encoding（40×40）
-(B, 1600, d) = memory tokens
+    ↓ YOLO11nLastFeatureExtractor（YOLO_LAST_LAYER_IDX=6，會 fine-tune）
+(B, 128, 40, 40) = 1600 tokens，固定，與網格大小無關
+    ↓ token_adapter: LayerNorm(128) → Linear(128→128) → GELU → Linear(128→128)
+    ↓ + TwoDimensionalPositionEmbedding(40, 40, d_model=128)
+(B, 1600, 128) = memory tokens
 
 給定目標網格 (H, W)：
-    每個 cell 中心的正規化座標 (y, x) ∈ [0,1]²
-    ↓ coord_mlp: Linear(2, d) → GELU → Linear(d, d)
-    （或改用 sinusoidal positional encoding，更穩定）
-(B, H×W, d) = query tokens
+    cell 中心的正規化座標 (y+0.5)/H, (x+0.5)/W ∈ [0,1]²
+    ↓ coord_mlp: Linear(2,128) → GELU → Linear(128,128)
+      ← 這就是 query 的 positional encoding（size-agnostic）
+(B, H×W, 128) = query tokens
 
-Cross-Attention（query attend to memory，單層或多層）：
-    (B, H×W, d)
-    ↓ Linear(d, 12) = classification head
-(B, H×W, 12)
-    ↓ reshape
-(B, 12, H, W)                             ← 交給 TransformerDiscreteAgent 當輸入
+nn.TransformerDecoder（2 層，nhead=4，dim_ff=512）：
+    self-attn（query 互相關注） + cross-attn（query attend to memory） + FFN
+(B, H×W, 128)
+    ↓ Linear(128, 12) = classification head
+(B, H×W, 12) → reshape
+(B, 12, H, W)  ← 直接餵給 TransformerDiscreteAgent
 ```
 
-### 2.3 為什麼 Size-Agnostic（未來換 10×10、16×16 可重用）
+**超參數（`YOLOGridStatePredictor.__init__` 預設值）：**
 
-- YOLO 輸出固定 40×40 = 1600 tokens（跟遊戲網格無關）
-- Query 是從 `(grid_h, grid_w)` 算出來的座標 → MLP，不是學出來的參數
-- Cross-attention 天然支援任意 query 數量
-- 所有可學習參數（YOLO、adapter、coord_mlp、cross-attn、head）都跟 H、W 無關
+| 參數 | 值 |
+|------|-----|
+| d_model | 128 |
+| nhead | 4 |
+| num_cross_attn_layers | 2 |
+| dim_feedforward | 512 |
+| dropout | 0.1 |
+| num_classes | 12 |
 
 ---
 
-## 3. 資料收集（整合到 Demo_test_Minesweeper.py）
+## 3. 12-Channel 定義（已確認）
 
-### 3.1 決策
+來源：`MinesweeperLogic.get_grid_state_tensor()` + `Minesweeper_web/server.py`
 
-**不另寫 `collect_grid_state_dataset.py`**。直接在 `Demo_test_Minesweeper.py` 跑 RL demo 時順便蒐集 `(screenshot, server_state_12ch)` pairs，用 flag 控制要不要存。
+| class index | 含義 | server cell.state |
+|---|---|---|
+| 0 | 未翻開 (hidden) | `"hidden"` |
+| 1 | 旗子 (flagged) | `"flagged"` / `"flagged_mine"` / `"wrong_flag"` |
+| 2~10 | 數字 0~8 | `"revealed"` + value=n → class = 2+n |
+| 11 | 地雷 | `"mine"` / `"hit_mine"` |
 
-### 3.2 Flag 設計
+**重要：class 11（地雷）不蒐集訓練資料。**
+- 地雷只在 `status == "lost"` 後才可見
+- 推論時永遠不會遇到這種狀態
+- `VisionDatasetRecorder.record()` 內部會自動過濾 `status == "lost"`
 
-在 `Demo_test_Minesweeper.py` 頂層加：
+---
+
+## 4. 資料蒐集（已實作於 Demo_test_Minesweeper.py）
+
+### 4.1 開關
 
 ```python
-COLLECT_VISION_DATASET = True   # 這個 flag 控制要不要蒐集資料
+# Demo_test_Minesweeper.py 頂層
+COLLECT_VISION_DATASET = True
 VISION_DATASET_PATH = Path("./datasets/vision_supervised")
 ```
 
-### 3.3 蒐集時機
+### 4.2 蒐集時機
 
-在 `test_RL_server` 的主迴圈內，**每次有效的 server state 更新時**存一筆：
+- `decide_next_step_and_play()` 每次拿到 `current_screenshot` 時，立即配上 `game_status.server_state` 存一筆
+- game_over（踩雷）的最終畫面**不蒐集**（record 內部過濾）
 
-- 輸入：`game_status.current_pic`（已經是 preprocessed tensor）或重新讀取的 screenshot
-- Label：`game_status.server_state` 轉成 12-channel tensor
-
-需要的轉換：server 的 board state → 跟 `MinesweeperLogic.get_grid_state_tensor()` 同格式的 tensor。  
-**要先確認 `MinesweeperLogic` 的 12 channels 到底是哪 12 個**（看起來是：0=未翻、1=旗、2~10=數字0~8、11=? 待確認）。
-
-### 3.4 存檔格式建議
+### 4.3 存檔格式
 
 ```
-datasets/vision_supervised/
-  ├── index.jsonl              # 每行一筆 {screenshot_path, label_path, grid_h, grid_w, metadata}
+autoTest_pytorch/datasets/vision_supervised/
+  ├── index.jsonl                  # 每行一筆 JSON：id, screenshot, label, grid_h, grid_w, status, hash
   ├── screenshots/
-  │   └── screen_000001.pt     # uint8 tensor (3, 640, 640) 節省空間
-  └── labels/
-      └── label_000001.pt      # int64 tensor (H, W) with class index 0-11
+  │   └── screen_000001.pt         # uint8 tensor (3, 640, 640)，節省空間
+  ├── labels/
+  │   └── label_000001.pt          # int64 tensor (H, W)，值域 0~11
+  └── check_data/
+      └── check_000001.png         # 視覺確認圖（第 1 筆 + 每 50 筆的第 3 筆自動產生）
 ```
 
-用 class index（不是 one-hot）配合 `CrossEntropyLoss` 最省空間。
+### 4.4 確認圖（check_data）
 
-### 3.5 要注意的問題
+每 50 筆的第 3 筆（idx == 1 or idx % 50 == 3）會產出一張 check image：
+- 底圖為原始截圖（640×640）
+- 白色格線劃分 grid
+- 每格左上角標示 active class 符號（`?`=未翻、`F`=旗、`0`~`8`=數字、`M`=雷）
+- 存到 `check_data/check_{idx:06d}.png`
 
-- **資料分佈不均**：隨機 agent 大多卡在開局幾步（大多 cell 未翻）。後期局面（大多已翻開）會不夠。
-  - 解法一：收集時先用 Stage 1 agent 玩（它會真的玩到後期）
-  - 解法二：隨機政策 + 強制先做幾步有效點擊再開始隨機（human-like opening）
-- **一局平均 15~30 步**，收集 5000~10000 筆 labels 需要跑 300~700 局
-- **去重**：同一 screenshot 可能重複出現，可用 screenshot hash 跳過
+**用途：目視確認 label 正確，不需要任何程式碼就能看**
+
+### 4.5 去重
+
+`VisionDatasetRecorder` 內部維護 screenshot 的 SHA1 hash set，同一畫面重複出現時自動跳過。
 
 ---
 
-## 4. Loss 與訓練策略
+## 5. 訓練（已實作於 yolo_grid_state_predictor.py，`if __name__` 觸發）
 
-### 4.1 Loss
+### 5.1 執行方式
 
-12 channels 是互斥的 one-hot（一個 cell 只會是其中一種狀態），所以用：
+```bash
+cd autoTest_pytorch
+python yolo_grid_state_predictor.py
+```
+
+checkpoint 存在 `models/yolo_grid_predictor/`，中斷後重跑同一指令自動接續。
+
+### 5.2 兩階段訓練
+
+| 階段 | epochs | YOLO | 其他模組 | 目的 |
+|------|--------|------|----------|------|
+| Phase 1 | 0~9（PHASE1_EPOCHS=10） | **凍住** | LR 5e-4 | 讓 adapter/coord/attn/head 先穩定 |
+| Phase 2 | 10~49（PHASE2_EPOCHS=40） | **解凍** LR 1e-5 | LR 5e-4 | YOLO fine-tune |
+
+Optimizer: `AdamW`，LR Schedule: `CosineAnnealingLR`，Grad clip: `max_norm=1.0`
+
+### 5.3 超參數（在 `YOLOGridStateTrainer` class 頂端可直接改）
 
 ```python
-# pred: (B, 12, H, W), target: (B, H, W) with integer class 0-11
-loss = F.cross_entropy(pred, target)
+BATCH_SIZE    = 8
+LR_YOLO       = 1e-5
+LR_OTHER      = 5e-4
+PHASE1_EPOCHS = 10
+PHASE2_EPOCHS = 40
+VAL_RATIO     = 0.15
 ```
 
-**不要用 BCE**（會忽略 channel 間互斥關係）。
+### 5.4 TensorBoard 監控
 
-### 4.2 可選的輔助 Loss
+```bash
+tensorboard --logdir autoTest_pytorch/models/yolo_grid_predictor/tensorboard
+```
 
-- 整個板的「未翻 cell 數量」一致性
-- 「已翻開的數字分佈」要合理（0 通常遠多於 8）
-- 暫時先不加，如果 CE loss 學不好再考慮
+觀測指標：
+- `train/loss`, `val/loss`
+- `train/acc`, `val/acc`（整體 pixel accuracy）
+- `val/acc_hidden`, `val/acc_flag`, `val/acc_num0` ... `val/acc_num8`（各 class 準確率）
 
-### 4.3 Learning Rate 建議
+**觀察重點：**
+- `val/acc_hidden` 應最先飆高（大多數 cell 是未翻開）
+- `val/acc_num*` 慢一點，數字 class 樣本相對少
+- 如果某個 class 的 acc 卡住不動 → 可能需要調整 YOLO layer 深度或資料量
 
-| 模組 | LR | 備註 |
-|------|-----|------|
-| YOLO backbone | 1e-5（小） | Fine-tune（用戶要求） |
-| token adapter | 5e-4 | 從頭訓 |
-| coord_mlp | 5e-4 | 從頭訓 |
-| cross-attention | 5e-4 | 從頭訓 |
-| 12-ch head | 5e-4 | 從頭訓 |
+### 5.5 Gap-tolerant Dataset 讀取
 
-### 4.4 訓練順序
+手動刪除有問題的 `.pt` 檔後，`VisionSupervisedDataset.load_and_split()` 會：
+1. 讀取 `index.jsonl` 中的所有 entry
+2. 逐一確認 `screenshots/screen_XXXXXX.pt` 和 `labels/label_XXXXXX.pt` 是否都存在
+3. 跳過缺檔的 entry，並印出 `Skipped N entries (files missing)`
+4. 對剩餘的有效 entry 做 train/val split
 
-1. 先凍 YOLO 跑 5~10 epochs，讓 adapter/coord/attn/head 先穩定
-2. 再解凍 YOLO 做 fine-tune
-
-這樣比一開始就解凍所有東西穩定。
-
----
-
-## 5. 需要新增/修改的檔案
-
-### 5.1 新增
-
-- **`autoTest_pytorch/yolo_grid_state_predictor.py`**
-  - `YOLOGridStatePredictor` class
-  - `build_queries(grid_h, grid_w, device)`
-  - `forward(screenshot, grid_h, grid_w) -> (B, 12, H, W)`
-  - 可能內含 YOLO11nLastFeatureExtractor（從 visual_discrete_agent.py 搬過來或 import）
-
-- **`autoTest_pytorch/train_stage2_vision.py`**
-  - 讀 `datasets/vision_supervised/`
-  - DataLoader + CrossEntropyLoss + 訓練迴圈
-  - TensorBoard：loss、per-cell accuracy、per-class confusion matrix
-  - 分階段：先凍 YOLO 訓其他，再解凍
-
-- **`autoTest_pytorch/visual_discrete_agent_v2.py`**（或改寫現有檔）
-  - 組合 `YOLOGridStatePredictor` + `TransformerDiscreteAgent`
-  - 純推論，沒有 RL 訓練（Phase 3 再決定）
-  - `select_action(screenshot)` 直接跑兩段網路
-
-### 5.2 修改
-
-- **`autoTest_pytorch/Demo_test_Minesweeper.py`**
-  - 加 `COLLECT_VISION_DATASET` flag
-  - 在 `test_RL_server` 迴圈內當 flag 為 True 時存 `(screenshot, 12ch label)` pairs
-  - 新增 helper：`server_state_to_grid_tensor(server_state) -> (H, W) long tensor`
-
-- **`CLAUDE.md`**、**`README.md`** — 更新 Project Overview 反映兩階段 vision supervised + frozen Stage 1 agent 的新設計
+**檔名不連續（如有 screen_000001.pt 和 screen_001641.pt，但沒有 screen_000641.pt）不影響讀取。**
 
 ---
 
-## 6. 已經做好的準備（這個 session 改過的）
+## 6. 檔案現況
 
-### 6.1 `visual_discrete_agent.py`（仍保留）
-- `_save_model` / `try_load_model` 新增 `encoder` key，修正 frozen encoder 沒被存的問題（q_mean 斷層）
-- `_log_batchnorm_stats`：TensorBoard 記錄 `bn/running_mean_avg`、`bn/running_mean_std`、`bn/running_var_avg`、`bn/running_var_std`。**已確認掃雷截圖下 BN stats 非常穩定**（變動 < 0.002）
-- `grad_pre/yolo`、`grad_pre/decoder`、`grad_pre/policy`、`grad_pre/head`：clip 前的真實梯度。**觀察到 YOLO 最大 5→10，其他 ~5，spike > 20**
+### 6.1 `autoTest_pytorch/yolo_grid_state_predictor.py`（**主要新增檔**）
 
-這些檔案改動都可以保留 — 新設計完成後 `visual_discrete_agent.py` 可能整個被 v2 取代，或當作 Phase 3 的起點。
+結構：
+```
+yolo_grid_state_predictor.py
+│
+├── 常數：CH_*, NUM_CHANNELS, YOLO_FEATURE_*, _CLASS_NAMES
+│
+├── server_state_to_grid_tensor(server_state) → (H, W) LongTensor
+│     └── Web API server_state dict → class index 0~11
+│
+├── class VisionDatasetRecorder               ← Demo 蒐集資料用
+│     ├── record(screenshot, server_state)    ← 自動過濾 lost，SHA1 去重
+│     └── _save_check_image()                ← 視覺確認圖
+│
+├── class YOLOGridStatePredictor(nn.Module)   ← 核心模型
+│     ├── forward(screenshot, grid_h, grid_w) → (B, 12, H, W) logits
+│     ├── predict_grid_state()               ← 推論（one-hot 輸出）
+│     ├── freeze_yolo() / unfreeze_yolo()
+│     └── yolo_parameters() / non_yolo_parameters()
+│
+├── class VisionSupervisedDataset(Dataset)   ← 訓練資料讀取
+│     ├── __getitem__() → (screenshot_float, label_long)
+│     └── load_and_split()                   ← 讀 index.jsonl，過濾缺檔 entry，切 train/val
+│
+├── class YOLOGridStateTrainer               ← 訓練邏輯（OOP）
+│     ├── _build_optimizer()
+│     ├── _train_epoch()
+│     ├── _validate()                        ← per-class accuracy
+│     ├── _log_metrics()                     ← TensorBoard + console（只印 acc < 0.95 的 class）
+│     ├── save_checkpoint() / load_checkpoint()
+│     └── train()                            ← Phase 1 → Phase 2 主迴圈，支援中斷後接續
+│
+└── if __name__ == "__main__":               ← 直接 python yolo_grid_state_predictor.py 觸發
+```
 
-### 6.2 `CLAUDE.md` Project Overview 已更新成兩階段視覺訓練描述，**現在這個設計改變後需要再更新一次**（新 session 請記得改）。
+### 6.2 `autoTest_pytorch/Demo_test_Minesweeper.py`（已修改）
 
-### 6.3 `README.md` 也改過，**新設計也要再改一次**。
+- 加了 `COLLECT_VISION_DATASET = True` 開關
+- `Game_status.__init__` 裡建立 `self.vision_recorder`
+- `_maybe_record_vision_sample()` helper
+- `decide_next_step_and_play()` 每次截圖後立即蒐集一筆
+
+### 6.3 `autoTest_pytorch/visual_discrete_agent.py`（保留，供 Phase 3 參考）
+
+- 已加 `encoder` key 到 save/load（修正 q_mean 斷層問題）
+- 已加 `bn/*` TensorBoard 監控（確認 BN 穩定）
+- 已加 `grad_pre/*` 監控（確認 YOLO 是梯度源）
+
+### 6.4 尚未寫的檔案
+
+- **`autoTest_pytorch/visual_discrete_agent_v2.py`**：組合 `YOLOGridStatePredictor` + `TransformerDiscreteAgent`，純推論介面。**等訓練結果出來再寫。**
 
 ---
 
-## 7. 尚未決定 / 需要討論
+## 7. 已決定的設計問題（原 section 7 的 open questions）
 
-### 7.1 Phase 3：RL Fine-tune 要不要做？
-- 用戶：「前面做完我再決定」
-- 判斷依據：Phase 2 組合起來實測勝率
-  - 如果勝率接近 Stage 1 的純符號版 → 不用做
-  - 如果有明顯 gap → 考慮做（但容易把 Stage 1 訓好的 agent 搞壞）
-
-### 7.2 Query 生成用 MLP 還是 Sinusoidal？
-- MLP：參數少，但可能不夠 smooth
-- Sinusoidal：更穩定、無參數，對 OOD grid size 的 generalization 較好
-- **建議先 MLP 試一下，訓練不穩再換 sinusoidal**
-
-### 7.3 Cross-Attention 幾層？
-- 1 層：最簡單，參數少
-- 2~3 層：容量大，但可能過擬合小資料集
-- **建議從 1 層開始**
-
-### 7.4 12 Channel 的實際定義需要確認
-- 看起來是：0=未翻、1=旗、2~10=數字0~8、11=?
-- 實作前必須打開 `MinesweeperLogic.get_grid_state_tensor()` 確認，尤其是 channel 11 到底代表什麼
-- 要把 server API 回傳的 board 狀態正確對應到這 12 個 class index
-
-### 7.5 要不要支援 batch 中混合不同 grid size？
-- 目前假設一個 batch 內 grid size 相同
-- 要支援混合的話需要 padding + mask，複雜度上升
-- **建議先不支援，訓練時每個 batch 固定 grid size 即可**
-
-### 7.6 YOLO 要不要用更深層的特徵？
-- 目前用 `YOLO_LAST_LAYER_IDX = 6`（40×40，128 ch）
-- 更淺層（如 idx=4，80×80，64 ch）空間解析度高，更適合小 cell
-- **先用現有設定，訓練後看 confusion matrix 再決定**
+| 問題 | 決定 |
+|------|------|
+| 7.1 Phase 3 RL fine-tune？ | 延後，等 Phase 2 實測勝率再決定 |
+| 7.2 Query 用 MLP / Sinusoidal？ | **MLP**（已實作），訓練不穩再換 sinusoidal |
+| 7.3 Cross-Attention 幾層？ | **2 層**，含 self-attn + cross-attn |
+| 7.4 12-channel 定義 | **已確認**（見 section 3） |
+| 7.5 batch 混合不同 grid size？ | **不支援**，一個 batch 固定 size |
+| 7.6 YOLO 用哪層特徵？ | **維持 idx=6**（40×40, 128ch），訓完看 confusion matrix 再決定 |
+| CH_MINE 樣本比例過高 | **不蒐集**，record() 過濾 status=="lost" |
+| 缺檔 entry 如何處理 | **load_and_split 自動跳過**，印 skipped count |
 
 ---
 
-## 8. 新 Session 起手指引
+## 8. 資料蒐集注意事項
 
-1. 讀完這份文件
-2. 掃一下 `autoTest_pytorch/transformer_discrete_agent.py`（了解 Stage 1 agent 的 input 格式）
-3. 掃一下 `autoTest_pytorch/Minesweeper/MinesweeperLogic.py`（確認 12 channel 定義）
-4. 跟用戶確認「7. 尚未決定」的項目
-5. 開始實作順序建議：
-   - 先寫 `server_state_to_grid_tensor()` helper（最基礎，可單元測試）
-   - 再改 `Demo_test_Minesweeper.py` 加 `COLLECT_VISION_DATASET` flag 蒐集資料
-   - 跑一下蒐集幾百筆資料確認格式正確
-   - 寫 `yolo_grid_state_predictor.py`
-   - 寫 `train_stage2_vision.py` 跑監督訓練
-   - 組合到 `visual_discrete_agent_v2.py` 部署
+### 8.1 分佈問題
+隨機 agent 大多在開局幾步就踩雷，導致：
+- **class 0（hidden）** 樣本非常多
+- **class 3~10（數字 1~8）** 樣本相對少（需要玩到後期才會出現）
+
+建議：蒐集夠多資料後看 per-class sample count（可從 label .pt 統計），若不均衡考慮用 weighted sampling。
+
+### 8.2 目標資料量
+- 一局 6x6 掃雷 6×6=36 cells × 步數 ≈ 幾百個 cell-labels
+- 目標：**5000~10000 筆有效 pair**（即 5000~10000 個 screenshot + label）
+- 對應：跑 300~700 局
+
+### 8.3 確認方式
+開 `check_data/` 裡的 PNG，目視確認格線是否對齊遊戲格子、class 符號是否正確。
+
+---
+
+## 9. 新 Session 起手指引
+
+**直接跳到這裡，上面當參考。**
+
+### 目前狀態
+- [x] `yolo_grid_state_predictor.py` 寫完（含 Dataset + Trainer）
+- [x] `Demo_test_Minesweeper.py` 改完（蒐集開關 + 過濾 lost 畫面）
+- [ ] 資料蒐集中（需要跑 Demo 累積 ~5000 筆）
+- [ ] 訓練（待資料夠後執行 `python yolo_grid_state_predictor.py`）
+- [ ] 部署（`visual_discrete_agent_v2.py`，待訓練結果出來再寫）
+
+### 下一步任務選項
+
+#### A. 確認資料蒐集正確（現在應做）
+1. 跑 `Demo_test_Minesweeper.py` 幾局
+2. 確認 `datasets/vision_supervised/check_data/` 有 PNG 出現
+3. 確認 PNG 裡的格線對齊、class 符號合理（大部分應該是 `?`）
+4. 用以下 snippet 確認 label 分佈：
+```python
+import torch
+from pathlib import Path
+labels_dir = Path("autoTest_pytorch/datasets/vision_supervised/labels")
+counts = torch.zeros(12, dtype=torch.long)
+for f in sorted(labels_dir.glob("*.pt")):
+    lab = torch.load(f, weights_only=True)
+    for c in range(12):
+        counts[c] += (lab == c).sum()
+print(counts)
+```
+
+#### B. 開始訓練（資料夠後）
+```bash
+cd autoTest_pytorch
+python yolo_grid_state_predictor.py
+```
+並在另一個 terminal 開 TensorBoard 監控。
+
+#### C. 寫 visual_discrete_agent_v2.py（訓練完成後）
+- 讀取 `models/yolo_grid_predictor/best.pth`
+- 組合 `YOLOGridStatePredictor.predict_grid_state()` + `TransformerDiscreteAgent.select_action()`
+- 替換 `Demo_test_Minesweeper.py` 的 `get_agent()` 來源

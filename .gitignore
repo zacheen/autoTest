@@ -1,10 +1,10 @@
-# data
-datasets*
-
 # model
 runs*
 rl_models*
 models*
+
+# data
+datasets*
 
 # compare picture
 *comp*
