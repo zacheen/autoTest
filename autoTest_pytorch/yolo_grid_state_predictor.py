@@ -22,13 +22,19 @@ Size-agnostic：YOLO 輸出固定 40×40，query 由 grid(h, w) 算出正規化�
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
+import random
 from pathlib import Path
 from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 # 避免 circular import：YOLO11n extractor 與 pos-embed 從 visual_discrete_agent / shared module 匯入
 from model_structure.transformer_shared import TwoDimensionalPositionEmbedding
@@ -202,6 +208,7 @@ class VisionDatasetRecorder:
         if idx == 1 or idx % 50 == 3:
             try:
                 self._save_check_image(idx, screen_uint8, label)
+                print("print check data pic")
             except Exception as exc:
                 print(f"[VisionDataset] check image FAILED (idx={idx}): {exc}")
 
@@ -467,3 +474,357 @@ class YOLOGridStatePredictor(nn.Module):
         one_hot = torch.zeros_like(logits)
         one_hot.scatter_(1, pred.unsqueeze(1), 1.0)
         return one_hot
+
+
+# --------------------------------------------------------------------------- #
+# Class index → 可讀名稱（TensorBoard 用）                                    #
+# --------------------------------------------------------------------------- #
+_CLASS_NAMES = [
+    "hidden",           # 0
+    "flag",             # 1
+    "num0",             # 2
+    "num1",             # 3
+    "num2",             # 4
+    "num3",             # 5
+    "num4",             # 6
+    "num5",             # 7
+    "num6",             # 8
+    "num7",             # 9
+    "num8",             # 10
+    "mine",             # 11（實際上訓練資料裡不會出現，但保留對應）
+]
+
+
+# --------------------------------------------------------------------------- #
+# Dataset                                                                      #
+# --------------------------------------------------------------------------- #
+class VisionSupervisedDataset(Dataset):
+    """讀取 VisionDatasetRecorder 存下的 (screenshot, label) pairs。
+
+    每個 sample 回傳 (screenshot_float, label_long)：
+        screenshot_float : torch.float32, shape (3, 640, 640), 值域 [0, 1]
+        label_long       : torch.int64,   shape (H, W),        值域 [0, 11]
+    """
+
+    def __init__(self, dataset_dir: Path, entries: list[dict]):
+        self.screenshots_dir = dataset_dir / "screenshots"
+        self.labels_dir = dataset_dir / "labels"
+        self.entries = entries
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def __getitem__(self, idx: int):
+        entry = self.entries[idx]
+        screen_uint8 = torch.load(
+            self.screenshots_dir / entry["screenshot"],
+            map_location="cpu",
+            weights_only=True,
+        )
+        label = torch.load(
+            self.labels_dir / entry["label"],
+            map_location="cpu",
+            weights_only=True,
+        )
+        screenshot = screen_uint8.float() / 255.0
+        return screenshot, label
+
+    @staticmethod
+    def load_and_split(
+        dataset_dir: Path,
+        val_ratio: float = 0.15,
+        seed: int = 42,
+    ) -> tuple[list[dict], list[dict]]:
+        """讀取 index.jsonl 並隨機切成 train / val。"""
+        index_path = Path(dataset_dir) / "index.jsonl"
+        if not index_path.exists():
+            raise FileNotFoundError(f"找不到 index.jsonl：{index_path}")
+
+        entries = []
+        with index_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+
+        if not entries:
+            raise RuntimeError("index.jsonl 是空的，請先蒐集資料")
+
+        rng = random.Random(seed)
+        rng.shuffle(entries)
+        n_val = max(1, int(len(entries) * val_ratio))
+        val_entries = entries[:n_val]
+        train_entries = entries[n_val:]
+        return train_entries, val_entries
+
+
+# --------------------------------------------------------------------------- #
+# Trainer                                                                      #
+# --------------------------------------------------------------------------- #
+class YOLOGridStateTrainer:
+    """監督式訓練：(screenshot, grid_label) → YOLOGridStatePredictor。
+
+    兩階段訓練：
+        Phase 1 (PHASE1_EPOCHS)：凍住 YOLO backbone，只訓練 adapter / coord / cross-attn / head。
+                                  讓新加的模組先在不更動 YOLO 權重的情況下穩定。
+        Phase 2 (PHASE2_EPOCHS)：解凍 YOLO，用極小 LR (LR_YOLO=1e-5) 做 fine-tune。
+    """
+
+    # ---- 超參數（可直接改這裡） ----
+    BATCH_SIZE    = 8
+    LR_YOLO       = 1e-5   # Phase 2 YOLO fine-tune LR（設小，避免破壞預訓練特徵）
+    LR_OTHER      = 5e-4   # adapter / coord_mlp / cross-attn / head
+    PHASE1_EPOCHS = 10     # 凍 YOLO 的暖機 epochs
+    PHASE2_EPOCHS = 40     # 解凍 YOLO 後繼續訓練的 epochs
+    VAL_RATIO     = 0.15
+    SEED          = 42
+    NUM_WORKERS   = 0      # Windows 多進程容易出問題，預設 0
+
+    def __init__(
+        self,
+        dataset_dir,
+        model_save_dir,
+        grid_h: int = 6,
+        grid_w: int = 6,
+    ):
+        self.dataset_dir = Path(dataset_dir)
+        self.model_save_dir = Path(model_save_dir)
+        self.model_save_dir.mkdir(parents=True, exist_ok=True)
+        self.grid_h = grid_h
+        self.grid_w = grid_w
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Dataset / DataLoader
+        train_entries, val_entries = VisionSupervisedDataset.load_and_split(
+            self.dataset_dir, val_ratio=self.VAL_RATIO, seed=self.SEED
+        )
+        print(f"[Trainer] Dataset: train={len(train_entries)}, val={len(val_entries)}")
+
+        self.train_loader = DataLoader(
+            VisionSupervisedDataset(self.dataset_dir, train_entries),
+            batch_size=self.BATCH_SIZE,
+            shuffle=True,
+            num_workers=self.NUM_WORKERS,
+            pin_memory=(self.device.type == "cuda"),
+        )
+        self.val_loader = DataLoader(
+            VisionSupervisedDataset(self.dataset_dir, val_entries),
+            batch_size=self.BATCH_SIZE,
+            shuffle=False,
+            num_workers=self.NUM_WORKERS,
+            pin_memory=(self.device.type == "cuda"),
+        )
+
+        # 模型 + loss
+        self.model = YOLOGridStatePredictor().to(self.device)
+        self.loss_fn = nn.CrossEntropyLoss()
+
+        # optimizer / scheduler：在 train() 中依 phase 初始化
+        self.optimizer: Optional[optim.Optimizer] = None
+        self.scheduler: Optional[optim.lr_scheduler.LRScheduler] = None
+
+        # TensorBoard
+        tb_root = self.model_save_dir / "tensorboard"
+        tb_dir = tb_root / datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        tb_dir.mkdir(parents=True, exist_ok=True)
+        self.tb_writer = SummaryWriter(log_dir=str(tb_dir))
+        print(f"[Trainer] TensorBoard: tensorboard --logdir {tb_root}")
+        print(f"[Trainer] Device: {self.device}")
+
+        self.best_val_acc = 0.0
+
+    # ------------------------------------------------------------------ #
+    # Internal helpers                                                     #
+    # ------------------------------------------------------------------ #
+    def _build_optimizer(self, yolo_frozen: bool) -> None:
+        """依照目前 phase 建立 optimizer（phase 轉換時重建）。"""
+        if yolo_frozen:
+            param_groups = [
+                {"params": self.model.non_yolo_parameters(), "lr": self.LR_OTHER},
+            ]
+        else:
+            param_groups = [
+                {"params": self.model.yolo_parameters(),     "lr": self.LR_YOLO},
+                {"params": self.model.non_yolo_parameters(), "lr": self.LR_OTHER},
+            ]
+        self.optimizer = optim.AdamW(param_groups, weight_decay=1e-4)
+
+    def _train_epoch(self, epoch: int) -> dict:
+        self.model.train()
+        total_loss = 0.0
+        correct = 0
+        n_pixels = 0
+
+        for screen, label in self.train_loader:
+            screen = screen.to(self.device)     # (B, 3, 640, 640)
+            label = label.to(self.device)       # (B, H, W)
+
+            logits = self.model(screen, self.grid_h, self.grid_w)  # (B, 12, H, W)
+            loss = self.loss_fn(logits, label)
+
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            self.optimizer.step()
+
+            total_loss += float(loss.item())
+            pred = logits.argmax(dim=1)
+            correct  += int((pred == label).sum().item())
+            n_pixels += int(label.numel())
+
+        return {
+            "loss": total_loss / max(len(self.train_loader), 1),
+            "acc":  correct / max(n_pixels, 1),
+        }
+
+    @torch.no_grad()
+    def _validate(self, epoch: int) -> dict:
+        self.model.eval()
+        total_loss = 0.0
+        per_class_correct = torch.zeros(NUM_CHANNELS)
+        per_class_total   = torch.zeros(NUM_CHANNELS)
+
+        for screen, label in self.val_loader:
+            screen = screen.to(self.device)
+            label  = label.to(self.device)
+
+            logits = self.model(screen, self.grid_h, self.grid_w)
+            total_loss += float(self.loss_fn(logits, label).item())
+
+            pred      = logits.argmax(dim=1).cpu()
+            label_cpu = label.cpu()
+            for c in range(NUM_CHANNELS):
+                mask = label_cpu == c
+                per_class_correct[c] += float((pred[mask] == c).sum().item())
+                per_class_total[c]   += float(mask.sum().item())
+
+        overall_acc = float(
+            per_class_correct.sum() / (per_class_total.sum() + 1e-8)
+        )
+        return {
+            "loss":          total_loss / max(len(self.val_loader), 1),
+            "acc":           overall_acc,
+            "acc_per_class": per_class_correct / (per_class_total + 1e-8),  # tensor(12,)
+        }
+
+    def _log_metrics(self, epoch: int, train_m: dict, val_m: dict) -> None:
+        self.tb_writer.add_scalar("train/loss", train_m["loss"], epoch)
+        self.tb_writer.add_scalar("train/acc",  train_m["acc"],  epoch)
+        self.tb_writer.add_scalar("val/loss",   val_m["loss"],   epoch)
+        self.tb_writer.add_scalar("val/acc",    val_m["acc"],    epoch)
+
+        for c, name in enumerate(_CLASS_NAMES):
+            self.tb_writer.add_scalar(
+                f"val/acc_{name}", float(val_m["acc_per_class"][c]), epoch
+            )
+        self.tb_writer.flush()
+
+        # Console：只印還沒學好（acc < 0.95）的 class，減少雜訊
+        low_acc = [
+            f"{_CLASS_NAMES[c]}={float(val_m['acc_per_class'][c]):.2f}"
+            for c in range(NUM_CHANNELS)
+            if float(val_m["acc_per_class"][c]) < 0.95
+        ]
+        print(
+            f"  Epoch {epoch:03d} | "
+            f"train loss={train_m['loss']:.4f} acc={train_m['acc']:.3f} | "
+            f"val loss={val_m['loss']:.4f} acc={val_m['acc']:.3f}"
+            + (f" | low: {', '.join(low_acc)}" if low_acc else "")
+        )
+
+    def save_checkpoint(self, epoch: int, is_best: bool = False) -> None:
+        ckpt = {
+            "epoch":        epoch,
+            "model":        self.model.state_dict(),
+            "best_val_acc": self.best_val_acc,
+        }
+        torch.save(ckpt, self.model_save_dir / "checkpoint.pth")
+        if is_best:
+            torch.save(ckpt, self.model_save_dir / "best.pth")
+            print(f"  ★ best val_acc={self.best_val_acc:.4f} → best.pth saved")
+
+    def load_checkpoint(self) -> int:
+        """Checkpoint 讀取。回傳下一個要跑的 epoch（沒有 checkpoint 則回傳 0）。"""
+        ckpt_path = self.model_save_dir / "checkpoint.pth"
+        if not ckpt_path.exists():
+            return 0
+        ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+        self.model.load_state_dict(ckpt["model"])
+        self.best_val_acc = float(ckpt.get("best_val_acc", 0.0))
+        start_epoch = int(ckpt["epoch"]) + 1
+        print(
+            f"[Trainer] Resumed checkpoint: next_epoch={start_epoch}, "
+            f"best_val_acc={self.best_val_acc:.4f}"
+        )
+        return start_epoch
+
+    # ------------------------------------------------------------------ #
+    # Main training entry point                                            #
+    # ------------------------------------------------------------------ #
+    def train(self) -> None:
+        """兩階段訓練主迴圈。可中斷後重跑（自動讀取 checkpoint）。"""
+        total_epochs = self.PHASE1_EPOCHS + self.PHASE2_EPOCHS
+        start_epoch = self.load_checkpoint()
+
+        current_phase = 0  # 用來偵測 phase 切換
+
+        for epoch in range(start_epoch, total_epochs):
+            in_phase1 = epoch < self.PHASE1_EPOCHS
+            phase = 1 if in_phase1 else 2
+
+            # Phase 轉換時重建 optimizer + scheduler
+            if phase != current_phase:
+                current_phase = phase
+                if phase == 1:
+                    print(f"\n[Trainer] === Phase 1 (epochs 0~{self.PHASE1_EPOCHS - 1}) — YOLO frozen ===")
+                    self.model.freeze_yolo()
+                    remaining = self.PHASE1_EPOCHS
+                else:
+                    print(f"\n[Trainer] === Phase 2 (epochs {self.PHASE1_EPOCHS}~{total_epochs - 1}) — YOLO unfrozen ===")
+                    self.model.unfreeze_yolo()
+                    remaining = self.PHASE2_EPOCHS
+
+                self._build_optimizer(yolo_frozen=in_phase1)
+                self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                    self.optimizer, T_max=remaining, eta_min=1e-6
+                )
+
+            train_m = self._train_epoch(epoch)
+            val_m   = self._validate(epoch)
+            self.scheduler.step()
+
+            is_best = val_m["acc"] > self.best_val_acc
+            if is_best:
+                self.best_val_acc = val_m["acc"]
+
+            self._log_metrics(epoch, train_m, val_m)
+            self.save_checkpoint(epoch, is_best=is_best)
+
+        print(f"\n[Trainer] Done. best_val_acc={self.best_val_acc:.4f}")
+        self.tb_writer.close()
+
+
+# --------------------------------------------------------------------------- #
+# Entry point                                                                  #
+# --------------------------------------------------------------------------- #
+if __name__ == "__main__":
+    # ---- 改這裡就好 ----
+    DATASET_DIR    = Path("./datasets/vision_supervised")
+    MODEL_SAVE_DIR = Path("./models/yolo_grid_predictor")
+    GRID_H = 6
+    GRID_W = 6
+
+    # ---- 選擇性覆蓋超參數 ----
+    # YOLOGridStateTrainer.PHASE1_EPOCHS = 15
+    # YOLOGridStateTrainer.BATCH_SIZE    = 4
+
+    trainer = YOLOGridStateTrainer(
+        dataset_dir    = DATASET_DIR,
+        model_save_dir = MODEL_SAVE_DIR,
+        grid_h         = GRID_H,
+        grid_w         = GRID_W,
+    )
+    trainer.train()
