@@ -22,7 +22,7 @@ app = Flask(__name__, static_folder=str(CURRENT_DIR / "static"), static_url_path
 session_lock = Lock()
 
 DIFFICULTIES = {
-    "Training 6x6": {"rows": 6, "cols": 6, "mines": 6},
+    "Training 6x6": {"rows": 6, "cols": 6, "mines": 4},
     "Beginner": {"rows": 9, "cols": 9, "mines": 10},
     "Intermediate": {"rows": 16, "cols": 16, "mines": 40},
     "Expert": {"rows": 16, "cols": 30, "mines": 99},
