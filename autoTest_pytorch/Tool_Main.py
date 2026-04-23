@@ -5,14 +5,10 @@ import numpy as np
 import sys
 import requests
 import json
-# #安裝PY3時，會預設環境變數路徑，但自己定義的工具不會放在裡面，因此透過這個方式，將執行檔當前路徑加入至環境變數，使電腦可以獲取路徑，不會找不到檔案
 # sys.path.append(".")
 
 import os
 from pathlib import Path
-##@
-#TS使用到的LOG層級，3為有錯誤才印出 (細節待確認)
-# 這個要放在 import tensorflow 之前，因為 import tensorflow 就會印出警示訊息了
 # os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import io
 import glob
@@ -42,17 +38,10 @@ use_sel = 1
 # ----------------------------------------------------------
 
 Game_envi = None
-#當用途為辨識的時候，只能設定為1，若目的為多開視窗進行點擊或進行遊戲產生賽果時，可以設定為2(預期可以開多個視窗)
-##@
 strech_size = 1
 # the time stamp format for test report file name
 ISOTIMEFORMAT = '%Y_%m_%d_%H_%M_%S'
 format_for_db_time = '%Y-%m-%d %H:%M' 
-# screen_num is abandoned, since pyautogui can only click on the main screen
-screen_num = 1
-# screen_num = 0   (-1920 ~ 0)    # 待測試
-# screen_num = 1   (0 ~ 1920)
-# screen_num = 2   (1920 ~ 3840)    # 待測試
 
 # checking each folder exist or not, if not, create it
 testreport_path = Path("./testreport")
@@ -63,52 +52,40 @@ if not testpic_path.exists():
     testpic_path.mkdir()
 print("check/make folder successfully")
 
-# 確認過這個一定要放外面，且每次都一定要讀取(但可以不用使用)
-# 設定一個全域變數
-glo_var = None #儲存在記憶體內 (俗稱創造一個碗)
-# 每個遊戲都要用的參數
-class Glo_var():
-    # in_game_name→遊戲名稱，於FKNN_MAIN內定義
-    # player_num→該遊戲的最高遊戲人數
-    # round_count用於計算遊戲當下的回合數
-    # func後括號內所帶的內容都稱之參數
+# saving the parameters for every game
+glo_var = None
 
-    def __init__(self, in_game_name, player_num, round_count, suit_order = None, list_len = 3) : 
-        # 只需要初始化一次的東西
-        # (不會隨著切換遊戲改變的東西)
-        self.game_driver = None #定義遊戲中會使用到的Driver變數(EX:chrome→webdriver)，還有一個後台用的driver
-        
+class Glo_var():
+    # in_game_name : game name, defined in the main file
+    # player_num   : max number of players (= how many screenshots to take per round)
+
+    def __init__(self, in_game_name, player_num, round_count, suit_order = None, list_len = 3) :
+        # variables initialized only once (do not change when switching games)
+        self.game_driver = None  # selenium WebDriver instance (e.g. Chrome)
         base_dir = Path(__file__).resolve().parent
         parent_dir = base_dir.parent
         self.user_change_path = list(parent_dir.rglob("user_change"))[0]
 
-        self.read_input() # 讀取設定檔
-        
-        # 創建檔案(不變)
+        self.read_input()
+
         now_time = datetime.datetime.now().strftime(ISOTIMEFORMAT)
         txt_location_path = testreport_path / now_time
         if not txt_location_path.exists():
             txt_location_path.mkdir()
-            
-        self.pipe_output_f = open(txt_location_path / 'pipe_output.txt', "w", encoding='UTF-8') #開啟寫入TXT的寫頭，此為thread分支，用以記錄裁圖→辨識→後台→比對，用來輸出想要印出的內容
-        self.cmd_output_f = open(txt_location_path / 'cmd_output.txt', "w", encoding='UTF-8') #開啟寫入TXT的寫頭，此為主線Main使用，用來輸出想要印出的內容
-        self.error_f = open(txt_location_path / 'error.txt', "w", encoding='UTF-8') #開啟寫入TXT的寫頭，此為紀錄有定義過error內容
-        self.file_create_time = "lobby" #使用於檔名紀錄時間，並確保該變數會是當前使用的值，此時間為開局時間(等同於teserport創建時間→html)
-        
-        # input (讀取設定檔)(不變) --------------------------------------------------------------------------------------------------------------------------------------------------------
 
-        # 程式中改變的參數(會隨著程式進行改變) (只需要初始化)
-        self.record_time = datetime.datetime.now() #獲取現在時間
-        self.mid_pos = None # 圖片中心的座標位置
+        self.pipe_output_f = open(txt_location_path / 'pipe_output.txt', "w", encoding='UTF-8') # log for thread
+        self.cmd_output_f  = open(txt_location_path / 'cmd_output.txt',  "w", encoding='UTF-8') # log for unittest
+        self.error_f       = open(txt_location_path / 'error.txt',        "w", encoding='UTF-8')# log for error
+        self.file_create_time = "lobby"
+
+        self.record_time = datetime.datetime.now()
+        self.mid_pos = None
         self.auto_next = True
 
         self.change_by_game(in_game_name, player_num, round_count, suit_order, list_len)
         # self.reset_var(round_count) # Class Glo_var內上方為初始化一次的多個變數，reset_var內為可能會需要"重複初始化"，因此單獨紀錄於一個func內，已便可重複呼叫
 
-        # input end -----------------------------------------------------------------------------------------
-
     def read_input(self) :
-        # input (讀取設定檔)(不變) --------------------------------------------------------------------------------------------------------------------------------------------------------
         print("Game_envi :", Game_envi)
         self.is_url = False
         if type(Game_envi)==type("") and len(Game_envi) >= 3 and Game_envi[0:3] == "url" :
@@ -118,11 +95,9 @@ class Glo_var():
             try :
                 response = requests.get("http://"+ip+"/crawler/getCompanys")
                 # print("response : "+str(response.content))
-                # 這是一個區塊 用來計算結果是否正確
                 self.DaiLi_data = response.json()
                 print("response after json : " + str(self.DaiLi_data))
-
-            except Exception : 
+            except Exception :
                 print("json fail so using local file")
                 url_json_path = self.user_change_path / 'url.json'
                 with open(url_json_path, encoding='UTF-8') as f:
@@ -131,147 +106,128 @@ class Glo_var():
             if Game_envi == "Minesweeper_local_py":
                 input_file_path = self.user_change_path / "Minesweeper_input.txt"
             else :
-                print("Game_envi error (No this envi)")
+                print("Game_envi error (no such env)")
                 return
-                
-            with open(input_file_path, "r", encoding='UTF-8') as read_input_f: #讀取使用者資料進行登入
-                self.game_account = str(read_input_f.readline().split(" -:")[1]).strip() #split(" -:") 透過此方式將資料進行分割，strip() 用以移除字符，開頭或結尾的空格與換行，確保該資料無預期外的字串
-                print("遊戲帳號 : " + self.game_account)
-                self.game_password = str(read_input_f.readline().split(" -:")[1]).strip()
-                print("遊戲密碼 : " + self.game_password)
-                self.game_agent_ID = str(read_input_f.readline().split(" -:")[1]).strip()
-                print("遊戲代理ID : " + self.game_agent_ID)
-                self.game_money = str(read_input_f.readline().split(" -:")[1]).strip()
-                print("遊戲分數 : " + self.game_money)
-                self.game_envir = str(read_input_f.readline().split(" -:")[1]).strip()
-                print("遊戲環境 : " + self.game_envir)
-                # 後台
-                self.server_account = str(read_input_f.readline().split(" -:")[1]).strip()
-                print("後台帳號 : " + self.server_account)
+
+            with open(input_file_path, "r", encoding='UTF-8') as read_input_f:
+                self.game_account   = str(read_input_f.readline().split(" -:")[1]).strip()
+                print("Account: "     + self.game_account)
+                self.game_password  = str(read_input_f.readline().split(" -:")[1]).strip()
+                print("Password: "    + self.game_password)
+                self.game_agent_ID  = str(read_input_f.readline().split(" -:")[1]).strip()
+                print("Agent ID: "    + self.game_agent_ID)
+                self.game_money     = str(read_input_f.readline().split(" -:")[1]).strip()
+                print("Credits: "     + self.game_money)
+                self.game_envir     = str(read_input_f.readline().split(" -:")[1]).strip()
+                print("Environment: " + self.game_envir)
+                self.server_account  = str(read_input_f.readline().split(" -:")[1]).strip()
+                print("Server account: " + self.server_account)
                 self.server_password = str(read_input_f.readline().split(" -:")[1]).strip()
-                print("後台密碼 : " + self.server_password)
-                
+                print("Server password: " + self.server_password)
+
                 type_input = ""
-                #此處為開關，若將input打開，使用者可以自行輸入(也就是把下面一行註解關閉)，若想要使用讀取檔案方式(user_change)，則預設為type_input = ""即可
-                #type_input = input("請問輸入是否要從設定檔中讀取? (N/n:不要 其他:要) : ")
-                if type_input.strip() == "n" or type_input.strip() == "N" : 
-                    game_account_in = input("請輸入<<遊戲帳號>> 若為空白則從文字檔中讀取 :")
+                # set type_input = "n" to switch to interactive input mode
+                if type_input.strip() == "n" or type_input.strip() == "N" :
+                    game_account_in = input("Account (blank = use file): ")
                     if game_account_in.strip() != "":
                         self.game_account = game_account_in
-                    game_password_in = input("請輸入<<遊戲密碼>> 若為空白則從文字檔中讀取 :")
+                    game_password_in = input("Password (blank = use file): ")
                     if game_password_in.strip() != "":
                         self.game_password = game_password_in
-                    game_agent_ID_in = input("請輸入<<遊戲代理ID>> 若為空白則從文字檔中讀取 :")
+                    game_agent_ID_in = input("Agent ID (blank = use file): ")
                     if game_agent_ID_in.strip() != "":
                         self.game_agent_ID = game_agent_ID_in
-                    game_money_in = input("請輸入<<加分分數>> 若為空白則從文字檔中讀取 :")
+                    game_money_in = input("Credits (blank = use file): ")
                     if game_money_in.strip() != "":
                         self.game_money = game_money_in
-                    game_envir_in = input("請輸入<<遊戲環境>> 若為空白則從文字檔中讀取 :")
+                    game_envir_in = input("Environment (blank = use file): ")
                     if game_envir_in.strip() != "":
                         self.game_envir = game_envir_in
-                    
-                    server_account_in = input("請輸入<<後台帳號>> 若為空白則從文字檔中讀取 :")
+                    server_account_in = input("Server account (blank = use file): ")
                     if server_account_in.strip() != "":
                         self.server_account = server_account_in
-                    server_password_in = input("請輸入<<後台密碼>> 若為空白則從文字檔中讀取 :")
+                    server_password_in = input("Server password (blank = use file): ")
                     if server_password_in.strip() != "":
                         self.server_password = server_password_in
                         
     def change_by_game(self, in_game_name, player_num, round_count, suit_order = None, list_len = 3):
-        # 遊玩過程中不會改變 但會隨著不同遊戲改變
-        
-        # 給 辨識的py 傳遞預設值
         identify_for_import.game_name = in_game_name
 
-        # 檢查 user_change 底下是否有 此專案的資料夾
         user_game_pic_parent = self.user_change_path / "game_pic"
         if not user_game_pic_parent.exists():
             user_game_pic_parent.mkdir()
 
-        # 使用 pathlib 處理路徑
         self.game_pic_path = self.user_change_path / "game_pic" / f"{in_game_name}_pic"
         if not self.game_pic_path.exists():
             self.game_pic_path.mkdir()
 
-        self.cut_pic_path = str(self.game_pic_path / "training_data") + "\\" ##@ TS打算進行辨識的訓練資料，待確認 #cut_pic_data cover=False 圖片放置地點
+        self.cut_pic_path = str(self.game_pic_path / "training_data") + "\\"
 
-        # 檢查 storage 底下是否有 此專案的資料夾
         training_data_path = self.game_pic_path / "training_data"
-        if not training_data_path.exists():  #判斷有沒有定義的資料夾
-            training_data_path.mkdir() #如果沒有就自動生成
+        if not training_data_path.exists():
+            training_data_path.mkdir()
 
-        # 參數(使用者設定) (xxx_Main 裡面設定)
-        # player_num_in, player_num 這個遊戲通常有幾個玩家(應該要截幾張圖)
         self.game_name = in_game_name
-        self.player_num = player_num #列出該遊戲最多可以參與的人數
-        self.list_len = list_len #需要開啟幾個分支，此處預設值為3，用以保證2個若有衝突，還有一個buffer
+        self.player_num = player_num
+        self.list_len = list_len
         try :
-            self.class_to_str_list = Data.name_list[in_game_name] ##@ 用來辨識回來的label轉成Str資料型態(當前遊戲)
-        except KeyError : 
-            print("提醒!!!"+in_game_name+"在Data.py中尚未有資料")
+            self.class_to_str_list = Data.name_list[in_game_name]
+        except KeyError :
+            print("Warning: " + in_game_name + " not found in Data.py")
             self.class_to_str_list = {}
         
-        # 決定花色順序
+        # decide card suit order
         # Card.change_suit_order(suit_order)
+
         self.reset_var(round_count)
 
-    # 把程式中改變的參數 設定為預設值
-    def reset_var(self, round_count) :  # Class Glo_var內上方為初始化一次的多個變數，reset_var內為可能會需要"重複初始化"，因此單獨紀錄於一個func內，已便可重複呼叫
-        self.client_data = [] # 定義存放主線與支線資料位置(存放所有遊戲過程中產生的結果資料)  #要注意的是 玩家的key 是base 0的 EX:(4個玩家 0-3) 但後台是(1-4)
-        self.begin_time = [] #初始化遊戲起始時間(後台輸贏報表搜尋的起始時間)
-        self.end_time = [] #初始化遊戲結束時間(後台輸贏報表搜尋的結束時間)
-        for x in range(self.list_len) : #創造三個盤子，可定義為三個盤子中，一回合只會使用一個盤子(EX:早餐、午餐、晚餐) (在該回合產生出來的資料都應該被放進client data內)
-            self.client_data.append({}) #舉例TOOL_MAIN設定1個thread(list_len=3，3的目的為buffer用，原則上使用2個)，此時這邊執行完成後，client_data = [{},{},{}]
-            for y in range(self.player_num) : 
-                # passs = self.client_data[x]
-                # passs[y] = {}
-                self.client_data[x][y] = {} 
-                #舉例FKNN_MAIN設定6個玩家(player_num)，此時這邊執行完成後 
-                #client_data = [{0: {}, 1: {}, 2: {}, 3: {}, 4: {}, 5: {}}, {0: {}, 1: {}, 2: {}, 3: {}, 4: {}, 5: {}}, {0: {}, 1: {}, 2: {}, 3: {}, 4: {}, 5: {}}]
+    # reset_var holds variables that may need to be re-initialized mid-run (e.g. on error recovery)
+    def reset_var(self, round_count) :
+        self.client_data = []  # stores all recognition results per round per player
+                               # structure: client_data[round % list_len][player_index][key]
+        self.begin_time  = []  # round start timestamps (for backend report search)
+        self.end_time    = []  # round end timestamps
+        for x in range(self.list_len) :  # list_len slots act as a ring buffer (default 3)
+            self.client_data.append({})
+            for y in range(self.player_num) :
+                self.client_data[x][y] = {}
+            self.begin_time.append(None)
+            self.end_time.append(None)
 
-            self.begin_time.append(None) #[None, None, None]
-            self.end_time.append(None) #[None, None, None]
-        # print(self.client_data)
-    
-        self.fail_playing = False # 遊戲中有遇到錯誤狀況時，該參數會被設定為True，此時會將程式內所有項目(包參數、driver、遊戲狀態)，此時遊戲回到大廳，全初始化
-        self.server_using = False # 確認是否有人正在使用後台，沒有結束
-        self.first_time_play = True # 判斷是否為第一次進入遊戲
-        self.reject_invite = False # 判斷是否曾經拒絕過邀請函
-        self.round_count = round_count-1 # round_count 是遊戲結束之前用的
-        self.round_count_for_pipe = round_count-1 # round_count_for_pipe 是遊戲結束之後用的
+        self.fail_playing      = False   # set True on error; triggers full restart
+        self.server_using      = False   # True while a backend-crawl thread is running
+        self.first_time_play   = True
+        self.reject_invite     = False
+        self.round_count          = round_count - 1  # used during a round
+        self.round_count_for_pipe = round_count - 1  # used after a round ends
 
-    # 設定timeout計時起始點
-    # 當 val = None 時 會設定為當下時間
-    def s_record_time(self, val = None) : 
+    # set the timeout reference point; call at the start of each test step
+    def set_record_time(self, val = None) :
         if val == None :
-            self.record_time = datetime.datetime.now() # 如果時間變數預設值為空值，則取用當前時間使用
-            # print("重整timeout")
+            self.record_time = datetime.datetime.now()
         else :
-            self.record_time = val # 如果時間變數已有定義，則取用當前值使用
+            self.record_time = val
 
-# open chrome for game ############################################################################################################################################################################
-# 打開遊戲網頁到平台登入頁面
 def open_game_web() :
     global glo_var
     print("open browser")
     options = webdriver.ChromeOptions()
-    # options.headless = True #Headless Browser是没有沒有圖形介面(GUI)的web瀏覽視窗
+    # options.headless = True # A headless browser is a web browser without a graphical user interface (GUI).
     options.add_argument("--window-size=1960,1080")
     options.add_argument('disable-infobars')
+
+    # Configure browser settings to hide the 'controlled by automated software' notification.
     # options.add_experimental_option("excludeSwitches", ["enable-automation"])
     # options.add_experimental_option("useAutomationExtension", False)
+
     prefs = {"":""}
     prefs["credentials_enable_service"] = False
     prefs["profile.password_manager_enabled"] = False
     options.add_experimental_option("prefs", prefs)
-    # 設定瀏覽器設定值為不出現此瀏覽器正透過自動化視窗控制
     service = Service(ChromeDriverManager().install())
     glo_var.game_driver = webdriver.Chrome(service=service, options=options)
 
-    # 記得這邊一定要用 pyautogui.click
-    # 網頁置頂
-    pyautogui.click(21, 21) #點擊溜覽器視窗頁面，確保置頂
+    pyautogui.click(30, 30) # click the browser window, make it top
     time.sleep(1)
     full_screen()
     # open_book_mark()
@@ -279,16 +235,13 @@ def open_game_web() :
 
     glo_var.actionChains = ActionChains(glo_var.game_driver)
 
-    # 現在有哪些分頁
     # main_windows = glo_var.game_driver.current_window_handle
     # print(main_windows) 
     # all_windows = glo_var.game_driver.window_handles
     # print(all_windows)
 
-# open game to desktop ############################################################################################################################################################################
-# 使用 glo_var讀取的資料 登入一部的登入平台
 def login_plat() :
-    global glo_var #將全域變數導入func，以便後續取用
+    global glo_var
     print("login platform")
     if Game_envi == "CQ9" :
         glo_var.game_driver.get("https://h5bt.cqgame.games/h5/BT02/?language=zh-cn&?token=guest")
@@ -297,21 +250,19 @@ def login_plat() :
     else :
         raise Exception(f"Game_envi {Game_envi} doesn't exist!")
 
-# 這個是因為有時候登入平台會開新分頁 所以會有這個
-# 如果會的話在畫面讀取完成後要執行這個才可以用selenium操控
 def switch_to_game_web():
+    # call this after a page opens a new tab, so selenium can control it
     global glo_var
     print("switching web page")
     all_windows = glo_var.game_driver.window_handles
-    # 方法1
+    # < Method 1 >
     # for handle in all_windows:
     #     if handle != main_windows:
     #         driver.switch_to.window(handle)
-    # 方法2
-    # 切換到最後一個分頁
+    # < Method 2 > switch to the last tab
     glo_var.game_driver.switch_to.window(all_windows[-1])
 
-    # pyautogui.click(21, 21) #點擊溜覽器視窗頁面，確保置頂
+    # pyautogui.click(21, 21)
 
 def full_screen() :
     global glo_var
@@ -326,32 +277,20 @@ def full_screen() :
 def open_book_mark():
     pyautogui.hotkey("ctrl","shift","b")
 
-# 記錄錯誤時間 並輸出到 user_change//error.txt
-# round_num 用來記錄是哪一回合出錯
-# why 是有可能的錯誤原因
-def report_error(round_num, why = None) : 
+# write error info to error.txt
+def report_error(round_num, why = None) :
     global glo_var
-    glo_var.error_f.write("error round : " + str(round_num) +"\n") #寫入錯誤格式與內容
-    glo_var.error_f.write("error time : " + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')+"\n") #寫入錯誤格式與內容
+    glo_var.error_f.write("error round : " + str(round_num) + "\n")
+    glo_var.error_f.write("error time : " + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "\n")
     if why != None :
-        glo_var.error_f.write(why+"\n") #如果原因不是空值，就將原因記錄進LOG
-    glo_var.error_f.flush() #將寫入內容進行一次儲存，當程式還在運作時，已經寫入的error可以重新讀取檔案開啟瀏覽
+        glo_var.error_f.write(why + "\n")
+    glo_var.error_f.flush()
 
-# 從 read_dst_f 讀取一行 並把此行 圖片位置座標回傳
-# read_dst_f : 是讀寫頭 並不是檔名 所以做完讀寫頭的位置是會改變的
-def read_pos(read_dst_f) : #將要讀寫的座標進行寫並處理資料，將頭尾的字符去掉，且把逗號分離
-    read_in = read_dst_f.readline()
-    read_in = read_in.strip()
-    read_in = read_in.split(", ")
-
-    # if screen_num == 0 :
-    #     position = [int(read_in[0]) - 1920,int(read_in[1]),int(read_in[2]),int(read_in[3])]   # 待測試
-    # elif screen_num == 1:
-    position = [int(read_in[0])       ,int(read_in[1]),int(read_in[2]),int(read_in[3])] #透過int型態儲存為list
-    # elif screen_num == 2:
-    #     position = [int(read_in[0]) + 1920,int(read_in[1]),int(read_in[2]),int(read_in[3])]   # 待測試
-    
-    return position #回傳資料置回傳資料至read_pos，使用完成後該參數即消失
+# read one line from a file handle and return it as a [x, y, w, h] int list
+def read_pos(read_dst_f) :
+    read_in = read_dst_f.readline().strip().split(", ")
+    position = [int(read_in[0]), int(read_in[1]), int(read_in[2]), int(read_in[3])]
+    return position
 
 def check_valid_region(pos, region):
     x,y = pos
@@ -361,34 +300,29 @@ def check_valid_region(pos, region):
     return True
     
 
-# 點擊位置 pos EX: (X,Y)
-# stri 是點擊時想輸出的字串
-# dosleep 點擊完後 要等幾秒 才進續進行
-# long_click 帶入數字 代表要點擊XX秒才放開
-# move_click 帶入數字 滑鼠會先移動到上面 等待XX秒 後才進行點擊
-def click(pos, stri = None, dosleep = 0.3, long_click = None, move_click = None, limit_region = None) : 
-    #呼叫全域變數
-    global glo_var 
+# click a screen position
+# pos          : (x, y) in screen coordinates
+# stri         : label to print in the log
+# dosleep      : wait time (seconds) after the click
+# long_click   : if set, hold the mouse down for this many seconds before releasing
+# move_click   : if set, move to the position and wait this many seconds before clicking
+# limit_region : if set, only click if pos is inside/outside the defined region
+def click(pos, stri = None, dosleep = 0.3, long_click = None, move_click = None, limit_region = None) :
+    global glo_var
     global use_sel
-    
-    x = pos[0] # 定義pos內x的位置
-    y = pos[1] # 定義pos內y的位置
-    
-    if use_sel == 0 : #使用pyautogui
+
+    x = pos[0]
+    y = pos[1]
+
+    if use_sel == 0 :
         if limit_region != None :
             if not check_valid_region((x,y), limit_region) :
                 return False
-        
+
         if stri != None:
             print_to_output(stri + " click_pos : ("+str(x)+","+str(y)+")")
         else :
             print_to_output("click_pos : ("+str(x)+","+str(y)+")")
-        
-        # 拖曳的code
-        # pyautogui.mouseDown(x, y) #點下滑數左鍵(不放開)
-        # pyautogui.moveTo(x+1000, y+500, 1.5)  #向左拖曳
-        # time.sleep(0.5) 
-        # pyautogui.mouseUp() #放開滑鼠左鍵
 
         if move_click != None :
             pyautogui.moveTo(x, y)
@@ -403,71 +337,49 @@ def click(pos, stri = None, dosleep = 0.3, long_click = None, move_click = None,
             pyautogui.mouseUp()
             pyautogui.moveTo(952, 21)
 
-    else : #使用selenium
-        # y = y - 130
-
-        # x = (x/strech_size/5)*4 #透過比例變化進行
-        # y = (y/strech_size/5)*4 #透過比例變化進行
-
+    else :
         if stri != None :
             print_to_output(stri+" click_pos : ("+str(x)+","+str(y)+")")
         else :
             print_to_output("click_pos : ("+str(x)+","+str(y)+")")
 
         ActionChains(glo_var.game_driver).move_by_offset(x, y).click().move_by_offset(-x, -y).perform()
-
-        dosleep = dosleep-0.7
+        dosleep = dosleep - 0.7
 
     if dosleep > 0:
         time.sleep(dosleep)
 
     return True
 
-# 點擊最後一張 compare_sim 找到的圖片的位置的正中間
-# stri : 是點擊時想輸出的字串
-# dosleep 點擊完後 要等幾秒 才進續進行
-# long_click 帶入數字 代表要點擊XX秒才放開
-# move_click 帶入數字 滑鼠會先移動到上面 等待XX秒 後才進行點擊
-def click_mid( stri = "", dosleep = 0.3, long_click = None, move_click = None) : 
+# click the center of the last image found by compare_sim
+# also resets the timeout timer — marks the end of the current state and start of the next
+def click_mid(stri = "", dosleep = 0.3, long_click = None, move_click = None) :
     global glo_var
     click(glo_var.mid_pos, "click " + stri, dosleep, long_click, move_click)
+    glo_var.set_record_time()
 
-    glo_var.s_record_time() # 紀錄最後一個點擊後，用來記錄當前狀態的結束時間，同時也是下一個狀態的起始時間(可透過FKNN有無牛回合進行回憶→點了四次，最後一次為主)
-
-# 在 compare_sim 裡面用的 用來記錄什麼東西 在哪個位置找到 
-# mid_pos_file 輸出的檔案位置
-# mid_pos : 寫入檔案的圖片位置
-# (原本要用來紀錄有可能出現的位置 不過現在這個沒什麼用)
-# def write_mid_pos(mid_pos_file, mid_pos) : 
-#     with open(mid_pos_file, "w") as mid_pos_file_f : 
-#         mid_pos_file_f.write(str(mid_pos)[1:-1])
-#         mid_pos_file_f.flush()
-
-# 向左向右滑動
-# 點擊不放 移動滑鼠 放開
-# (用來滑動大廳頁面)
-# direction 滑動方向 
-# times 滑動多少次
-def mouse_drag(direction, times) : #透過direction進行方向定義
+# drag the screen left or right (used to scroll the lobby page)
+# direction : "left" or "right"
+# times     : how many times to drag
+# note: url-mode always uses pyautogui — selenium drag causes issues on url-type games
+def mouse_drag(direction, times) :
     global glo_var
-    if use_sel == 0 or glo_var.is_url: #使用pyautogui  #url的滑動如果用 selenium 會出問題
+    if use_sel == 0 or glo_var.is_url:
         if direction == "left" :
             for x in range(times) :
-                pyautogui.mouseDown(400, 600) #點下滑數左鍵(不放開)
-                pyautogui.moveTo(1500, 600, 1.5)  #向左拖曳
-                time.sleep(0.5) 
-                pyautogui.mouseUp() #放開滑鼠左鍵
+                pyautogui.mouseDown(400, 600)
+                pyautogui.moveTo(1500, 600, 1.5)
+                time.sleep(0.5)
+                pyautogui.mouseUp()
                 time.sleep(0.5)
         elif direction == "right" :
             for x in range(times) :
                 pyautogui.mouseDown(1500, 600)
-                pyautogui.moveTo(400, 600, 1.5) #向右拖曳
+                pyautogui.moveTo(400, 600, 1.5)
                 time.sleep(0.4)
                 pyautogui.mouseUp()
                 time.sleep(0.2)
-
         pyautogui.moveTo(952, 21)
-
     else :
         if direction == "left":
             for x in range(times) :
@@ -476,74 +388,41 @@ def mouse_drag(direction, times) : #透過direction進行方向定義
                     ActionChains(glo_var.game_driver).move_by_offset(55, 0).perform()
                 ActionChains(glo_var.game_driver).release().perform()
                 ActionChains(glo_var.game_driver).move_by_offset(-1500, -600).perform()
-        elif direction == "right" : 
+        elif direction == "right" :
             for x in range(times) :
                 ActionChains(glo_var.game_driver).move_by_offset(1500, 600).click_and_hold().perform()
                 for y in range(20):
                     ActionChains(glo_var.game_driver).move_by_offset(-55, 0).perform()
-                # print("第一次sleep")
+                # print("first stop")
                 # time.sleep(1)
                 ActionChains(glo_var.game_driver).move_by_offset(0, 0).perform()
                 ActionChains(glo_var.game_driver).release().perform()
                 ActionChains(glo_var.game_driver).move_by_offset(0, 0).perform()
-                # print("第二次sleep")
+                # print("second stop")
                 # time.sleep(1)
                 ActionChains(glo_var.game_driver).move_by_offset(-400, -600).perform()
-                # print("第三次sleep")
+                # print("third stop")
                 # time.sleep(1)
 
-# 這個動作可以取消掉第一次可以向右滑的提示 就算沒有 也不會動到畫面中任何東西的位置(因為有滑回原點)
-def cancel_first_time() : #
-    global glo_var
-    print("canceling first time sliding hint")
-    # 滑掉第一次的 提示 (點下去 向左滑 向右滑(滑回點下去的位置) 放開)
-    if use_sel == 0 : #使用pyautogui
-        pyautogui.mouseDown(1500, 600)
-        pyautogui.moveTo(400, 600, 1.2)
-        pyautogui.moveTo(1500, 600, 1.2)
-        time.sleep(0.5)
-        pyautogui.mouseUp()
-        time.sleep(0.5)
-        pyautogui.moveTo(952, 21)
-    else :
-        ActionChains(glo_var.game_driver).move_by_offset(1500, 600).click_and_hold().perform()
-        for y in range(20):
-            ActionChains(glo_var.game_driver).move_by_offset(-55, 0).perform()
-        for y in range(20):
-            ActionChains(glo_var.game_driver).move_by_offset(55, 0).perform()
-        ActionChains(glo_var.game_driver).release().perform()
-        ActionChains(glo_var.game_driver).move_by_offset(-1500, -600).perform()
-    print("end canceling hint")
-
-# # 螢幕截圖 用 win內建的 function 速度比較快 但不知道為什麼會出問題
+# Unused alternative: Win32 screen capture (faster but unstable — kept for reference)
 # import win32gui, win32ui, win32con, win32api
 # class Cap_var() :
 #     def __init__(self) :
-#         hwnd = 0 # 視窗的編號，0號表示當前活躍視窗
-#         # 根據視窗控制代碼獲取視窗的裝置上下文DC（Divice Context）
-#         hwndDC = win32gui.GetWindowDC(hwnd)
-#         # 根據視窗的DC獲取mfcDC
+#         hwndDC = win32gui.GetWindowDC(0)
 #         self.mfcDC = win32ui.CreateDCFromHandle(hwndDC)
-#         # mfcDC建立可相容的DC
 #         self.saveDC = self.mfcDC.CreateCompatibleDC()
-#         # 建立bigmap準備儲存圖片
 #         self.saveBitMap = win32ui.CreateBitmap()
-
 # cap_var = Cap_var()
 # def window_capture(filename, region = (0,0,1919,1079)) :
 #     global cap_var
-#     w = region[2]
-#     h = region[3]
-#     # 為bitmap開闢空間
+#     w, h = region[2], region[3]
 #     cap_var.saveBitMap.CreateCompatibleBitmap(cap_var.mfcDC, w, h)
-#     # 高度saveDC，將截圖儲存到saveBitmap中
 #     cap_var.saveDC.SelectObject(cap_var.saveBitMap)
-#     # 擷取從左上角（0，0）長寬為（w，h）的圖片
 #     cap_var.saveDC.BitBlt((0, 0), (w, h), cap_var.mfcDC, (region[0], region[1]), win32con.SRCCOPY)
 #     cap_var.saveBitMap.SaveBitmapFile(cap_var.saveDC, filename)
 
-# To replace pyautogui.locateCenterOnScreen
-    # Since version of PyAutoGUI 0.9.54 doesn't compatible with OpenCV 4.11
+# Replacement for pyautogui.locateCenterOnScreen
+# (PyAutoGUI 0.9.54 is not compatible with OpenCV 4.11)
 def read_template(pic_file) :
     pic_file = str(pic_file)
     return cv2.imread(pic_file)
@@ -561,7 +440,7 @@ def locateCenterOnScreen(template_pic, region = None, save_loc = None):
     screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
 
     # Load and Match template
-    # cv2.compareHist(img_cut, img, 0) # 其他種比較方法
+    # cv2.compareHist(img_cut, img, 0) # This is another method to match template
     result = cv2.matchTemplate(screenshot, template_pic, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, max_loc = cv2.minMaxLoc(result)
     
@@ -574,322 +453,214 @@ def locateCenterOnScreen(template_pic, region = None, save_loc = None):
         center_y += region[1]
     return max_val, (center_x, center_y)
 
-# 這個是Main在用的
-# 1. 與之前儲存的圖片比較相似度 如果圖片相似度 > confidence(預設0.9) 則回傳圖片相似度
-# 2. 如果 < confidence 先找是否有移位 如果有找到會回傳 0.9
-# 3. 如果都找不到則回傳0
-# file_place 檔案位置，帶入名稱為檔名即可("continue")
-# className 要寫入html圖片的檔案名稱
-# confidence 是 sim 要大於多少才會回傳sim
-# precise 若為True : 則不會進2. False反之  (如果東西是固定位置 precise就應該要 = True)
-# before 截圖時間點 True: 先截圖再比對  False: 找到之後再截圖 None: 本次比較不截圖
-# 這裡會出現一個問題 就是我希望比較的時候截圖 這樣不管在哪裡中斷 都會有中斷時的畫面(在report) 但截圖非常的花時間 所以要不要在錯誤處理時在截圖就好?
-# 而且基本上截圖完之後又會馬上檢查是否有timeout 所以可以說是基本上是同時截圖的
-# 而且現在還有一個問題是 因為timeout所以 截的圖不一定是我們想要的(通常只有正常的情況才會截到我想要的圖)
-# lobby: 會從 C:\Thomas_test\models\research\object_detection\game_pic\lobby_pic 找圖跟位置
-# 這裡面會自動截要放到html的圖
-# confidence > 0.9  且 precise = True  ==   回傳值要大於某個數字   ==   要在精準的位置"用很嚴格的標準"找到才算有找到
-# confidence > 0.9  且 precise = False ==   如果在精準的位置"用很嚴格的標準"(confidence)找不到，還可以用全螢幕找找看
-# confidence <= 0.9 且 precise = True  ==   如果在精準的位置"用不嚴格的標準"找不到，也不要在全螢幕找了
-def compare_sim(file_place, className, confidence = 0.9, precise = False, before = False, lobby = False) : 
+
+def compare_sim(file_place, className, confidence = 0.9, precise = False, before = False, lobby = False) :
+    '''
+    # Main logic for image comparison and state detection:
+    # 1. Compare the current screen with pre-saved images. If similarity > confidence (default 0.9), return the similarity score.
+    # 2. If similarity < confidence, check for pixel shifts or offset. If found, return 0.9.
+    # 3. If no match is found after both steps, return 0.
+    # 
+    # Parameters:
+    # - file_place: Target file path; pass the filename only (e.g., "continue").
+    # - className: Filename for the image to be embedded in the HTML report.
+    # - confidence: Threshold for similarity; returns score only if sim > confidence.
+    # - precise: If True, skips step 2 (offset check). Use True for fixed-position elements.
+    # - before: Screenshot timing. True: Before comparison; False: After finding target; None: Skip screenshot.
+    #
+    # Optimization Note:
+    # There is a trade-off here: taking screenshots at every comparison ensures we have the "last state" for 
+    # reports during a crash, but it is time-consuming. Should we move screenshot logic solely to the error handler?
+    # Also, screenshots often coincide with timeout checks, but due to latency, the captured image 
+    # might not reflect the exact moment of failure (it usually only captures the desired state in normal runs).
+    # 
+    # Source: Images are pulled from the lobby directory: 
+    # C:\Thomas_test\models\research\object_detection\game_pic\lobby_pic
+    #
+    # Logic Matrix:
+    # - confidence > 0.9 & precise = True  => Strict match at a specific location.
+    # - confidence > 0.9 & precise = False => Strict match at location; if failed, perform a full-screen search.
+    # - confidence <= 0.9 & precise = True  => Relaxed match at location; do not attempt full-screen search.
+    '''
     global glo_var
 
     report_screenshot_path = str(testpic_path / f'{className}_{glo_var.file_create_time}.png')
-    # if file_place == "", which means we just want to do screenshot for the report
-    if file_place == "" : 
+    # if file_place == "", it means we just want to take screenshot for the report
+    if file_place == "" :
         pyautogui.screenshot(report_screenshot_path)
         return None
 
-    # 使用 pathlib 處理路徑
     if not lobby :
-        exact_pos_file = glo_var.game_pic_path / f"{file_place}.txt" # FKNN_pic內的座標位置檔案，是自己先創建確認好的，為比對位置標準
-        pic_file = glo_var.game_pic_path / f"{file_place}.png" # FKNN_pic內的圖片檔案(EX:湊一倍，繼續遊戲)，是自己先創建確認好的，可以拿來判斷狀態，也可以拿來進行點擊
-        region_file = glo_var.game_pic_path / f"{file_place}_region.txt"
-    # 當pos_file比對失敗時，可透過定義一個範圍，重新再找一次(若沒有此檔案，預設為找全部畫面，但避免找到類似的發生誤導，因此可限定區域)，此參數也是由使用者決定是否提供
-    # 如果是要找共同的圖片 就把位置改成lobby 圖都放在這底下
+        exact_pos_file = glo_var.game_pic_path / f"{file_place}.txt"
+        pic_file       = glo_var.game_pic_path / f"{file_place}.png"
+        region_file    = glo_var.game_pic_path / f"{file_place}_region.txt"
     else :
-        lobby_path = glo_var.game_pic_path.parent / "lobby_pic"
+        lobby_path     = glo_var.game_pic_path.parent / "lobby_pic"
         exact_pos_file = lobby_path / f"{file_place}.txt"
-        pic_file = lobby_path / f"{file_place}.png"
-        region_file = lobby_path / f"{file_place}_region.txt"
-    
-    # 開啟以前圖片
-    template_img = read_template(pic_file)
-    # still keep it for easier to compare the template image and the screenshot
-    debug_screen_pic = None # if want to save energy, set it to None
+        pic_file       = lobby_path / f"{file_place}.png"
+        region_file    = lobby_path / f"{file_place}_region.txt"
+
+    template_img     = read_template(pic_file)
     debug_screen_pic = str(testpic_path / f'{glo_var.file_create_time}_{file_place}_detail.png')
-    if before == True: #在下一個狀態要進行動作之前先進行截圖(else:在做完動作後再進行截圖)→兩者差異為可能因為時間差間接影響實際截圖出來的結果，可透過實際執行進行驗證
+
+    if before == True:
         pyautogui.screenshot(report_screenshot_path)
 
     sim = 0
     region_sim = 0
-    with open(exact_pos_file, "r") as read_dst_f : 
+    with open(exact_pos_file, "r") as read_dst_f :
         exact_region = read_pos(read_dst_f)
-        sim, glo_var.mid_pos = locateCenterOnScreen(template_img, region = exact_region, save_loc = debug_screen_pic)
-        print("比較"+file_place+" , sim : "+str(sim))
+        sim, glo_var.mid_pos = locateCenterOnScreen(template_img, region=exact_region, save_loc=debug_screen_pic)
+        print("compare " + file_place + " , sim: " + str(sim))
 
-        if before == False: #else:在做完動作後再進行截圖
+        if before == False:
             pyautogui.screenshot(report_screenshot_path)
 
         if sim > confidence :
             return sim
 
-    if confidence <= 0.91 and precise == False: 
-        # if didn't find it at particular position, find it in screen
+    if confidence <= 0.91 and precise == False:
         find_region = None
-        if region_file.exists() : # 確認region_file檔案是否存在(代表是否要用region)
-            with open(region_file, "r") as region_dst_f : 
+        if region_file.exists() :
+            with open(region_file, "r") as region_dst_f :
                 find_region = read_pos(region_dst_f)
 
-        region_sim, glo_var.mid_pos = locateCenterOnScreen(template_img, region = find_region)
-        if before == False : #若第二次判斷沒有return，則會進行此截圖，複寫第二次的結果
+        region_sim, glo_var.mid_pos = locateCenterOnScreen(template_img, region=find_region)
+        if before == False :
             pyautogui.screenshot(report_screenshot_path)
 
         if region_sim > confidence :
-            print("< " + file_place + " > cannot find at particular position, but find in screen") #意味著如果透過上一動的方式可以找到座標，那就是畫面中有能找到這個座標位置
-            return 0.9 #因此回傳0.9，但表示圖片有位移，透過0.9表示
+            print("< " + file_place + " > not found at exact position, found in full screen")
+            return 0.9
 
     if region_sim < sim :
         print("sim :", sim, "region_sim :", region_sim)
         print("sometimes sim is better than region_sim")
     return max(sim, region_sim)
 
-# 一次比較多個圖片與其對應到的位置 若某個圖片對應的位置 相似度高就會回傳
-# 但 它又扣到 是假設 pos 一定很多個
-# def compare_sim_groupe(file_place,x,read_dst_f, return_sim = False) :
-#     global mid_pos
-
-#     pic_file = file_absolute_pos + file_place + "\\" + str(x) + ".png"
-
-#     position = read_pos(read_dst_f)
-#     # print(position)
-#     window_capture(file_absolute_pos + "pass.png", region=position)
-    
-#     img_cut = cv2.imread(file_absolute_pos + "pass.png")
-#     img_cut = cv2.calcHist([img_cut], [0], None, [256], [0, 256])
-#     img_cut = cv2.normalize(img_cut, img_cut, 0, 1, cv2.NORM_MINMAX, -1)
-    
-#     img     = cv2.imread(pic_file)
-#     img     = cv2.calcHist([img], [0], None, [256], [0, 256]) 
-#     img     = cv2.normalize(img, img, 0, 1, cv2.NORM_MINMAX, -1) 
-
-#     sim = cv2.compareHist(img_cut, img, 0)
-
-#     if return_sim :
-#         return sim
-
-#     # 不一樣代表是數字
-#     if sim < 0.97 :
-#         mid_pos = [position[0]+(position[2]/2),position[1]+(position[3]/2)]
-#         return position
-
-#     return None
-
-# def just_compare_sim(position, file_place):
-#     global glo_var
-    
-#     if os.path.isfile(file_place) : 
-#         # print("file_place : "+str(file_place))
-#         pic_file = file_place
-
-#         window_capture(glo_var.file_absolute_pos + "pass.png", region=position)
-        
-#         img_cut = cv2.imread(glo_var.file_absolute_pos + "pass.png")
-#         img_cut = cv2.calcHist([img_cut], [0], None, [256], [0, 256])
-#         img_cut = cv2.normalize(img_cut, img_cut, 0, 1, cv2.NORM_MINMAX, -1)
-        
-#         img     = cv2.imread(pic_file)
-#         img     = cv2.calcHist([img], [0], None, [256], [0, 256])
-#         img     = cv2.normalize(img, img, 0, 1, cv2.NORM_MINMAX, -1) 
-
-#         sim = cv2.compareHist(img_cut, img, 0)
-
-#         return sim
-#     else :
-#         return -1
-    
-# # 在某個資料夾中找出與此圖最相似的圖片並回傳
-# def find_most_sim(file_place, position, num = None) : 
-#     # 把全部符合 file_place + _ + x 的檔案抓出來 回傳最高的 similar
-#     max_sim = 0
-#     max_num = -1
-
-#     if num == None : 
-#         targetPattern = file_place+ "_*.png"
-#         all_file = glob.glob(targetPattern)
-#         for this_png in all_file :
-#             pass_sim = just_compare_sim(position, this_png)
-#             # print(this_png + " 的 sim : " + str(pass_sim))
-#             if pass_sim > max_sim :
-#                 max_sim = pass_sim
-#         return (max_sim, this_png)
-
-#     else :
-#         for x in range(num+1):
-#             pass_sim = just_compare_sim(position, file_place + "_" + str(x)+ ".png")
-#             # print(str(x)+" 的 sim : "+str(pass_sim))
-#             if pass_sim > max_sim :
-#                 max_sim = pass_sim
-#                 max_num = x
-#         return (max_sim, max_num)
-
-# 輸出字串到3個位置
-# 1. cmd 2. html 3. user_change//cmd_output.txt 
-def print_to_output(stri) : 
+# Print to console, HTML report, and cmd_output.txt log
+def print_to_output(stri) :
     global glo_var
     print(stri)
-    HTMLTestRun.p_to_html(str(stri) + "\n") #印html內
+    HTMLTestRun.p_to_html(str(stri) + "\n")
     glo_var.cmd_output_f.write(str(stri) + "\n")
     glo_var.cmd_output_f.flush()
 
-# 透過讀取的位置截圖相應的位置
-# location 先透過FKNN_pic手動新增要辨識的項目位置與座標，資料夾檔名為location(自己命名)，裡面的txt檔名固定為pos.txt，裡面儲存的座標位置為要截圖的位置，截圖完成後會儲存在user_change的各自location資料夾內
-# location資料夾數量應該要與user_change內的資料夾數量一致
-# num 要讀取圖片位置的檔案裡面有幾個位置(有幾組座標就是會是多少)
-# round_count 跟 現在第幾回合有關
-# cover False : 會在檔名後面加上時間 (通常用來截要用來training的圖片) True : 表示已經不需要加入訓練資料中，因此當下截圖比對完成後就不另外儲存
-# cut_new 目前廢棄使用
-# pic_count 如果同一個位置要截很多張圖片 但又不想被覆蓋就加上數字(其實也可以是文字)
 def cut_pic_data(location, num, round_count, cover = True, cut_new = False, pic_count = None, write_region = False, comp = False):
-    # location 格式 fin_card_num\\
+    '''
+    # Captures screenshots of specific regions based on predefined coordinates.
+    # 
+    # Parameters & Logic:
+    # - location: The target item for recognition. Locations and coordinates are manually added via FKNN_pic. 
+    #             The folder name is defined by 'location', containing a mandatory 'pos.txt' that stores 
+    #             the specific coordinates for cropping. Captured images are saved in their respective 
+    #             subfolders under 'user_change'.
+    #             Note: The number of folders in the 'location' directory must match the folder count in 'user_change'.
+    # - num: The number of coordinate sets (regions) to be read from the position file.
+    # - round_count: Syncs the capture process with the current execution round.
+    # - cover: 
+    #     - False: Appends a timestamp to the filename (typically used for collecting training data).
+    #     - True: The image is no longer needed for the training dataset; the file will not be stored 
+    #             permanently after the comparison is complete.
+    # - cut_new: Currently deprecated.
+    # - pic_count: An optional suffix (numeric or string) added to the filename to prevent overwriting 
+    #              when capturing multiple images from the same location.
+    '''
+    
     global glo_var
-    # print("BBBB glo_var.file_absolute_pos : ",glo_var.file_absolute_pos)
     end_file_path = glo_var.game_pic_path / location
-    # print("end_file_path : " + str(end_file_path) + ".txt")
 
     png_path = []
     with open(str(end_file_path) + ".txt", "r") as read_dst_f :
         for x in range(num):
             position = read_pos(read_dst_f)
-            
-            # 使用 pathlib 檢查和創建資料夾
+
             user_pic_location = glo_var.game_pic_path / location
-            if not user_pic_location.exists():  #判斷有沒有定義的資料夾
-                user_pic_location.mkdir() #如果沒有就自動生成
-                
+            if not user_pic_location.exists():
+                user_pic_location.mkdir()
+
             if comp :
                 comp_pic_pos = user_pic_location.with_name(user_pic_location.stem + f"_comp_{x+11}_{round_count}")
                 png_path.append(str(comp_pic_pos.with_suffix(".png")))
-                pyautogui.screenshot(png_path[-1], region=position) #透過已定義的座標位置進行截圖
+                pyautogui.screenshot(png_path[-1], region=position)
                 with open(str(comp_pic_pos.with_suffix(".txt")), "w") as fw :
                     fw.write(str(position)[1:-1])
             elif pic_count == None :
                 png_path.append(str(user_pic_location / f"{x+11}_{round_count}.png"))
-                pyautogui.screenshot(png_path[-1], region=position) #透過已定義的座標位置進行截圖
+                pyautogui.screenshot(png_path[-1], region=position)
             else :
                 png_path.append(str(user_pic_location / f"{x+11}_{round_count}_{pic_count}.png"))
-                pyautogui.screenshot(png_path[-1], region=position) #透過已定義的座標位置進行截圖
-            # 用來切特定位置 不一樣的圖
-            # 有 _r 跟 _b 目前好像只能用在牌上?? 所以先注解掉
-            # if cut_new == True :
-            #     # 先判斷有無相似的圖案
-            #     sim, num = find_most_sim(end_file_dst+str(x)+"_r", position)
-            #     sim2, num2 = find_most_sim(end_file_dst+str(x)+"_b", position)
-            #     if sim < 0.99 and sim2 < 0.99: 
-            #         #儲存
-            #         theTime = datetime.datetime.now().strftime(ISOTIMEFORMAT) 
-            #         pyautogui.screenshot(glo_var.user_abs_loc + location + str(x)+"_"+theTime+".png", region=position)
-            
-            if cover == False : 
+                pyautogui.screenshot(png_path[-1], region=position)
+
+            if cover == False :
                 theTime = datetime.datetime.now().strftime(ISOTIMEFORMAT)
-                
-                # 訓練資料路徑
                 training_location = Path(glo_var.cut_pic_path) / location
-                if not training_location.exists():  #判斷有沒有定義的資料夾
-                    training_location.mkdir() #如果沒有就自動生成
-                
+                if not training_location.exists():
+                    training_location.mkdir()
                 if pic_count == None :
-                    pyautogui.screenshot(str(training_location / f"{x}_{theTime}.png"), region=position) #截圖(檔名多了時間)
+                    pyautogui.screenshot(str(training_location / f"{x}_{theTime}.png"), region=position)
                 else :
-                    pyautogui.screenshot(str(training_location / f"{pic_count}_{x}_{theTime}.png"), region=position) #透過已定義的座標位置進行截圖
+                    pyautogui.screenshot(str(training_location / f"{pic_count}_{x}_{theTime}.png"), region=position)
     return png_path
-# 把 cut_pic_data 截好的圖片 辨識後 放入 glo_var.client_data 中
-# 這個 funciton 只能用<每個玩家>都<只有一個>的<數字>資料
-# label : 要使用哪個訓練好的辨識神經 (會抓取 inference_graph_for_XXX 和 training_for_XXX 的設定)
-# 通常會取跟 cut_pic_data 帶入 location 的名稱相同，但是要去掉尾端的\
-# name : 取值時候的key  EX: glo_var.client_data[round_count(第幾回合)][第幾個玩家][name]
-# round_count_in : 取值時候的key  EX: glo_var.client_data[round_count_in][第幾個玩家][要取的東西]
-# use_DATA 如果 辨識結果 有要轉 換成 資料 要打開
-#    會讀 Data.py 轉成字串
-# thresh 辨識神經 所使用的域值 0~1 愈接近1愈嚴謹、嚴格 == 回傳的資料愈少
-# (以下尚未實做)
-# 如果有很多個，還沒實做
-# 如果只有一個 EX:局號 判斷完直接寫入即可
-def set_client_data(label, name, round_count_in, use_DATA = False, thresh = 0.5, type = "number", class_to_info_list = None, all_in_flag = False) : 
+
+# Run OCR/classifier on cut_pic_data screenshots and store results in glo_var.client_data.
+# label      : classifier name (matches training_for_XXX and inference_graph_for_XXX)
+# name       : key used to store the result — glo_var.client_data[round][player][name]
+# use_DATA   : if True, convert classifier output via Data.py label map
+# thresh     : classifier confidence threshold (higher = stricter)
+def set_client_data(label, name, round_count_in, use_DATA = False, thresh = 0.5, type = "number", class_to_info_list = None, all_in_flag = False) :
     global glo_var
-    # 辨識結果
-    # print("輸入:", label, round_count_in, thresh)
     if type == "number" :
-        pass_data = identify_for_import.identify_number(iden_thing = label, round_count = round_count_in, thresh = thresh) #辨識
-        
+        pass_data = identify_for_import.identify_number(iden_thing=label, round_count=round_count_in, thresh=thresh)
     elif type == "things" :
-        pass_data = identify_for_import.identify_things(iden_thing = label, round_count = round_count_in, thresh = thresh, class_to_info_list = class_to_info_list, all_in_flag = all_in_flag) #辨識
-    
-    # for 每個玩家
+        pass_data = identify_for_import.identify_things(iden_thing=label, round_count=round_count_in, thresh=thresh, class_to_info_list=class_to_info_list, all_in_flag=all_in_flag)
+
     for x in range(len(pass_data)) :
-        # print("in set_client_data x = "+str(x))
-        # 如果回傳回來是空的
         if pass_data[x] == None :
             glo_var.client_data[round_count_in % glo_var.list_len][x][name] = None
-        # 如果有結果
         else :
-            # 看需不需要再用 Data.py 轉成資料
-            # 需要
             if use_DATA :
                 try :
                     glo_var.client_data[round_count_in % glo_var.list_len][x][name] = glo_var.class_to_str_list[label][pass_data[x]]
                 except IndexError :
-                    print_to_output(str(name) + " 辨識完資料 : " + str(pass_data) + "第" + str(x) + "個 出錯")
-                    report_error(round_count_in , "辨識錯誤")
-            # 不需要
+                    print_to_output(str(name) + " recognition data: " + str(pass_data) + " player " + str(x) + " error")
+                    report_error(round_count_in, "recognition error")
             else :
                 glo_var.client_data[round_count_in % glo_var.list_len][x][name] = pass_data[x]
-            print_to_output("辨識 玩家 第" + str(x+1) +"個 " + name + " : "+str(glo_var.client_data[round_count_in % glo_var.list_len][x][name]))
+            print_to_output("Player " + str(x+1) + " " + name + ": " + str(glo_var.client_data[round_count_in % glo_var.list_len][x][name]))
 
 
-# 判斷 現在是否有其他條 thread 正在跑後台
-# 且會確認遊戲已經寫入後台 可以找到這一局的資料
-# finish_time : 繼續遊戲跳出來的時間作為起始
-# sleep_time : 經過幾秒後確定後台會有這一筆資料
-def can_get_server_data(finish_time, sleep_time = 35) : 
+def can_get_server_data(finish_time, sleep_time = 35) :
     global glo_var
-    
-    # 確定回傳回去的時候 已經離遊戲結束 至少sleep_time秒
-    delta_time = (datetime.datetime.now() - finish_time).seconds #用當前時間減掉上一局遊戲結束時間
-    print("後台 已等待" +str(delta_time)+"秒")
-    if delta_time < sleep_time : 
-        time.sleep(sleep_time-delta_time) #讓程式確定有足夠sleep_time
 
-    #可以開始執行之前確定 有沒有人在用後台 如果有在用就等一下
-    if glo_var.server_using : 
-        # 改成sleep
+    # ensure at least sleep_time seconds have passed since the round ended
+    delta_time = (datetime.datetime.now() - finish_time).seconds
+    print("Server wait: " + str(delta_time) + "s")
+    if delta_time < sleep_time :
+        time.sleep(sleep_time - delta_time)
+
+    if glo_var.server_using :
         total_wait_time = 30
-        print("上一場的後台還沒跑完 後台等待" + str(total_wait_time) + "秒")
+        print("Previous server fetch still running. Waiting " + str(total_wait_time) + "s")
         for x in range(total_wait_time) :
             if x % 10 == 1 :
-                print("後台等待剩餘時間 : " + str(total_wait_time-x))
+                print("Server wait remaining: " + str(total_wait_time - x))
             time.sleep(1)
             if glo_var.server_using == False :
-                print("上一場的後台跑完了 開始爬取後台")
+                print("Previous fetch done. Starting crawl.")
                 break
-    
-    # 已經休息過一次了，應該要可以用了，如果還不行，大概就沒救了 
+
     if glo_var.server_using :
-        print("已經休息過一次了，應該要可以用了，如果還不行，大概就沒救了....")
+        print("Server still busy after waiting. Giving up.")
         glo_var.fail_playing = True
         return False
 
-    # 確認以上條件都通過 因此return True
     return True
 
 
-# 計算等待時間
-# limit 超過幾秒算 time out
-# state 如果 time out 印出錯誤資訊 要附上是哪個階段錯誤 (是string)
-# True == time out
+# Returns True if time since last set_record_time() call exceeds limit seconds
 def cal_time_out(limit, state = "") :
     global glo_var
-    # 距離紀錄時間多遠
     now_time = datetime.datetime.now()
     delta_time = (now_time - glo_var.record_time).seconds
     # print(delta_time)
@@ -898,30 +669,15 @@ def cal_time_out(limit, state = "") :
         return True
     else :    
         return False
-    
-# 單純用來關閉背景音樂
-def Game_envi_close_music() :
-    pass
-    # 如果不想關閉音樂 此區塊註解
-    # --------------------------------------------------------------------------------------------------
-    # for x in range(5) :
-    #     if compare_sim("setting",sys._getframe().f_code.co_name, precise = True, lobby=True) > 0.97 : 
-    #         # 通常 break 就會跳出此迴圈 進入下一個 state
-    #         click_mid("設定", dosleep = 1)
-    #         click((832, 789), "關閉BGM")
-    #         click((1339, 795), "關閉音效")
-    #         click((1576, 342), "關閉設定")
-    #         return 
-    # --------------------------------------------------------------------------------------------------
-
+ 
 def print_exception(exceptio):
-    error_class = exceptio.__class__.__name__ #取得錯誤類型
-    detail = exceptio.args[0] #取得詳細內容
-    cl, exc, tb = sys.exc_info() #取得Call Stack
-    lastCallStack = traceback.extract_tb(tb)[-1] #取得Call Stack的最後一筆資料
-    fileName = lastCallStack[0] #取得發生的檔案名稱
-    lineNum = lastCallStack[1] #取得發生的行號
-    funcName = lastCallStack[2] #取得發生的函數名稱
+    error_class = exceptio.__class__.__name__
+    detail = exceptio.args[0]
+    cl, exc, tb = sys.exc_info()
+    lastCallStack = traceback.extract_tb(tb)[-1]
+    fileName = lastCallStack[0]
+    lineNum = lastCallStack[1]
+    funcName = lastCallStack[2]
     errMsg = "File \"{}\", line {}, in {}: [{}] {}".format(fileName, lineNum, funcName, error_class, detail)
     print(errMsg)
     

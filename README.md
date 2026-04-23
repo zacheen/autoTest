@@ -121,6 +121,8 @@ python Demo_test_Minesweeper.py
 ```
 The agent will play continuously, printing win/loss and step count per episode.
 
+> **⚠ Keyboard control:** Press **`End`** at any time to **pause** the agent. Press **`End`** again to **resume**.
+
 **Training from scratch** (if no checkpoints exist):
 ```bash
 # Stage 1: train symbolic policy (~1–2 hours on CPU)
