@@ -30,7 +30,7 @@ from Gf_Except import Game_fail_Exception
 from Minesweeper_web_client import MinesweeperWebClient
 
 from Minesweeper.Minesweeper_manager import Minesweeper_manager
-from visual_discrete_agent import get_agent
+from visual_discrete_agent_v2 import get_agent
 from pathlib import Path
 from yolo_grid_state_predictor import VisionDatasetRecorder
 
