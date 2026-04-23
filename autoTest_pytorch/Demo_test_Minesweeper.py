@@ -349,12 +349,11 @@ class Game_test_case(unittest.TestCase) :
 
     def test_RL(self):
         Tool_Main.glo_var.s_record_time()
-        UI_waiting_time = 1
+        UI_waiting_time = 0.3
         game_status = Game_test_case.Game_status()
         game_status.noise = True  # SAC handles exploration via stochastic policy
         time.sleep(UI_waiting_time)
         self.decide_next_step_and_play(game_status)
-        time.sleep(UI_waiting_time)
 
         while True:
             check_pause()

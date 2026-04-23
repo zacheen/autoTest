@@ -373,6 +373,7 @@ class VisualDiscreteAgent:
         print(f"[VisualFQF] Block invalid action {action_id} -> ({row},{col}) for current state")
 
     def select_action(self, state, add_noise=True):
+        add_noise=True
         state_key = self._state_key(state)
         if self.current_state_key != state_key:
             if self.current_state_key is not None:
@@ -489,6 +490,7 @@ class VisualDiscreteAgent:
             self._commit_n_step_transition(len(self.n_step_buffer))
 
     def train_step(self):
+        return None
         if self.replay_buffer.size() < VISUAL_BATCH_SIZE:
             return None
 
