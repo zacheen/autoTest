@@ -269,19 +269,32 @@ class VisualAgentV2:
 
         sym = self._CLS_SYM
 
-        # ── Q-value 分析：hidden 格 vs revealed 格 ──
-        # 把 actual grid 當作 ground truth 來分類 Q 值
+        # ── Q-value 分析 + Stage 1 原生 select_action 比對 ──
         q_flat_cpu = None
         q_hidden, q_revealed = [], []
+        stage1_native_action = None
+        q_v2_action = None
+        q_stage1_action = None
         try:
             with torch.no_grad():
-                screenshot_batch = self.last_grid_pred_argmax  # 已在 select_action 快取
-                # 重新從快取的 pred argmax 還原 one-hot，再跑一次 Q-network
+                # (A) v2 路徑：用 YOLO 預測的 one-hot 跑 Q
                 one_hot = torch.zeros(1, 12, H, W, device=device)
                 one_hot.scatter_(1, pred.unsqueeze(0).unsqueeze(0).to(device), 1.0)
                 feats = self.stage1.backbone.get_features(one_hot)
                 q_2d = self.stage1.q_network(feats)["q_values"].squeeze(0).cpu()  # (H, W)
                 q_flat_cpu = q_2d.view(-1)
+                q_v2_action = float(q_flat_cpu[action_id])
+
+                # (B) Stage 1 原生路徑：直接呼叫 stage1.select_action()
+                # 這和 train_stage1_simple.py 訓練/評估時用的程式碼完全一樣
+                state_cpu = one_hot.squeeze(0).cpu()  # (12, H, W) on CPU，模擬 MinesweeperLogic 格式
+                native_row, native_col = self.stage1.select_action(state_cpu, add_noise=False)
+                # stage1.select_action 結束時會把 backbone/q_network 切回 train 模式，手動切回 eval
+                self.stage1.backbone.eval()
+                self.stage1.q_network.eval()
+                stage1_native_action = (native_row, native_col, native_row * self.grid_w + native_col)
+                q_stage1_action = float(q_2d[native_row, native_col])
+
             for r in range(H):
                 for c in range(W):
                     q_val = float(q_2d[r, c])
@@ -290,7 +303,9 @@ class VisualAgentV2:
                     else:                        # revealed / flagged
                         q_revealed.append((r, c, q_val))
         except Exception as exc:
+            import traceback
             print(f"[V2 Diag] Q re-compute failed: {exc}")
+            traceback.print_exc()
 
         # ── 印出診斷 ──
         sep = "─" * 60
@@ -320,10 +335,19 @@ class VisualAgentV2:
         if q_hidden or q_revealed:
             avg_q_hidden   = sum(v for _, _, v in q_hidden)   / len(q_hidden)   if q_hidden   else float("nan")
             avg_q_revealed = sum(v for _, _, v in q_revealed) / len(q_revealed) if q_revealed else float("nan")
-            print(f"  Q hidden({len(q_hidden)}셀) avg={avg_q_hidden:+.4f} | "
-                  f"revealed({len(q_revealed)}셀) avg={avg_q_revealed:+.4f}")
+            print(f"  Q hidden({len(q_hidden)}格) avg={avg_q_hidden:+.4f} | "
+                  f"revealed({len(q_revealed)}格) avg={avg_q_revealed:+.4f}")
             if q_hidden and q_revealed and avg_q_hidden <= avg_q_revealed:
                 print(f"  !! Agent 偏好 revealed 格（Q_hidden <= Q_revealed）← Stage1 權重可能未正確載入")
+
+        # v2 vs Stage 1 原生選擇比較
+        if stage1_native_action is not None:
+            native_r, native_c, native_id = stage1_native_action
+            match = "✓ SAME" if native_id == action_id else "✗ DIFFER"
+            print(f"  v2 action={action_id}->({act_row},{act_col}) Q={q_v2_action:+.4f} | "
+                  f"stage1.select_action={native_id}->({native_r},{native_c}) Q={q_stage1_action:+.4f} {match}")
+            if native_id != action_id:
+                print(f"  !! v2 和 stage1.select_action() 選擇不同 → v2 的 Q 計算路徑與 Stage 1 有差異")
 
         # 選擇格診斷
         action_note = f"YOLO={sym[pred_cls]} actual={sym[actual_cls]}"
