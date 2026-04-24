@@ -1,27 +1,36 @@
-"""visual_discrete_agent_v2.py — Stage 2 推論 Agent。
+"""visual_discrete_agent_v2.py — Stage 2 Agent with full end-to-end training.
 
 Pipeline:
     screenshot (3, 640, 640)
-        ↓ YOLOGridStatePredictor（已訓練，凍住）
+        ↓ YOLOGridStatePredictor  (train mode, unfrozen, lr=1e-6)
     grid state (12, 6, 6) one-hot
-        ↓ TransformerDiscreteAgent backbone + FQF Q-network（Stage 1，凍住）
+        ↓ TransformerDiscreteAgent backbone + FQF Q-network  (train mode, unfrozen, lr=5e-5)
     Q-values → masked argmax → action_id
 
-此模組只做推論，不做 RL 訓練（store_transition / maybe_train_step 為空操作）。
+Training:
+    Raw screenshots are stored in the replay buffer.
+    On each train_step, YOLO converts the batch to grid states WITH gradients, so
+    the RL loss propagates back through YOLO.  The combined optimizer covers all
+    three modules (separate lr per group).
+    Win-rate is logged every episode with a rolling 100-episode window.
 """
 
 from __future__ import annotations
 
 import hashlib
 import random
+from collections import deque
 from pathlib import Path
 
 import torch
+import torch.optim as optim
 import torchvision.transforms as transforms
 from PIL import Image
 
 from yolo_grid_state_predictor import YOLOGridStatePredictor
 from transformer_discrete_agent import TransformerDiscreteAgent
+from transformer_discrete_agent import PER_CAPACITY, PER_ALPHA, PER_BETA_START
+from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -30,60 +39,88 @@ IMAGE_SIZE = (640, 640)
 GRID_H = 6
 GRID_W = 6
 
+LR_YOLO     = 1e-6   # conservative — YOLO is already well-trained
+LR_STAGE1   = 5e-5
+
 
 class VisualAgentV2:
-    """Screenshot → YOLO grid state → Stage 1 Q-network → action。
+    """Screenshot → YOLO → Stage 1 Q-network → action, with full end-to-end RL training.
 
-    和 VisualDiscreteAgent 實作同一組公開方法，讓 Demo_test_Minesweeper.py
-    可以直接替換 get_agent() 而不用改其他程式碼。
+    All parameters are unfrozen.  The combined optimizer uses a lower learning
+    rate for YOLO to avoid destabilising the vision module.  Screenshots are
+    stored raw in the replay buffer; YOLO runs inside the training loop so RL
+    gradients reach its weights.
     """
 
-    def __init__(self, grid_h: int = GRID_H, grid_w: int = GRID_W, epsilon: float = 0.0):
+    def __init__(self, grid_h: int = GRID_H, grid_w: int = GRID_W):
         self.grid_h = grid_h
         self.grid_w = grid_w
         self.num_actions = grid_h * grid_w
-        self.epsilon = epsilon
 
-        # ── YOLO 預測器（凍住）──
+        # ── YOLO predictor — fully unfrozen, train() mode ──
         self.yolo_predictor = YOLOGridStatePredictor().to(device)
         if not YOLO_PREDICTOR_PATH.exists():
             raise FileNotFoundError(
                 f"YOLOGridStatePredictor checkpoint not found: {YOLO_PREDICTOR_PATH}\n"
-                "請先執行 python yolo_grid_state_predictor.py 完成訓練。"
+                "Run python yolo_grid_state_predictor.py first."
             )
         ckpt = torch.load(YOLO_PREDICTOR_PATH, map_location=device, weights_only=False)
         self.yolo_predictor.load_state_dict(ckpt["model"])
-        self.yolo_predictor.eval()
-        for p in self.yolo_predictor.parameters():
-            p.requires_grad_(False)
+        self.yolo_predictor.train()
         print(f"[V2] YOLOGridStatePredictor loaded (best_val_acc={ckpt.get('best_val_acc', '?'):.4f})")
 
-        # ── Stage 1 agent（只用 backbone + q_network，凍住）──
+        # ── Stage 1 agent — fully unfrozen ──
         self.stage1 = TransformerDiscreteAgent(grid_h=grid_h, grid_w=grid_w)
-        self.stage1.backbone.eval()
-        self.stage1.q_network.eval()
-        for p in self.stage1.backbone.parameters():
-            p.requires_grad_(False)
-        for p in self.stage1.q_network.parameters():
-            p.requires_grad_(False)
-        print("[V2] TransformerDiscreteAgent (Stage 1) loaded and frozen")
+        # backbone and q_network are in train() mode by default after __init__
 
-        # 影像前處理（與 visual_discrete_agent.py 相同）
+        # Persisted replay buffer entries may have grid-state shape (12,6,6).
+        # We now store raw screenshots (3,640,640), so replace with a fresh buffer
+        # to avoid shape mismatch when stacking a batch.
+        self.stage1.replay_buffer = CategorizedReplayBuffer(
+            max_size=PER_CAPACITY,
+            storage_mode="ram",
+            win_threshold=3.0,
+            lose_threshold=-1.0,
+            invalid_threshold=0.0,
+            alpha=PER_ALPHA,
+            beta_start=PER_BETA_START,
+        )
+        print("[V2] TransformerDiscreteAgent loaded — training enabled")
+
+        # ── Combined optimizer: YOLO (low lr) + Stage 1 ──
+        # Replaces the optimizer stage1 created internally so all three modules
+        # share a single update step.
+        self.stage1.optimizer = optim.Adam(
+            [
+                {"params": self.yolo_predictor.parameters(), "lr": LR_YOLO},
+                {"params": self.stage1.backbone.parameters(),  "lr": LR_STAGE1},
+                {"params": self.stage1.q_network.parameters(), "lr": LR_STAGE1},
+            ],
+            foreach=False,
+            fused=False,
+        )
+
         self.transform = transforms.Compose([
             transforms.Resize(IMAGE_SIZE),
             transforms.ToTensor(),
         ])
 
-        # 封鎖動作（同一畫面下不重複點已被判無效的格子）
         self.blocked_actions: set[int] = set()
         self.current_state_key: str | None = None
 
-        self.episode_count = 0
+        # Win-rate tracking
+        self._result_window: deque[int] = deque(maxlen=100)
+        self._total_wins = 0
+        self._total_episodes = 0
 
-    # ──────────────────────────── 基礎工具 ────────────────────────────
+    @property
+    def episode_count(self) -> int:
+        return self._total_episodes
+
+    # ──────────────────────────── utilities ────────────────────────────
 
     def preprocess_screen(self, screenshot_path) -> torch.Tensor:
-        """截圖路徑 → float tensor (3, 640, 640)，值域 [0, 1]。"""
+        """Screenshot path → float tensor (3, 640, 640), range [0, 1]."""
         try:
             image = Image.open(screenshot_path).convert("RGB")
             return self.transform(image)
@@ -98,7 +135,11 @@ class VisualAgentV2:
         arr = state.detach().cpu().clamp(0, 1).mul(255).to(torch.uint8).numpy()
         return hashlib.sha1(arr.tobytes()).hexdigest()
 
-    # ──────────────────────────── 封鎖動作 ────────────────────────────
+    def _yolo_forward(self, batch: torch.Tensor) -> torch.Tensor:
+        """YOLO forward WITH gradient tracking — used as preprocessor in train_step."""
+        return self.yolo_predictor.predict_grid_state(batch, self.grid_h, self.grid_w)
+
+    # ──────────────────────────── blocked actions ───────────────────────
 
     def clear_blocked_actions(self, reason: str = "state changed") -> None:
         if self.blocked_actions:
@@ -115,15 +156,15 @@ class VisualAgentV2:
         row, col = self.action_to_grid(action_id)
         print(f"[V2] Block action {action_id} -> ({row},{col})")
 
-    # ──────────────────────────── 動作選擇 ────────────────────────────
+    # ──────────────────────────── action selection ──────────────────────
 
     def select_action(
         self, state: torch.Tensor, add_noise: bool = True
     ) -> tuple[int, dict]:
         """
         Args:
-            state: preprocess_screen() 的輸出，(3, 640, 640) float tensor。
-            add_noise: True 時套用 epsilon-greedy（epsilon 預設 0，即純 greedy）。
+            state: preprocess_screen() output, (3, 640, 640) float tensor.
+            add_noise: if True, apply epsilon-greedy using stage1.epsilon.
 
         Returns:
             (action_id, log_info)
@@ -142,8 +183,9 @@ class VisualAgentV2:
             blocked = set()
             available = list(range(self.num_actions))
 
-        # epsilon-greedy（預設 epsilon=0，純 greedy）
-        if add_noise and self.epsilon > 0 and random.random() < self.epsilon:
+        # epsilon-greedy using stage1's decaying epsilon
+        eps = self.stage1.epsilon
+        if add_noise and eps > 0 and random.random() < eps:
             action_id = random.choice(available)
             row, col = self.action_to_grid(action_id)
             return action_id, {
@@ -153,19 +195,16 @@ class VisualAgentV2:
                 "blocked_actions": sorted(blocked),
             }
 
-        # ── YOLO: screenshot → grid state ──
-        screenshot_batch = state.unsqueeze(0).to(device)  # (1, 3, 640, 640)
+        # Inference — no gradients needed
+        screenshot_batch = state.unsqueeze(0).to(device)
         with torch.no_grad():
             grid_state_batch = self.yolo_predictor.predict_grid_state(
                 screenshot_batch, self.grid_h, self.grid_w
-            )  # (1, 12, H, W)
+            )
+            features = self.stage1.backbone.get_features(grid_state_batch)
+            q_2d = self.stage1.q_network(features)["q_values"].squeeze(0)
+            q_flat = q_2d.view(-1)
 
-            # ── Stage 1: grid state → Q values ──
-            features = self.stage1.backbone.get_features(grid_state_batch)  # (1, H*W, d)
-            q_2d = self.stage1.q_network(features)["q_values"].squeeze(0)   # (H, W)
-            q_flat = q_2d.view(-1)                                           # (H*W,)
-
-            # 封鎖已試過的動作
             masked_q = q_flat.clone()
             if blocked:
                 blocked_idx = torch.tensor(sorted(blocked), dtype=torch.long, device=masked_q.device)
@@ -189,36 +228,66 @@ class VisualAgentV2:
             "blocked_actions": sorted(blocked),
         }
 
-    # ──────────────────────── 訓練介面（空操作）────────────────────────
+    # ──────────────────────────── training interface ────────────────────
 
-    def store_transition(self, state, action, next_state, reward, done) -> None:
-        pass
+    def store_transition(
+        self,
+        state: torch.Tensor,
+        action: int,
+        next_state: torch.Tensor | None,
+        reward: float,
+        done: bool,
+    ) -> None:
+        """Store raw screenshot tensors in the replay buffer.
+
+        TransformerDiscreteAgent expects action as (row, col).
+        """
+        row, col = self.action_to_grid(action)
+        self.stage1.store_transition(
+            state.cpu(),
+            (row, col),
+            next_state.cpu() if next_state is not None else None,
+            reward,
+            done,
+        )
 
     def maybe_train_step(self, force: bool = False):
-        return None
+        """End-to-end train step: YOLO gradients flow into backbone + Q-network."""
+        return self.stage1.train_step(
+            preprocessor=self._yolo_forward,
+            extra_params_to_clip=self.yolo_predictor.parameters(),
+        )
 
     def reset_episode(self) -> None:
-        pass
+        self.stage1.reset_episode()
 
-    # ──────────────────────── Episode 統計 ────────────────────────────
+    def on_episode_end(self) -> None:
+        self.stage1.on_episode_end()
+
+    # ──────────────────────────── episode metrics ────────────────────────
 
     def log_episode_metrics(
         self, win: bool, invalid_click_rate: float, reward_mean: float
     ) -> None:
-        self.episode_count += 1
+        self._total_episodes += 1
+        self._total_wins += int(win)
+        self._result_window.append(int(win))
+
+        rolling_wr = sum(self._result_window) / max(len(self._result_window), 1)
+        overall_wr = self._total_wins / max(self._total_episodes, 1)
+
         status = "WIN " if win else "LOSE"
         print(
-            f"[V2] Episode {self.episode_count}: {status} | "
-            f"invalid_rate={invalid_click_rate:.1%} | reward_mean={reward_mean:.3f}"
+            f"[V2] Ep {self._total_episodes}: {status} | "
+            f"invalid={invalid_click_rate:.1%} | reward={reward_mean:.3f} | "
+            f"win_rate(last100)={rolling_wr:.1%} | win_rate(all)={overall_wr:.1%} | "
+            f"eps={self.stage1.epsilon:.4f}"
         )
 
-    def on_episode_end(self) -> None:
-        pass
-
-    # ──────────────────────── 動作記錄圖 ──────────────────────────────
+    # ──────────────────────────── action image log ───────────────────────
 
     def log_action_image(self, state, log_info, step_count, reward=None) -> None:
-        """在截圖上標示選擇的格子，存到 models/action_logs_v2/。"""
+        """Annotate the screenshot with the chosen cell and save to models/action_logs_v2/."""
         if log_info is None:
             return
         try:
@@ -275,7 +344,7 @@ class VisualAgentV2:
             print(f"[V2] log_action_image failed: {exc}")
 
 
-# ──────────────────────────── Factory ────────────────────────────────
+# ──────────────────────────── factory ────────────────────────────────
 
 _agent: VisualAgentV2 | None = None
 

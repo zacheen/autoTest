@@ -251,13 +251,22 @@ class TransformerDiscreteAgent:
         while self.n_step_buffer:
             self._commit_n_step_transition(len(self.n_step_buffer))
 
-    def train_step(self):
+    def train_step(self, preprocessor=None, extra_params_to_clip=None):
+        """Run one gradient step.
+
+        preprocessor : optional callable (batch_tensor → batch_tensor) applied to
+                       raw stored states before the forward pass.  Used for end-to-end
+                       training where screenshots are stored and YOLO is the preprocessor.
+                       Applied WITH gradients on the current state, WITHOUT gradients on
+                       next_state (target network branch stays frozen).
+        extra_params_to_clip : optional iterable of extra parameters to include in the
+                               gradient-norm clip (e.g. YOLO parameters).
+        """
         if self.replay_buffer.size() < BATCH_SIZE:
             return None
 
         self.total_it += 1
-        
-        # CategorizedReplayBuffer stores beta internally if not provided, but we can still pass it explicitly
+
         state, action, next_state, reward, done, per_indices, is_weights, discounts, n_steps = self.replay_buffer.sample(
             BATCH_SIZE,
             beta=PER_BETA_START + (PER_BETA_END - PER_BETA_START) * min(self.episode_count / 5000.0, 1.0),
@@ -271,8 +280,13 @@ class TransformerDiscreteAgent:
         action_flat = row_idx * self.grid_w + col_idx
         batch_size = state.size(0)
 
+        # Preprocess current state WITH gradients so end-to-end training flows back
+        if preprocessor is not None:
+            state = preprocessor(state)
+
         with torch.no_grad():
-            next_features = self.backbone.get_features(next_state)
+            next_proc = preprocessor(next_state) if preprocessor is not None else next_state
+            next_features = self.backbone.get_features(next_proc)
             next_online = self.q_network(next_features)
             next_q_2d = next_online["q_values"]
             next_q_flat = next_q_2d.view(batch_size, -1)
@@ -320,13 +334,13 @@ class TransformerDiscreteAgent:
 
         self.optimizer.zero_grad()
         loss.backward()
+        all_params = list(self.backbone.parameters()) + list(self.q_network.parameters())
+        if extra_params_to_clip is not None:
+            all_params += list(extra_params_to_clip)
         for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
             if param.grad is not None and not torch.isfinite(param.grad).all():
                 raise RuntimeError(f"Non-finite gradient detected in parameter: {name}")
-        torch.nn.utils.clip_grad_norm_(
-            list(self.backbone.parameters()) + list(self.q_network.parameters()),
-            max_norm=1.0,
-        )
+        torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
         self.optimizer.step()
 
         self.replay_buffer.update_priorities(per_indices, td_error.squeeze(-1).cpu().numpy())
