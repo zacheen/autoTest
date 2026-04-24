@@ -146,7 +146,10 @@ class CategorizedReplayBuffer:
         return aged_priority
 
     def _prune_if_needed(self):
-        """Reduce buffer size to max capacity by removing lowest priority entries across buckets."""
+        """
+        Reduce buffer size to max capacity by removing lowest priority entries across buckets.
+        Only prunning process will strictly follow PER to remove entries.
+        """
         if self.size_count <= self.max_size + self.overflow_margin:
             return
 
