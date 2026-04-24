@@ -18,6 +18,7 @@ Training:
 from __future__ import annotations
 
 import hashlib
+import math
 import random
 from collections import deque
 from pathlib import Path
@@ -263,6 +264,31 @@ class VisualAgentV2:
 
     def on_episode_end(self) -> None:
         self.stage1.on_episode_end()
+        # Override stage1's decay-based epsilon with win-rate-adaptive epsilon
+        self.stage1.epsilon = self._adaptive_epsilon()
+
+    def _adaptive_epsilon(
+        self,
+        wr_min: float = 0.20,
+        wr_max: float = 1.00,
+        eps_min: float = 0.01,
+        eps_max: float = 0.30,
+    ) -> float:
+        """Log-interpolate epsilon from win_rate(last100).
+
+        At 100% win_rate → eps_min (0.01).
+        At  20% win_rate → eps_max (0.30).
+        At  90% win_rate → ~0.015  (close to eps_min, as intended).
+        Interpolation is linear in log(epsilon) space so each win_rate
+        percentage point multiplies epsilon by the same factor, naturally
+        compressing the high-performance region and expanding the low one.
+        """
+        if not self._result_window:
+            return eps_max
+        wr = sum(self._result_window) / len(self._result_window)
+        wr = max(wr_min, min(wr_max, wr))
+        t = (wr - wr_min) / (wr_max - wr_min)   # 0 at wr_min, 1 at wr_max
+        return math.exp(math.log(eps_max) + (math.log(eps_min) - math.log(eps_max)) * t)
 
     # ──────────────────────────── episode metrics ────────────────────────
 
@@ -276,12 +302,13 @@ class VisualAgentV2:
         rolling_wr = sum(self._result_window) / max(len(self._result_window), 1)
         overall_wr = self._total_wins / max(self._total_episodes, 1)
 
+        next_eps = self._adaptive_epsilon()
         status = "WIN " if win else "LOSE"
         print(
             f"[V2] Ep {self._total_episodes}: {status} | "
             f"invalid={invalid_click_rate:.1%} | reward={reward_mean:.3f} | "
             f"win_rate(last100)={rolling_wr:.1%} | win_rate(all)={overall_wr:.1%} | "
-            f"eps={self.stage1.epsilon:.4f}"
+            f"eps(next)={next_eps:.4f}"
         )
 
     # ──────────────────────────── action image log ───────────────────────
