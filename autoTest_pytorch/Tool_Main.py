@@ -1,3 +1,24 @@
+"""Tool_Main — test-harness utilities for grid-based automated game testing.
+
+Module layout
+─────────────
+1. Module constants / paths      — set once on import
+2. InputBackend strategy         — pyautogui vs selenium, picked by make_backend()
+3. Pure utilities                — stateless helpers (read_pos, template matching, ...)
+4. GameConfig / GameState / GameSession — three data containers
+5. Glo_var                       — thin composition of the above; module-level singleton
+6. Orchestration functions       — compare_sim, cut_pic_data, etc.
+
+Design notes
+────────────
+• Glo_var holds data, not behaviour. Access is direct — no getters/setters.
+• Functions that only need one or two pieces of state take them as explicit params
+  (e.g. report_error(error_f, ...), mouse_drag(backend, ...)). Orchestrators that
+  touch multiple fields take the whole glo_var.
+• Pyautogui vs selenium switching is handled once, inside InputBackend subclasses.
+  No caller needs to branch on use_sel / is_url directly.
+"""
+
 import time
 import pyautogui
 import cv2
@@ -5,11 +26,8 @@ import numpy as np
 import sys
 import requests
 import json
-# sys.path.append(".")
-
 import os
 from pathlib import Path
-# os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import io
 import glob
 import warnings
@@ -19,665 +37,822 @@ import traceback
 from selenium import webdriver
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.common.action_chains import ActionChains
-
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
-
 
 import HTMLTestRun
 import identify_for_import
 import Data
-# import Card
 
-# ----------------------------------------------------------
-# Tool main settings
-# use_sel : 
-    # 0 - using mouse to click (pyautogui) : position is screen position
-    # 1 - using selenium to click : position is web page position
+
+# ════════════════════════════════════════════════════════════════════
+# 1. Module constants / paths
+# ════════════════════════════════════════════════════════════════════
+
+ISOTIMEFORMAT      = '%Y_%m_%d_%H_%M_%S'   # used in filenames
+format_for_db_time = '%Y-%m-%d %H:%M'      # used for DB search timestamps
+
+# where the cursor parks after each click (top-middle of screen)
+HOME_POS = (952, 21)
+
+# use_sel: 0 = pyautogui (screen coords) / 1 = selenium (page coords)
+# set externally before Glo_var() if you want to override the default
 use_sel = 1
-# ----------------------------------------------------------
 
+# Game_envi: set by the entry script before Glo_var() is constructed
 Game_envi = None
-strech_size = 1
-# the time stamp format for test report file name
-ISOTIMEFORMAT = '%Y_%m_%d_%H_%M_%S'
-format_for_db_time = '%Y-%m-%d %H:%M' 
 
-# checking each folder exist or not, if not, create it
+# Report output folders (created on import)
 testreport_path = Path("./testreport")
-testpic_path = testreport_path / "testpic"
-if not testreport_path.exists():
-    testreport_path.mkdir()
-if not testpic_path.exists():
-    testpic_path.mkdir()
+testpic_path    = testreport_path / "testpic"
+testreport_path.mkdir(parents=True, exist_ok=True)
+testpic_path.mkdir(parents=True, exist_ok=True)
 print("check/make folder successfully")
 
-# saving the parameters for every game
-glo_var = None
 
-class Glo_var():
-    # in_game_name : game name, defined in the main file
-    # player_num   : max number of players (= how many screenshots to take per round)
+# ════════════════════════════════════════════════════════════════════
+# 2. InputBackend — strategy for pyautogui vs selenium
+# ════════════════════════════════════════════════════════════════════
 
-    def __init__(self, in_game_name, player_num, round_count, suit_order = None, list_len = 3) :
-        # variables initialized only once (do not change when switching games)
-        self.game_driver = None  # selenium WebDriver instance (e.g. Chrome)
-        base_dir = Path(__file__).resolve().parent
-        parent_dir = base_dir.parent
-        self.user_change_path = list(parent_dir.rglob("user_change"))[0]
+class InputBackend:
+    """Abstract pointer-input backend. Subclasses: PyautoguiBackend, SeleniumBackend."""
+    # Subclasses override to shave off sleep that ActionChains already spends
+    sleep_adjust = 0.0
 
-        self.read_input()
+    def click(self, x, y, long_click=None, move_click=None):
+        raise NotImplementedError
 
-        now_time = datetime.datetime.now().strftime(ISOTIMEFORMAT)
-        txt_location_path = testreport_path / now_time
-        if not txt_location_path.exists():
-            txt_location_path.mkdir()
+    def drag_swipe(self, direction, times):
+        raise NotImplementedError
 
-        self.pipe_output_f = open(txt_location_path / 'pipe_output.txt', "w", encoding='UTF-8') # log for thread
-        self.cmd_output_f  = open(txt_location_path / 'cmd_output.txt',  "w", encoding='UTF-8') # log for unittest
-        self.error_f       = open(txt_location_path / 'error.txt',        "w", encoding='UTF-8')# log for error
-        self.file_create_time = "lobby"
+    def cancel_swipe_hint(self):
+        raise NotImplementedError
 
-        self.record_time = datetime.datetime.now()
-        self.mid_pos = None
-        self.auto_next = True
-
-        self.change_by_game(in_game_name, player_num, round_count, suit_order, list_len)
-        # self.reset_var(round_count) # Class Glo_var內上方為初始化一次的多個變數，reset_var內為可能會需要"重複初始化"，因此單獨紀錄於一個func內，已便可重複呼叫
-
-    def read_input(self) :
-        print("Game_envi :", Game_envi)
-        self.is_url = False
-        if type(Game_envi)==type("") and len(Game_envi) >= 3 and Game_envi[0:3] == "url" :
-            self.is_url = True
-            print("Game_envi is url")
-            ip = ""
-            try :
-                response = requests.get("http://"+ip+"/crawler/getCompanys")
-                # print("response : "+str(response.content))
-                self.DaiLi_data = response.json()
-                print("response after json : " + str(self.DaiLi_data))
-            except Exception :
-                print("json fail so using local file")
-                url_json_path = self.user_change_path / 'url.json'
-                with open(url_json_path, encoding='UTF-8') as f:
-                    self.DaiLi_data = json.load(f)
-        else:
-            if Game_envi == "Minesweeper_local_py":
-                input_file_path = self.user_change_path / "Minesweeper_input.txt"
-            else :
-                print("Game_envi error (no such env)")
-                return
-
-            with open(input_file_path, "r", encoding='UTF-8') as read_input_f:
-                self.game_account   = str(read_input_f.readline().split(" -:")[1]).strip()
-                print("Account: "     + self.game_account)
-                self.game_password  = str(read_input_f.readline().split(" -:")[1]).strip()
-                print("Password: "    + self.game_password)
-                self.game_agent_ID  = str(read_input_f.readline().split(" -:")[1]).strip()
-                print("Agent ID: "    + self.game_agent_ID)
-                self.game_money     = str(read_input_f.readline().split(" -:")[1]).strip()
-                print("Credits: "     + self.game_money)
-                self.game_envir     = str(read_input_f.readline().split(" -:")[1]).strip()
-                print("Environment: " + self.game_envir)
-                self.server_account  = str(read_input_f.readline().split(" -:")[1]).strip()
-                print("Server account: " + self.server_account)
-                self.server_password = str(read_input_f.readline().split(" -:")[1]).strip()
-                print("Server password: " + self.server_password)
-
-                type_input = ""
-                # set type_input = "n" to switch to interactive input mode
-                if type_input.strip() == "n" or type_input.strip() == "N" :
-                    game_account_in = input("Account (blank = use file): ")
-                    if game_account_in.strip() != "":
-                        self.game_account = game_account_in
-                    game_password_in = input("Password (blank = use file): ")
-                    if game_password_in.strip() != "":
-                        self.game_password = game_password_in
-                    game_agent_ID_in = input("Agent ID (blank = use file): ")
-                    if game_agent_ID_in.strip() != "":
-                        self.game_agent_ID = game_agent_ID_in
-                    game_money_in = input("Credits (blank = use file): ")
-                    if game_money_in.strip() != "":
-                        self.game_money = game_money_in
-                    game_envir_in = input("Environment (blank = use file): ")
-                    if game_envir_in.strip() != "":
-                        self.game_envir = game_envir_in
-                    server_account_in = input("Server account (blank = use file): ")
-                    if server_account_in.strip() != "":
-                        self.server_account = server_account_in
-                    server_password_in = input("Server password (blank = use file): ")
-                    if server_password_in.strip() != "":
-                        self.server_password = server_password_in
-                        
-    def change_by_game(self, in_game_name, player_num, round_count, suit_order = None, list_len = 3):
-        identify_for_import.game_name = in_game_name
-
-        user_game_pic_parent = self.user_change_path / "game_pic"
-        if not user_game_pic_parent.exists():
-            user_game_pic_parent.mkdir()
-
-        self.game_pic_path = self.user_change_path / "game_pic" / f"{in_game_name}_pic"
-        if not self.game_pic_path.exists():
-            self.game_pic_path.mkdir()
-
-        self.cut_pic_path = str(self.game_pic_path / "training_data") + "\\"
-
-        training_data_path = self.game_pic_path / "training_data"
-        if not training_data_path.exists():
-            training_data_path.mkdir()
-
-        self.game_name = in_game_name
-        self.player_num = player_num
-        self.list_len = list_len
-        try :
-            self.class_to_str_list = Data.name_list[in_game_name]
-        except KeyError :
-            print("Warning: " + in_game_name + " not found in Data.py")
-            self.class_to_str_list = {}
-        
-        # decide card suit order
-        # Card.change_suit_order(suit_order)
-
-        self.reset_var(round_count)
-
-    # reset_var holds variables that may need to be re-initialized mid-run (e.g. on error recovery)
-    def reset_var(self, round_count) :
-        self.client_data = []  # stores all recognition results per round per player
-                               # structure: client_data[round % list_len][player_index][key]
-        self.begin_time  = []  # round start timestamps (for backend report search)
-        self.end_time    = []  # round end timestamps
-        for x in range(self.list_len) :  # list_len slots act as a ring buffer (default 3)
-            self.client_data.append({})
-            for y in range(self.player_num) :
-                self.client_data[x][y] = {}
-            self.begin_time.append(None)
-            self.end_time.append(None)
-
-        self.fail_playing      = False   # set True on error; triggers full restart
-        self.server_using      = False   # True while a backend-crawl thread is running
-        self.first_time_play   = True
-        self.reject_invite     = False
-        self.round_count          = round_count - 1  # used during a round
-        self.round_count_for_pipe = round_count - 1  # used after a round ends
-
-    # set the timeout reference point; call at the start of each test step
-    def set_record_time(self, val = None) :
-        if val == None :
-            self.record_time = datetime.datetime.now()
-        else :
-            self.record_time = val
-
-def open_game_web() :
-    global glo_var
-    print("open browser")
-    options = webdriver.ChromeOptions()
-    # options.headless = True # A headless browser is a web browser without a graphical user interface (GUI).
-    options.add_argument("--window-size=1960,1080")
-    options.add_argument('disable-infobars')
-
-    # Configure browser settings to hide the 'controlled by automated software' notification.
-    # options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    # options.add_experimental_option("useAutomationExtension", False)
-
-    prefs = {"":""}
-    prefs["credentials_enable_service"] = False
-    prefs["profile.password_manager_enabled"] = False
-    options.add_experimental_option("prefs", prefs)
-    service = Service(ChromeDriverManager().install())
-    glo_var.game_driver = webdriver.Chrome(service=service, options=options)
-
-    pyautogui.click(30, 30) # click the browser window, make it top
-    time.sleep(1)
-    full_screen()
-    # open_book_mark()
-    login_plat()
-
-    glo_var.actionChains = ActionChains(glo_var.game_driver)
-
-    # main_windows = glo_var.game_driver.current_window_handle
-    # print(main_windows) 
-    # all_windows = glo_var.game_driver.window_handles
-    # print(all_windows)
-
-def login_plat() :
-    global glo_var
-    print("login platform")
-    if Game_envi == "CQ9" :
-        glo_var.game_driver.get("https://h5bt.cqgame.games/h5/BT02/?language=zh-cn&?token=guest")
-    elif Game_envi == "Minesweeper_web" :
-        glo_var.game_driver.get("http://127.0.0.1:8000")
-    else :
-        raise Exception(f"Game_envi {Game_envi} doesn't exist!")
-
-def switch_to_game_web():
-    # call this after a page opens a new tab, so selenium can control it
-    global glo_var
-    print("switching web page")
-    all_windows = glo_var.game_driver.window_handles
-    # < Method 1 >
-    # for handle in all_windows:
-    #     if handle != main_windows:
-    #         driver.switch_to.window(handle)
-    # < Method 2 > switch to the last tab
-    glo_var.game_driver.switch_to.window(all_windows[-1])
-
-    # pyautogui.click(21, 21)
-
-def full_screen() :
-    global glo_var
-    # driver.refresh() will disable fullscreen setting
-    glo_var.game_driver.maximize_window() # still have the top bar
-    # glo_var.game_driver.fullscreen_window() # F11 full screen
-
-    # using hotkey to swtich to fullscreen
-    pyautogui.hotkey("f11")
+    def move_home(self):
+        """Park the cursor somewhere neutral. Optional (selenium has no real cursor)."""
+        pass
 
 
-def open_book_mark():
-    pyautogui.hotkey("ctrl","shift","b")
-
-# write error info to error.txt
-def report_error(round_num, why = None) :
-    global glo_var
-    glo_var.error_f.write("error round : " + str(round_num) + "\n")
-    glo_var.error_f.write("error time : " + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "\n")
-    if why != None :
-        glo_var.error_f.write(why + "\n")
-    glo_var.error_f.flush()
-
-# read one line from a file handle and return it as a [x, y, w, h] int list
-def read_pos(read_dst_f) :
-    read_in = read_dst_f.readline().strip().split(", ")
-    position = [int(read_in[0]), int(read_in[1]), int(read_in[2]), int(read_in[3])]
-    return position
-
-def check_valid_region(pos, region):
-    x,y = pos
-    for (st_x,st_1,len_n,len_y), in_flag in region :
-        if ((st_x <= x <= (st_x+len_n)) and (st_1 <= y <= (st_1+len_y))) != in_flag :
-            return False
-    return True
-    
-
-# click a screen position
-# pos          : (x, y) in screen coordinates
-# stri         : label to print in the log
-# dosleep      : wait time (seconds) after the click
-# long_click   : if set, hold the mouse down for this many seconds before releasing
-# move_click   : if set, move to the position and wait this many seconds before clicking
-# limit_region : if set, only click if pos is inside/outside the defined region
-def click(pos, stri = None, dosleep = 0.3, long_click = None, move_click = None, limit_region = None) :
-    global glo_var
-    global use_sel
-
-    x = pos[0]
-    y = pos[1]
-
-    if use_sel == 0 :
-        if limit_region != None :
-            if not check_valid_region((x,y), limit_region) :
-                return False
-
-        if stri != None:
-            print_to_output(stri + " click_pos : ("+str(x)+","+str(y)+")")
-        else :
-            print_to_output("click_pos : ("+str(x)+","+str(y)+")")
-
-        if move_click != None :
+class PyautoguiBackend(InputBackend):
+    """Screen-coordinate input via pyautogui — works with any window."""
+    def click(self, x, y, long_click=None, move_click=None):
+        if move_click is not None:
             pyautogui.moveTo(x, y)
             time.sleep(move_click)
-
-        if long_click == None :
+        if long_click is None:
             pyautogui.click(x, y)
-            pyautogui.moveTo(952, 21)
-        else :
+        else:
             pyautogui.mouseDown(x, y)
             time.sleep(long_click)
             pyautogui.mouseUp()
-            pyautogui.moveTo(952, 21)
+        self.move_home()
 
-    else :
-        if stri != None :
-            print_to_output(stri+" click_pos : ("+str(x)+","+str(y)+")")
-        else :
-            print_to_output("click_pos : ("+str(x)+","+str(y)+")")
-
-        ActionChains(glo_var.game_driver).move_by_offset(x, y).click().move_by_offset(-x, -y).perform()
-        dosleep = dosleep - 0.7
-
-    if dosleep > 0:
-        time.sleep(dosleep)
-
-    return True
-
-# click the center of the last image found by compare_sim
-# also resets the timeout timer — marks the end of the current state and start of the next
-def click_mid(stri = "", dosleep = 0.3, long_click = None, move_click = None) :
-    global glo_var
-    click(glo_var.mid_pos, "click " + stri, dosleep, long_click, move_click)
-    glo_var.set_record_time()
-
-# drag the screen left or right (used to scroll the lobby page)
-# direction : "left" or "right"
-# times     : how many times to drag
-# note: url-mode always uses pyautogui — selenium drag causes issues on url-type games
-def mouse_drag(direction, times) :
-    global glo_var
-    if use_sel == 0 or glo_var.is_url:
-        if direction == "left" :
-            for x in range(times) :
+    def drag_swipe(self, direction, times):
+        for _ in range(times):
+            if direction == "left":
                 pyautogui.mouseDown(400, 600)
                 pyautogui.moveTo(1500, 600, 1.5)
                 time.sleep(0.5)
                 pyautogui.mouseUp()
                 time.sleep(0.5)
-        elif direction == "right" :
-            for x in range(times) :
+            elif direction == "right":
                 pyautogui.mouseDown(1500, 600)
                 pyautogui.moveTo(400, 600, 1.5)
                 time.sleep(0.4)
                 pyautogui.mouseUp()
                 time.sleep(0.2)
-        pyautogui.moveTo(952, 21)
-    else :
-        if direction == "left":
-            for x in range(times) :
-                ActionChains(glo_var.game_driver).move_by_offset(400, 600).click_and_hold().perform()
-                for y in range(20):
-                    ActionChains(glo_var.game_driver).move_by_offset(55, 0).perform()
-                ActionChains(glo_var.game_driver).release().perform()
-                ActionChains(glo_var.game_driver).move_by_offset(-1500, -600).perform()
-        elif direction == "right" :
-            for x in range(times) :
-                ActionChains(glo_var.game_driver).move_by_offset(1500, 600).click_and_hold().perform()
-                for y in range(20):
-                    ActionChains(glo_var.game_driver).move_by_offset(-55, 0).perform()
-                # print("first stop")
-                # time.sleep(1)
-                ActionChains(glo_var.game_driver).move_by_offset(0, 0).perform()
-                ActionChains(glo_var.game_driver).release().perform()
-                ActionChains(glo_var.game_driver).move_by_offset(0, 0).perform()
-                # print("second stop")
-                # time.sleep(1)
-                ActionChains(glo_var.game_driver).move_by_offset(-400, -600).perform()
-                # print("third stop")
-                # time.sleep(1)
+        self.move_home()
 
-# Unused alternative: Win32 screen capture (faster but unstable — kept for reference)
-# import win32gui, win32ui, win32con, win32api
-# class Cap_var() :
-#     def __init__(self) :
-#         hwndDC = win32gui.GetWindowDC(0)
-#         self.mfcDC = win32ui.CreateDCFromHandle(hwndDC)
-#         self.saveDC = self.mfcDC.CreateCompatibleDC()
-#         self.saveBitMap = win32ui.CreateBitmap()
-# cap_var = Cap_var()
-# def window_capture(filename, region = (0,0,1919,1079)) :
-#     global cap_var
-#     w, h = region[2], region[3]
-#     cap_var.saveBitMap.CreateCompatibleBitmap(cap_var.mfcDC, w, h)
-#     cap_var.saveDC.SelectObject(cap_var.saveBitMap)
-#     cap_var.saveDC.BitBlt((0, 0), (w, h), cap_var.mfcDC, (region[0], region[1]), win32con.SRCCOPY)
-#     cap_var.saveBitMap.SaveBitmapFile(cap_var.saveDC, filename)
+    def cancel_swipe_hint(self):
+        # swipe left then back → hint dismissed, no game element actually moved
+        pyautogui.mouseDown(1500, 600)
+        pyautogui.moveTo(400, 600, 1.2)
+        pyautogui.moveTo(1500, 600, 1.2)
+        time.sleep(0.5)
+        pyautogui.mouseUp()
+        time.sleep(0.5)
+        self.move_home()
 
-# Replacement for pyautogui.locateCenterOnScreen
-# (PyAutoGUI 0.9.54 is not compatible with OpenCV 4.11)
-def read_template(pic_file) :
-    pic_file = str(pic_file)
-    return cv2.imread(pic_file)
-
-def locateCenterOnScreen(template_pic, region = None, save_loc = None):
-    # Take screenshot
-    if region is not None:
-        region = tuple(map(int, region))
-        
-    screenshot = pyautogui.screenshot(region=region)
-    
-    if save_loc != None:
-        screenshot.save(save_loc)
-        
-    screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
-
-    # Load and Match template
-    # cv2.compareHist(img_cut, img, 0) # This is another method to match template
-    result = cv2.matchTemplate(screenshot, template_pic, cv2.TM_CCOEFF_NORMED)
-    _, max_val, _, max_loc = cv2.minMaxLoc(result)
-    
-    # Calculate center
-    h, w = template_pic.shape[:2]
-    center_x = max_loc[0] + w // 2
-    center_y = max_loc[1] + h // 2
-    if region is not None:
-        center_x += region[0]
-        center_y += region[1]
-    return max_val, (center_x, center_y)
+    def move_home(self):
+        pyautogui.moveTo(*HOME_POS)
 
 
-def compare_sim(file_place, className, confidence = 0.9, precise = False, before = False, lobby = False) :
-    '''
-    # Main logic for image comparison and state detection:
-    # 1. Compare the current screen with pre-saved images. If similarity > confidence (default 0.9), return the similarity score.
-    # 2. If similarity < confidence, check for pixel shifts or offset. If found, return 0.9.
-    # 3. If no match is found after both steps, return 0.
-    # 
-    # Parameters:
-    # - file_place: Target file path; pass the filename only (e.g., "continue").
-    # - className: Filename for the image to be embedded in the HTML report.
-    # - confidence: Threshold for similarity; returns score only if sim > confidence.
-    # - precise: If True, skips step 2 (offset check). Use True for fixed-position elements.
-    # - before: Screenshot timing. True: Before comparison; False: After finding target; None: Skip screenshot.
-    #
-    # Optimization Note:
-    # There is a trade-off here: taking screenshots at every comparison ensures we have the "last state" for 
-    # reports during a crash, but it is time-consuming. Should we move screenshot logic solely to the error handler?
-    # Also, screenshots often coincide with timeout checks, but due to latency, the captured image 
-    # might not reflect the exact moment of failure (it usually only captures the desired state in normal runs).
-    # 
-    # Source: Images are pulled from the lobby directory: 
-    # C:\Thomas_test\models\research\object_detection\game_pic\lobby_pic
-    #
-    # Logic Matrix:
-    # - confidence > 0.9 & precise = True  => Strict match at a specific location.
-    # - confidence > 0.9 & precise = False => Strict match at location; if failed, perform a full-screen search.
-    # - confidence <= 0.9 & precise = True  => Relaxed match at location; do not attempt full-screen search.
-    '''
-    global glo_var
+class SeleniumBackend(InputBackend):
+    """Page-coordinate input via selenium ActionChains.
+    Note: long_click / move_click are pyautogui-only — silently ignored here."""
 
-    report_screenshot_path = str(testpic_path / f'{className}_{glo_var.file_create_time}.png')
-    # if file_place == "", it means we just want to take screenshot for the report
-    if file_place == "" :
-        pyautogui.screenshot(report_screenshot_path)
-        return None
+    sleep_adjust = -0.7  # ActionChains already waits inside perform()
 
-    if not lobby :
-        exact_pos_file = glo_var.game_pic_path / f"{file_place}.txt"
-        pic_file       = glo_var.game_pic_path / f"{file_place}.png"
-        region_file    = glo_var.game_pic_path / f"{file_place}_region.txt"
-    else :
-        lobby_path     = glo_var.game_pic_path.parent / "lobby_pic"
-        exact_pos_file = lobby_path / f"{file_place}.txt"
-        pic_file       = lobby_path / f"{file_place}.png"
-        region_file    = lobby_path / f"{file_place}_region.txt"
+    def __init__(self, driver):
+        self.driver = driver
 
-    template_img     = read_template(pic_file)
-    debug_screen_pic = str(testpic_path / f'{glo_var.file_create_time}_{file_place}_detail.png')
+    def click(self, x, y, long_click=None, move_click=None):
+        (ActionChains(self.driver)
+            .move_by_offset(x, y)
+            .click()
+            .move_by_offset(-x, -y)
+            .perform())
 
-    if before == True:
-        pyautogui.screenshot(report_screenshot_path)
+    def drag_swipe(self, direction, times):
+        for _ in range(times):
+            if direction == "left":
+                self._hold_and_drag(start=(400, 600), step=(55, 0),
+                                    steps=20, reset=(-1500, -600))
+            elif direction == "right":
+                self._hold_and_drag(start=(1500, 600), step=(-55, 0),
+                                    steps=20, reset=(-400, -600),
+                                    re_center_around_release=True)
 
-    sim = 0
-    region_sim = 0
-    with open(exact_pos_file, "r") as read_dst_f :
-        exact_region = read_pos(read_dst_f)
-        sim, glo_var.mid_pos = locateCenterOnScreen(template_img, region=exact_region, save_loc=debug_screen_pic)
-        print("compare " + file_place + " , sim: " + str(sim))
+    def cancel_swipe_hint(self):
+        ActionChains(self.driver).move_by_offset(1500, 600).click_and_hold().perform()
+        for _ in range(20):
+            ActionChains(self.driver).move_by_offset(-55, 0).perform()
+        for _ in range(20):
+            ActionChains(self.driver).move_by_offset(55, 0).perform()
+        ActionChains(self.driver).release().perform()
+        ActionChains(self.driver).move_by_offset(-1500, -600).perform()
 
-        if before == False:
-            pyautogui.screenshot(report_screenshot_path)
-
-        if sim > confidence :
-            return sim
-
-    if confidence <= 0.91 and precise == False:
-        find_region = None
-        if region_file.exists() :
-            with open(region_file, "r") as region_dst_f :
-                find_region = read_pos(region_dst_f)
-
-        region_sim, glo_var.mid_pos = locateCenterOnScreen(template_img, region=find_region)
-        if before == False :
-            pyautogui.screenshot(report_screenshot_path)
-
-        if region_sim > confidence :
-            print("< " + file_place + " > not found at exact position, found in full screen")
-            return 0.9
-
-    if region_sim < sim :
-        print("sim :", sim, "region_sim :", region_sim)
-        print("sometimes sim is better than region_sim")
-    return max(sim, region_sim)
-
-# Print to console, HTML report, and cmd_output.txt log
-def print_to_output(stri) :
-    global glo_var
-    print(stri)
-    HTMLTestRun.p_to_html(str(stri) + "\n")
-    glo_var.cmd_output_f.write(str(stri) + "\n")
-    glo_var.cmd_output_f.flush()
-
-def cut_pic_data(location, num, round_count, cover = True, cut_new = False, pic_count = None, write_region = False, comp = False):
-    '''
-    # Captures screenshots of specific regions based on predefined coordinates.
-    # 
-    # Parameters & Logic:
-    # - location: The target item for recognition. Locations and coordinates are manually added via FKNN_pic. 
-    #             The folder name is defined by 'location', containing a mandatory 'pos.txt' that stores 
-    #             the specific coordinates for cropping. Captured images are saved in their respective 
-    #             subfolders under 'user_change'.
-    #             Note: The number of folders in the 'location' directory must match the folder count in 'user_change'.
-    # - num: The number of coordinate sets (regions) to be read from the position file.
-    # - round_count: Syncs the capture process with the current execution round.
-    # - cover: 
-    #     - False: Appends a timestamp to the filename (typically used for collecting training data).
-    #     - True: The image is no longer needed for the training dataset; the file will not be stored 
-    #             permanently after the comparison is complete.
-    # - cut_new: Currently deprecated.
-    # - pic_count: An optional suffix (numeric or string) added to the filename to prevent overwriting 
-    #              when capturing multiple images from the same location.
-    '''
-    
-    global glo_var
-    end_file_path = glo_var.game_pic_path / location
-
-    png_path = []
-    with open(str(end_file_path) + ".txt", "r") as read_dst_f :
-        for x in range(num):
-            position = read_pos(read_dst_f)
-
-            user_pic_location = glo_var.game_pic_path / location
-            if not user_pic_location.exists():
-                user_pic_location.mkdir()
-
-            if comp :
-                comp_pic_pos = user_pic_location.with_name(user_pic_location.stem + f"_comp_{x+11}_{round_count}")
-                png_path.append(str(comp_pic_pos.with_suffix(".png")))
-                pyautogui.screenshot(png_path[-1], region=position)
-                with open(str(comp_pic_pos.with_suffix(".txt")), "w") as fw :
-                    fw.write(str(position)[1:-1])
-            elif pic_count == None :
-                png_path.append(str(user_pic_location / f"{x+11}_{round_count}.png"))
-                pyautogui.screenshot(png_path[-1], region=position)
-            else :
-                png_path.append(str(user_pic_location / f"{x+11}_{round_count}_{pic_count}.png"))
-                pyautogui.screenshot(png_path[-1], region=position)
-
-            if cover == False :
-                theTime = datetime.datetime.now().strftime(ISOTIMEFORMAT)
-                training_location = Path(glo_var.cut_pic_path) / location
-                if not training_location.exists():
-                    training_location.mkdir()
-                if pic_count == None :
-                    pyautogui.screenshot(str(training_location / f"{x}_{theTime}.png"), region=position)
-                else :
-                    pyautogui.screenshot(str(training_location / f"{pic_count}_{x}_{theTime}.png"), region=position)
-    return png_path
-
-# Run OCR/classifier on cut_pic_data screenshots and store results in glo_var.client_data.
-# label      : classifier name (matches training_for_XXX and inference_graph_for_XXX)
-# name       : key used to store the result — glo_var.client_data[round][player][name]
-# use_DATA   : if True, convert classifier output via Data.py label map
-# thresh     : classifier confidence threshold (higher = stricter)
-def set_client_data(label, name, round_count_in, use_DATA = False, thresh = 0.5, type = "number", class_to_info_list = None, all_in_flag = False) :
-    global glo_var
-    if type == "number" :
-        pass_data = identify_for_import.identify_number(iden_thing=label, round_count=round_count_in, thresh=thresh)
-    elif type == "things" :
-        pass_data = identify_for_import.identify_things(iden_thing=label, round_count=round_count_in, thresh=thresh, class_to_info_list=class_to_info_list, all_in_flag=all_in_flag)
-
-    for x in range(len(pass_data)) :
-        if pass_data[x] == None :
-            glo_var.client_data[round_count_in % glo_var.list_len][x][name] = None
-        else :
-            if use_DATA :
-                try :
-                    glo_var.client_data[round_count_in % glo_var.list_len][x][name] = glo_var.class_to_str_list[label][pass_data[x]]
-                except IndexError :
-                    print_to_output(str(name) + " recognition data: " + str(pass_data) + " player " + str(x) + " error")
-                    report_error(round_count_in, "recognition error")
-            else :
-                glo_var.client_data[round_count_in % glo_var.list_len][x][name] = pass_data[x]
-            print_to_output("Player " + str(x+1) + " " + name + ": " + str(glo_var.client_data[round_count_in % glo_var.list_len][x][name]))
+    def _hold_and_drag(self, start, step, steps, reset,
+                       re_center_around_release=False):
+        ActionChains(self.driver).move_by_offset(*start).click_and_hold().perform()
+        for _ in range(steps):
+            ActionChains(self.driver).move_by_offset(*step).perform()
+        if re_center_around_release:
+            ActionChains(self.driver).move_by_offset(0, 0).perform()
+        ActionChains(self.driver).release().perform()
+        if re_center_around_release:
+            ActionChains(self.driver).move_by_offset(0, 0).perform()
+        ActionChains(self.driver).move_by_offset(*reset).perform()
 
 
-def can_get_server_data(finish_time, sleep_time = 35) :
-    global glo_var
+def make_backend(use_sel, is_url, driver=None) -> InputBackend:
+    """Pick the pointer backend.
 
-    # ensure at least sleep_time seconds have passed since the round ended
-    delta_time = (datetime.datetime.now() - finish_time).seconds
-    print("Server wait: " + str(delta_time) + "s")
-    if delta_time < sleep_time :
-        time.sleep(sleep_time - delta_time)
+    url-mode always uses pyautogui: selenium drag events are unreliable on
+    url-type game pages.
+    """
+    if use_sel == 0 or is_url:
+        return PyautoguiBackend()
+    return SeleniumBackend(driver)
 
-    if glo_var.server_using :
-        total_wait_time = 30
-        print("Previous server fetch still running. Waiting " + str(total_wait_time) + "s")
-        for x in range(total_wait_time) :
-            if x % 10 == 1 :
-                print("Server wait remaining: " + str(total_wait_time - x))
-            time.sleep(1)
-            if glo_var.server_using == False :
-                print("Previous fetch done. Starting crawl.")
-                break
 
-    if glo_var.server_using :
-        print("Server still busy after waiting. Giving up.")
-        glo_var.fail_playing = True
-        return False
+# ════════════════════════════════════════════════════════════════════
+# 3. Pure utility functions (no state)
+# ════════════════════════════════════════════════════════════════════
 
+def read_pos(read_dst_f):
+    """Read one '[x, y, w, h]' line from a file handle; return int list.
+
+    read_dst_f is a file handle (not a filename) — position advances after
+    each call, so multiple read_pos() calls on the same handle walk through
+    consecutive lines.
+    """
+    parts = read_dst_f.readline().strip().split(", ")
+    return [int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])]
+
+
+def check_valid_region(pos, region):
+    """region is a list of ((x, y, w, h), must_be_inside_flag) pairs."""
+    x, y = pos
+    for (st_x, st_y, len_x, len_y), in_flag in region:
+        inside = (st_x <= x <= st_x + len_x) and (st_y <= y <= st_y + len_y)
+        if inside != in_flag:
+            return False
     return True
 
 
-# Returns True if time since last set_record_time() call exceeds limit seconds
-def cal_time_out(limit, state = "") :
-    global glo_var
-    now_time = datetime.datetime.now()
-    delta_time = (now_time - glo_var.record_time).seconds
-    # print(delta_time)
-    if delta_time >= limit :
-        print_to_output(str(state) + " has past " + str(delta_time)+ " sec")
-        return True
-    else :    
+def read_template(pic_file):
+    return cv2.imread(str(pic_file))
+
+
+def locateCenterOnScreen(template_pic, region=None, save_loc=None):
+    """Take a screenshot and template-match; return (similarity, (center_x, center_y)).
+
+    Replacement for pyautogui.locateCenterOnScreen, which is incompatible with
+    OpenCV 4.11 in PyAutoGUI 0.9.54.
+    """
+    if region is not None:
+        region = tuple(map(int, region))
+
+    screenshot = pyautogui.screenshot(region=region)
+    if save_loc is not None:
+        screenshot.save(save_loc)
+    screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+
+    result = cv2.matchTemplate(screenshot, template_pic, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+    h, w = template_pic.shape[:2]
+    cx = max_loc[0] + w // 2
+    cy = max_loc[1] + h // 2
+    if region is not None:
+        cx += region[0]
+        cy += region[1]
+    return max_val, (cx, cy)
+
+
+def full_screen(driver):
+    driver.maximize_window()
+    pyautogui.hotkey("f11")
+
+
+def open_book_mark():
+    pyautogui.hotkey("ctrl", "shift", "b")
+
+
+def login_plat(driver, game_envi):
+    print("login platform")
+    if game_envi == "CQ9":
+        driver.get("https://h5bt.cqgame.games/h5/BT02/?language=zh-cn&?token=guest")
+    elif game_envi == "Minesweeper_web":
+        driver.get("http://127.0.0.1:8000")
+    else:
+        raise Exception(f"Game_envi {game_envi} doesn't exist!")
+
+
+def switch_to_game_web(driver):
+    """Call this after the page opens a new tab, so selenium can control it."""
+    print("switching web page")
+    driver.switch_to.window(driver.window_handles[-1])
+
+
+def print_exception(exc):
+    _, _, tb = sys.exc_info()
+    last = traceback.extract_tb(tb)[-1]
+    msg = (f'File "{last[0]}", line {last[1]}, in {last[2]}: '
+           f'[{exc.__class__.__name__}] {exc.args[0]}')
+    print(msg)
+
+
+# ════════════════════════════════════════════════════════════════════
+# 4. Config / State / Session — three data containers
+# ════════════════════════════════════════════════════════════════════
+
+class GameConfig:
+    """Static per-session config — paths, credentials, label map.
+
+    Read-only after init. Owns:
+      • game_name, player_num, list_len, game_envi, is_url
+      • user_change_path, game_pic_path, cut_pic_path
+      • credentials (game_account / game_password / ...)
+      • class_to_str_list (label → string map from Data.py)
+    """
+
+    def __init__(self, in_game_name, player_num, game_envi, list_len=3):
+        self.game_name  = in_game_name
+        self.player_num = player_num
+        self.list_len   = list_len
+        self.game_envi  = game_envi
+
+        self.user_change_path = self._find_user_change_dir()
+        self._setup_game_paths()
+
+        self.is_url     = False
+        self.DaiLi_data = None
+        self._load_credentials()
+
+        self.class_to_str_list = self._load_class_to_str_list()
+
+    # ── setup helpers ──────────────────────────────────────────────
+
+    @staticmethod
+    def _find_user_change_dir():
+        base_dir = Path(__file__).resolve().parent
+        return list(base_dir.parent.rglob("user_change"))[0]
+
+    def _setup_game_paths(self):
+        (self.user_change_path / "game_pic").mkdir(exist_ok=True)
+        self.game_pic_path = self.user_change_path / "game_pic" / f"{self.game_name}_pic"
+        self.game_pic_path.mkdir(exist_ok=True)
+
+        training_data_path = self.game_pic_path / "training_data"
+        training_data_path.mkdir(exist_ok=True)
+        self.cut_pic_path = str(training_data_path) + "\\"
+
+        # export game name to the identification module
+        identify_for_import.game_name = self.game_name
+
+    # ── credential loaders (branch on game_envi) ───────────────────
+
+    def _load_credentials(self):
+        envi = self.game_envi
+        print("Game_envi :", envi)
+        if isinstance(envi, str) and envi.startswith("url"):
+            self.is_url = True
+            print("Game_envi is url")
+            self._load_url_credentials()
+        elif envi == "Minesweeper_local_py":
+            self._load_file_credentials(self.user_change_path / "Minesweeper_input.txt")
+        else:
+            # web / other envs — no credentials file to read
+            pass
+
+    def _load_url_credentials(self):
+        ip = ""
+        try:
+            response = requests.get(f"http://{ip}/crawler/getCompanys")
+            self.DaiLi_data = response.json()
+            print("response after json : " + str(self.DaiLi_data))
+        except Exception:
+            print("json fail so using local file")
+            with open(self.user_change_path / 'url.json', encoding='UTF-8') as f:
+                self.DaiLi_data = json.load(f)
+
+    def _load_file_credentials(self, path):
+        def _field(f):
+            return str(f.readline().split(" -:")[1]).strip()
+        with open(path, "r", encoding='UTF-8') as f:
+            self.game_account    = _field(f); print("Account: "         + self.game_account)
+            self.game_password   = _field(f); print("Password: "        + self.game_password)
+            self.game_agent_ID   = _field(f); print("Agent ID: "        + self.game_agent_ID)
+            self.game_money      = _field(f); print("Credits: "         + self.game_money)
+            self.game_envir      = _field(f); print("Environment: "     + self.game_envir)
+            self.server_account  = _field(f); print("Server account: "  + self.server_account)
+            self.server_password = _field(f); print("Server password: " + self.server_password)
+
+    def _load_class_to_str_list(self):
+        try:
+            return Data.name_list[self.game_name]
+        except KeyError:
+            print(f"Warning: {self.game_name} not found in Data.py")
+            return {}
+
+
+class GameState:
+    """Dynamic runtime state — mutates during play.
+
+    Call reset(round_count) to re-init for a new playthrough (e.g. after an
+    error restart). Owns:
+      • round counters (round_count, round_count_for_pipe)
+      • ring-buffered per-round data (client_data, begin_time, end_time)
+      • flags (fail_playing, server_using, first_time_play, reject_invite)
+      • transient values (mid_pos, record_time, file_create_time)
+    """
+
+    def __init__(self, round_count, player_num, list_len):
+        self._player_num = player_num
+        self._list_len   = list_len
+        self.reset(round_count)
+
+    def reset(self, round_count):
+        # ring buffer: one slot per outstanding round (see slot() for index)
+        self.client_data = [
+            {p: {} for p in range(self._player_num)}
+            for _ in range(self._list_len)
+        ]
+        self.begin_time = [None] * self._list_len
+        self.end_time   = [None] * self._list_len
+
+        self.fail_playing         = False   # True on error → triggers restart
+        self.server_using         = False   # True while a backend-crawl thread runs
+        self.first_time_play      = True
+        self.reject_invite        = False
+        self.round_count          = round_count - 1   # in-round counter
+        self.round_count_for_pipe = round_count - 1   # post-round counter
+
+        self.file_create_time = "lobby"      # used in screenshot filenames
+        self.mid_pos          = None         # last compare_sim() match center
+        self.record_time      = datetime.datetime.now()  # timeout reference
+        self.auto_next        = True
+
+    def set_record_time(self, val=None):
+        """Reset the timeout reference — call at the start of each test step."""
+        self.record_time = val if val is not None else datetime.datetime.now()
+
+    def slot(self, round_count):
+        """Return the ring-buffer slot index for a given round number."""
+        return round_count % self._list_len
+
+
+class GameSession:
+    """I/O resources held open for the life of one playing session.
+
+    Owns:
+      • log file handles (pipe_output_f, cmd_output_f, error_f)
+      • selenium WebDriver (game_driver)
+      • input backend (backend) — chosen by make_backend()
+      • actionChains (for direct selenium use outside the backend abstraction)
+    """
+
+    def __init__(self, testreport_root):
+        now_time = datetime.datetime.now().strftime(ISOTIMEFORMAT)
+        log_dir = testreport_root / now_time
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        self.pipe_output_f = open(log_dir / 'pipe_output.txt', "w", encoding='UTF-8')
+        self.cmd_output_f  = open(log_dir / 'cmd_output.txt',  "w", encoding='UTF-8')
+        self.error_f       = open(log_dir / 'error.txt',       "w", encoding='UTF-8')
+
+        self.game_driver  = None
+        self.backend      = None
+        self.actionChains = None
+
+    def bind_driver(self, driver, use_sel, is_url):
+        """Register a freshly created WebDriver and construct its input backend."""
+        self.game_driver = driver
+        self.backend     = make_backend(use_sel, is_url, driver)
+        self.actionChains = ActionChains(driver)
+
+
+# ════════════════════════════════════════════════════════════════════
+# 5. Glo_var — thin composition of config/state/session
+# ════════════════════════════════════════════════════════════════════
+
+class Glo_var:
+    """Session-wide data hub.
+
+    Composition over inheritance:
+      • config  — static (paths, credentials, labels)
+      • state   — dynamic (counters, flags, buffers)
+      • session — I/O resources (logs, driver, backend)
+
+    Direct attribute access is fine — no getter/setter logic. Call sites read
+    e.g. `glo_var.state.round_count`, `glo_var.session.backend`.
+    """
+
+    def __init__(self, in_game_name, player_num, round_count,
+                 suit_order=None, list_len=3):
+        self.config  = GameConfig(in_game_name, player_num, Game_envi, list_len)
+        self.state   = GameState(round_count, player_num, list_len)
+        self.session = GameSession(testreport_path)
+
+    # Thin convenience delegates — common enough to keep at the top level
+    def reset(self, round_count):
+        self.state.reset(round_count)
+
+    def set_record_time(self, val=None):
+        self.state.set_record_time(val)
+
+
+# Module-level singleton (assigned by the entry script after construction)
+glo_var = None
+
+
+# ════════════════════════════════════════════════════════════════════
+# 6. Orchestration / IO functions
+# ════════════════════════════════════════════════════════════════════
+
+# ── browser lifecycle ─────────────────────────────────────────────
+
+def open_game_web(glo_var):
+    """Open browser, log in, and wire the driver into the session."""
+    print("open browser")
+    options = webdriver.ChromeOptions()
+    options.add_argument("--window-size=1960,1080")
+    options.add_argument("disable-infobars")
+    prefs = {
+        "": "",
+        "credentials_enable_service": False,
+        "profile.password_manager_enabled": False,
+    }
+    options.add_experimental_option("prefs", prefs)
+
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
+
+    pyautogui.click(30, 30)
+    time.sleep(1)
+    full_screen(driver)
+    login_plat(driver, glo_var.config.game_envi)
+
+    glo_var.session.bind_driver(driver, use_sel, glo_var.config.is_url)
+
+
+# ── input (delegates to backend) ──────────────────────────────────
+
+def click(backend, pos, stri=None, dosleep=0.3,
+          long_click=None, move_click=None, limit_region=None, log=None):
+    """Click at screen/page position pos via the given backend.
+
+    • long_click / move_click are pyautogui-only; SeleniumBackend ignores them.
+    • limit_region, if given, skips the click when pos falls outside the region
+      (returns False instead of clicking).
+    • log — optional logger callable; defaults to builtin print.
+    """
+    x, y = pos
+    if limit_region is not None and not check_valid_region((x, y), limit_region):
         return False
- 
-def print_exception(exceptio):
-    error_class = exceptio.__class__.__name__
-    detail = exceptio.args[0]
-    cl, exc, tb = sys.exc_info()
-    lastCallStack = traceback.extract_tb(tb)[-1]
-    fileName = lastCallStack[0]
-    lineNum = lastCallStack[1]
-    funcName = lastCallStack[2]
-    errMsg = "File \"{}\", line {}, in {}: [{}] {}".format(fileName, lineNum, funcName, error_class, detail)
-    print(errMsg)
-    
+
+    label = (f"{stri} click_pos : ({x},{y})" if stri
+             else f"click_pos : ({x},{y})")
+    (log or print)(label)
+
+    backend.click(x, y, long_click=long_click, move_click=move_click)
+
+    dosleep += backend.sleep_adjust
+    if dosleep > 0:
+        time.sleep(dosleep)
+    return True
+
+
+def click_mid(glo_var, stri="", dosleep=0.3, long_click=None, move_click=None):
+    """Click the center of the last image found by compare_sim.
+
+    Also resets the timeout timer — marks end-of-state and start-of-next-state.
+    """
+    def _log(s):
+        print_to_output(glo_var.session.cmd_output_f, s)
+
+    click(
+        glo_var.session.backend,
+        glo_var.state.mid_pos,
+        stri="click " + stri,
+        dosleep=dosleep, long_click=long_click, move_click=move_click,
+        log=_log,
+    )
+    glo_var.state.set_record_time()
+
+
+def mouse_drag(backend, direction, times):
+    """Swipe left or right (used to scroll the lobby)."""
+    backend.drag_swipe(direction, times)
+
+
+def cancel_first_time(backend):
+    """Dismiss the first-time swipe hint (swipe out and back)."""
+    print("canceling first time sliding hint")
+    backend.cancel_swipe_hint()
+    print("end canceling hint")
+
+
+# ── logging / error reporting ─────────────────────────────────────
+
+def print_to_output(cmd_output_f, stri):
+    """Print to console, HTML report, and cmd_output.txt."""
+    print(stri)
+    HTMLTestRun.p_to_html(str(stri) + "\n")
+    cmd_output_f.write(str(stri) + "\n")
+    cmd_output_f.flush()
+
+
+def report_error(error_f, round_num, why=None):
+    """Append an error entry to error.txt.
+
+    round_num — which round the error occurred in.
+    why       — optional reason string.
+    """
+    error_f.write(f"error round : {round_num}\n")
+    error_f.write(f"error time : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    if why is not None:
+        error_f.write(why + "\n")
+    error_f.flush()
+
+
+def cal_time_out(glo_var, limit, state_name=""):
+    """Return True if time since state.record_time exceeds limit seconds."""
+    delta = (datetime.datetime.now() - glo_var.state.record_time).seconds
+    if delta >= limit:
+        print_to_output(glo_var.session.cmd_output_f,
+                        f"{state_name} has past {delta} sec")
+        return True
+    return False
+
+
+# ── compare_sim + internal helpers ────────────────────────────────
+
+def compare_sim(glo_var, file_place, className,
+                confidence=0.9, precise=False, before=False, lobby=False):
+    """Compare the screen with a saved template image.
+
+    Returns a similarity score (0–1), or None when file_place == "" (in which
+    case only a report screenshot is taken).
+
+    Also updates glo_var.state.mid_pos to the match center — used by the next
+    click_mid() call.
+
+    precise=True  : only search the exact saved position (no fallback).
+    precise=False : if not found exactly, search the full screen and return
+                    0.9 if found.
+    lobby=True    : look in lobby_pic/ instead of the game-specific folder.
+    """
+    report_path = _report_screenshot_path(className, glo_var.state.file_create_time)
+
+    # file_place == "" means "just take a screenshot for the report"
+    if file_place == "":
+        pyautogui.screenshot(report_path)
+        return None
+
+    pos_file, pic_file, region_file = _resolve_template_paths(
+        file_place, glo_var.config.game_pic_path, lobby)
+
+    template  = read_template(pic_file)
+    debug_pic = str(testpic_path / f'{glo_var.state.file_create_time}_{file_place}_detail.png')
+
+    if before:
+        pyautogui.screenshot(report_path)
+
+    # try exact position first
+    sim, pos = _match_at_exact_position(template, pos_file, debug_pic)
+    print(f"compare {file_place} , sim: {sim}")
+    glo_var.state.mid_pos = pos
+
+    if not before:
+        pyautogui.screenshot(report_path)
+
+    if sim > confidence:
+        return sim
+
+    # fallback: full-screen search
+    region_sim = 0
+    if confidence <= 0.91 and not precise:
+        region_sim, pos = _match_fallback(template, region_file)
+        glo_var.state.mid_pos = pos
+        if not before:
+            pyautogui.screenshot(report_path)
+        if region_sim > confidence:
+            print(f"< {file_place} > not found at exact position, found in full screen")
+            return 0.9
+
+    if region_sim < sim:
+        print(f"sim : {sim} region_sim : {region_sim}")
+        print("sometimes sim is better than region_sim")
+    return max(sim, region_sim)
+
+
+def _report_screenshot_path(className, file_create_time):
+    return str(testpic_path / f'{className}_{file_create_time}.png')
+
+
+def _resolve_template_paths(file_place, game_pic_path, lobby):
+    """Return (pos_txt, pic_png, region_txt) paths for a template."""
+    base = game_pic_path.parent / "lobby_pic" if lobby else game_pic_path
+    return (
+        base / f"{file_place}.txt",
+        base / f"{file_place}.png",
+        base / f"{file_place}_region.txt",
+    )
+
+
+def _match_at_exact_position(template, pos_file, save_loc=None):
+    with open(pos_file, "r") as f:
+        region = read_pos(f)
+    return locateCenterOnScreen(template, region=region, save_loc=save_loc)
+
+
+def _match_fallback(template, region_file):
+    """Full-screen (or bounded region) search when the exact-position lookup misses."""
+    region = None
+    if region_file.exists():
+        with open(region_file, "r") as f:
+            region = read_pos(f)
+    return locateCenterOnScreen(template, region=region)
+
+
+# ── cut_pic_data + internal helpers ───────────────────────────────
+
+def cut_pic_data(glo_var, location, num, round_count,
+                 cover=True, cut_new=False, pic_count=None,
+                 write_region=False, comp=False):
+    """Take screenshots of predefined regions and save them.
+
+    location  : subfolder/file name under game_pic_path (no extension).
+    num       : number of regions to read from the .txt file.
+    cover     : True = overwrite same file (comparison use);
+                False = also save a timestamped copy in training_data/.
+    pic_count : optional extra suffix when multiple shots of the same region
+                should not overwrite each other.
+    comp      : True = save into a '<location>_comp_<idx>_<round>.png' sibling
+                file plus a sidecar .txt containing the region coords.
+    """
+    game_pic_path = glo_var.config.game_pic_path
+    cut_pic_path  = glo_var.config.cut_pic_path
+    txt_path      = str(game_pic_path / location) + ".txt"
+    out_dir       = game_pic_path / location
+
+    regions = _read_regions(txt_path, num)
+    out_dir.mkdir(exist_ok=True)
+
+    png_paths = []
+    for idx, region in enumerate(regions):
+        if comp:
+            png = _save_comparison_shot(region, out_dir, idx, round_count)
+        elif pic_count is None:
+            png = _save_region_shot(region, out_dir / f"{idx+11}_{round_count}.png")
+        else:
+            png = _save_region_shot(region, out_dir / f"{idx+11}_{round_count}_{pic_count}.png")
+        png_paths.append(png)
+
+        if not cover:
+            _save_training_shot(region, cut_pic_path, location, idx, pic_count)
+
+    return png_paths
+
+
+def _read_regions(txt_path, num):
+    """Read `num` region specs from a pos-file."""
+    regions = []
+    with open(txt_path, "r") as f:
+        for _ in range(num):
+            regions.append(read_pos(f))
+    return regions
+
+
+def _save_region_shot(region, out_path):
+    out = str(out_path)
+    pyautogui.screenshot(out, region=region)
+    return out
+
+
+def _save_comparison_shot(region, out_dir, idx, round_count):
+    """Save into '<out_dir>_comp_<idx+11>_<round_count>.png' (sibling of out_dir)
+    plus a .txt sidecar containing the region coords."""
+    stem = out_dir.with_name(out_dir.stem + f"_comp_{idx+11}_{round_count}")
+    png  = str(stem.with_suffix(".png"))
+    pyautogui.screenshot(png, region=region)
+    with open(str(stem.with_suffix(".txt")), "w") as fw:
+        fw.write(str(region)[1:-1])
+    return png
+
+
+def _save_training_shot(region, cut_pic_path, location, idx, pic_count):
+    """Save a timestamped copy under training_data/<location>/ for later training."""
+    timestamp = datetime.datetime.now().strftime(ISOTIMEFORMAT)
+    training_dir = Path(cut_pic_path) / location
+    training_dir.mkdir(parents=True, exist_ok=True)
+    name = (f"{idx}_{timestamp}.png" if pic_count is None
+            else f"{pic_count}_{idx}_{timestamp}.png")
+    pyautogui.screenshot(str(training_dir / name), region=region)
+
+
+# ── set_client_data: run recognition and store results ────────────
+
+def set_client_data(glo_var, label, name, round_count_in,
+                    use_DATA=False, thresh=0.5, type="number",
+                    class_to_info_list=None, all_in_flag=False):
+    """Run OCR / classifier on cut_pic_data shots and store results in state.
+
+    label          — classifier name (matches training_for_XXX and
+                     inference_graph_for_XXX).
+    name           — key used to store the result —
+                     state.client_data[slot][player][name].
+    round_count_in — the round number; used to pick the ring-buffer slot.
+    use_DATA       — if True, convert classifier output via class_to_str_list.
+    thresh         — classifier confidence threshold (higher = stricter).
+    """
+    if type == "number":
+        results = identify_for_import.identify_number(
+            iden_thing=label, round_count=round_count_in, thresh=thresh)
+    elif type == "things":
+        results = identify_for_import.identify_things(
+            iden_thing=label, round_count=round_count_in, thresh=thresh,
+            class_to_info_list=class_to_info_list, all_in_flag=all_in_flag)
+
+    state   = glo_var.state
+    config  = glo_var.config
+    slot    = state.slot(round_count_in)
+    log_f   = glo_var.session.cmd_output_f
+    error_f = glo_var.session.error_f
+
+    for x, value in enumerate(results):
+        if value is None:
+            state.client_data[slot][x][name] = None
+            continue
+
+        if use_DATA:
+            try:
+                state.client_data[slot][x][name] = config.class_to_str_list[label][value]
+            except IndexError:
+                print_to_output(log_f,
+                    f"{name} recognition data: {results} player {x} error")
+                report_error(error_f, round_count_in, "recognition error")
+        else:
+            state.client_data[slot][x][name] = value
+
+        print_to_output(log_f,
+            f"Player {x+1} {name}: {state.client_data[slot][x][name]}")
+
+
+# ── can_get_server_data: coordinate with backend-crawl threads ────
+
+def can_get_server_data(glo_var, finish_time, sleep_time=35):
+    """Block until it's safe to fetch backend data for this round.
+
+    Waits at least sleep_time seconds since finish_time, then yields to any
+    other backend-crawl thread that's still running.  Returns False (and sets
+    fail_playing) if the other thread never releases.
+    """
+    state = glo_var.state
+
+    # ensure at least sleep_time seconds have passed since the round ended
+    delta = (datetime.datetime.now() - finish_time).seconds
+    print(f"Server wait: {delta}s")
+    if delta < sleep_time:
+        time.sleep(sleep_time - delta)
+
+    # yield to any in-flight backend-crawl thread
+    if state.server_using:
+        total = 30
+        print(f"Previous server fetch still running. Waiting {total}s")
+        for x in range(total):
+            if x % 10 == 1:
+                print(f"Server wait remaining: {total - x}")
+            time.sleep(1)
+            if not state.server_using:
+                print("Previous fetch done. Starting crawl.")
+                break
+
+    if state.server_using:
+        print("Server still busy after waiting. Giving up.")
+        state.fail_playing = True
+        return False
+    return True

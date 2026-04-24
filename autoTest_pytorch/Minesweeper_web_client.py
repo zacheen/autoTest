@@ -7,7 +7,8 @@ class MinesweeperWebClient:
     def _get_driver(self):
         import Tool_Main
 
-        driver = getattr(Tool_Main.glo_var, "game_driver", None)
+        glo_var = Tool_Main.glo_var
+        driver = glo_var.session.game_driver if glo_var is not None else None
         if driver is None:
             print("[MinesweeperWebClient] Browser driver not ready")
             return None

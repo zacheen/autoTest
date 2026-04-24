@@ -55,13 +55,14 @@ class Minesweeper_End_thread (Thread):
 
     def run(self):
         finish_time = datetime.datetime.now()
-                
-        Tool_Main.glo_var.round_count_for_pipe += 1
-        pass_in_round_count_for_pipe = Tool_Main.glo_var.round_count_for_pipe
+
+        glo_var = Tool_Main.glo_var
+        glo_var.state.round_count_for_pipe += 1
+        pass_in_round_count_for_pipe = glo_var.state.round_count_for_pipe
         print(f"Starting round {pass_in_round_count_for_pipe}")
-        
-        Tool_Main.cut_pic_data("player_money_aft", Tool_Main.glo_var.player_num, Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len, cover=False)
-        Tool_Main.cut_pic_data("win_lose"        , Tool_Main.glo_var.player_num, pass_in_round_count_for_pipe%Tool_Main.glo_var.list_len, cover=False)
+
+        Tool_Main.cut_pic_data(glo_var, "player_money_aft", glo_var.config.player_num, glo_var.state.slot(glo_var.state.round_count),          cover=False)
+        Tool_Main.cut_pic_data(glo_var, "win_lose",         glo_var.config.player_num, glo_var.state.slot(pass_in_round_count_for_pipe), cover=False)
         print("finish screen shot card type")
 
         print("start identifing")
@@ -102,9 +103,12 @@ class Minesweeper_End_thread (Thread):
 
 def KPSZNN_do_compare(server_data, pass_in_round_count_for_pipe):
     global game_only_var
-    Tool_Main.print_to_output("Round " + str(pass_in_round_count_for_pipe))
-    Tool_Main.print_to_output("KPSZNN_do_compare client data: "+str(Tool_Main.glo_var.client_data[pass_in_round_count_for_pipe%Tool_Main.glo_var.list_len]))
-    Tool_Main.glo_var.pipe_output_f.write("Pipeline round " + str(pass_in_round_count_for_pipe) + "\n")
+    glo_var = Tool_Main.glo_var
+    log_f = glo_var.session.cmd_output_f
+    slot  = glo_var.state.slot(pass_in_round_count_for_pipe)
+    Tool_Main.print_to_output(log_f, "Round " + str(pass_in_round_count_for_pipe))
+    Tool_Main.print_to_output(log_f, "KPSZNN_do_compare client data: " + str(glo_var.state.client_data[slot]))
+    glo_var.session.pipe_output_f.write("Pipeline round " + str(pass_in_round_count_for_pipe) + "\n")
 
         # 這裡放的是 只有這個 Main 會用到的全域變數
 class Game_only_var() :
@@ -120,46 +124,51 @@ class Game_test_case(unittest.TestCase) :
         pass
 
     def test_choose_room(self):
-        Tool_Main.glo_var.set_record_time()
+        glo_var = Tool_Main.glo_var
+        glo_var.set_record_time()
 
         while True :
-            if Tool_Main.cal_time_out(10,sys._getframe().f_code.co_name) or Tool_Main.glo_var.fail_playing :
-                Tool_Main.glo_var.fail_playing = True
+            if Tool_Main.cal_time_out(glo_var, 10, sys._getframe().f_code.co_name) or glo_var.state.fail_playing :
+                glo_var.state.fail_playing = True
                 self.assertTrue(False,"time_out")
                 break
-            
-            if Tool_Main.compare_sim("level_training",sys._getframe().f_code.co_name) > 0.97 :
-            # if Tool_Main.compare_sim("roomLV1",sys._getframe().f_code.co_name) > 0.97 :
-                Tool_Main.click_mid("click room")
+
+            if Tool_Main.compare_sim(glo_var, "level_training", sys._getframe().f_code.co_name) > 0.97 :
+            # if Tool_Main.compare_sim(glo_var, "roomLV1", sys._getframe().f_code.co_name) > 0.97 :
+                Tool_Main.click_mid(glo_var, "click room")
                 break
 
     # ── test cases - after entering game ──────────────────────────
 
     def test_state_prepare(self) :
-        Tool_Main.glo_var.set_record_time()
-        Tool_Main.glo_var.round_count += 1
-        Tool_Main.glo_var.begin_time[Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len] = str((datetime.datetime.now()+datetime.timedelta(minutes=-3)).strftime(Tool_Main.format_for_db_time))
-        Tool_Main.print_to_output(f"Round {str(Tool_Main.glo_var.round_count)}, start at {Tool_Main.glo_var.begin_time[Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len]}")
+        glo_var = Tool_Main.glo_var
+        glo_var.set_record_time()
+        glo_var.state.round_count += 1
+        slot = glo_var.state.slot(glo_var.state.round_count)
+        glo_var.state.begin_time[slot] = str((datetime.datetime.now()+datetime.timedelta(minutes=-3)).strftime(Tool_Main.format_for_db_time))
+        Tool_Main.print_to_output(glo_var.session.cmd_output_f,
+            f"Round {glo_var.state.round_count}, start at {glo_var.state.begin_time[slot]}")
 
         # take screenshot for html report
-        Tool_Main.compare_sim("", sys._getframe().f_code.co_name)
+        Tool_Main.compare_sim(glo_var, "", sys._getframe().f_code.co_name)
 
     def test_click_middle(self):
-        Tool_Main.glo_var.set_record_time()
+        glo_var = Tool_Main.glo_var
+        glo_var.set_record_time()
 
         while True :
-            if Tool_Main.cal_time_out(200,sys._getframe().f_code.co_name) or Tool_Main.glo_var.fail_playing :
-                Tool_Main.glo_var.fail_playing = True
+            if Tool_Main.cal_time_out(glo_var, 200, sys._getframe().f_code.co_name) or glo_var.state.fail_playing :
+                glo_var.state.fail_playing = True
                 self.assertTrue(False,"time_out")
                 break
-            
-            if Tool_Main.compare_sim("new_game",sys._getframe().f_code.co_name) > 0.97 :
-            # if Tool_Main.compare_sim("grab_none",sys._getframe().f_code.co_name) > 0.97 :
+
+            if Tool_Main.compare_sim(glo_var, "new_game", sys._getframe().f_code.co_name) > 0.97 :
+            # if Tool_Main.compare_sim(glo_var, "grab_none", sys._getframe().f_code.co_name) > 0.97 :
                 Minesweeper_Begin_thread().start()
                 break
 
     def decide_next_step_and_play(self, game_status):
-        Tool_Main.glo_var.set_record_time()
+        Tool_Main.glo_var.set_record_time()  # glo_var.set_record_time() is a thin delegate to state
         # looping until find a position that is in the game_region
         while True :
             check_pause()
@@ -207,9 +216,11 @@ class Game_test_case(unittest.TestCase) :
             self.update_model(game_status)
 
     def capture_grid_state(self, game_status):
+        glo_var = Tool_Main.glo_var
         game_status.save_pic_path = Tool_Main.cut_pic_data(
+            glo_var,
             "grid_region",
-            Tool_Main.glo_var.player_num,
+            glo_var.config.player_num,
             0,
             cover=True,
             comp=True
@@ -302,7 +313,8 @@ class Game_test_case(unittest.TestCase) :
             return self.total_reward / self.reward_count
 
     def test_RL(self):
-        Tool_Main.glo_var.set_record_time()
+        glo_var = Tool_Main.glo_var
+        glo_var.set_record_time()
         UI_waiting_time = 1
         game_status = Game_test_case.Game_status()
         game_status.noise = True  # enable epsilon-greedy during play
@@ -320,7 +332,7 @@ class Game_test_case(unittest.TestCase) :
                 game_status.agent.on_episode_end()
                 self.assertTrue(True, "game_over(really finish the game)")
                 break
-            elif Tool_Main.glo_var.fail_playing :
+            elif glo_var.state.fail_playing :
                 game_status.agent.log_episode_metrics(
                     win=False,
                     invalid_click_rate=game_status.invalid_click_rate(),
@@ -332,7 +344,7 @@ class Game_test_case(unittest.TestCase) :
 
             last_pic_pos = f"grid_region_comp_{0+11}_{0}"
             # since a small change in the whole screen shot is tiny, the threshold should be very strick
-            if Tool_Main.compare_sim(last_pic_pos,sys._getframe().f_code.co_name, precise = True) < 0.9995 :
+            if Tool_Main.compare_sim(glo_var, last_pic_pos, sys._getframe().f_code.co_name, precise=True) < 0.9995 :
                 # case : something changed
                 # game status for valid click
                 game_status.step_count += 1
@@ -341,13 +353,13 @@ class Game_test_case(unittest.TestCase) :
                 time.sleep(UI_waiting_time)
 
                 # check loss
-                if Tool_Main.compare_sim("lose", sys._getframe().f_code.co_name, precise=True) >= 0.9:
+                if Tool_Main.compare_sim(glo_var, "lose", sys._getframe().f_code.co_name, precise=True) >= 0.9:
                     game_status.reward = REWARD_LOSE
                     game_status.game_over = 1
                     print("hit mine")
 
                 # check win
-                elif Tool_Main.compare_sim("win", sys._getframe().f_code.co_name, precise=True) >= 0.9:
+                elif Tool_Main.compare_sim(glo_var, "win", sys._getframe().f_code.co_name, precise=True) >= 0.9:
                     game_status.reward = REWARD_WIN
                     game_status.game_over = 1
                     game_status.won = True
@@ -360,9 +372,9 @@ class Game_test_case(unittest.TestCase) :
                 if not game_status.game_over :
                     self.decide_next_step_and_play(game_status)
 
-            elif Tool_Main.cal_time_out(2,sys._getframe().f_code.co_name):
+            elif Tool_Main.cal_time_out(glo_var, 2, sys._getframe().f_code.co_name):
                 # check still in game
-                if Tool_Main.compare_sim("buttons",sys._getframe().f_code.co_name, precise = True) < 0.99 :
+                if Tool_Main.compare_sim(glo_var, "buttons", sys._getframe().f_code.co_name, precise=True) < 0.99 :
                     # not sure what happens, so don't give reward to model
                     game_status.game_over = 1
 
@@ -377,19 +389,20 @@ class Game_test_case(unittest.TestCase) :
                 game_status.next_state = game_status.current_pic
                 self.update_model(game_status)
                 if game_status.step_count > game_status.max_steps:
-                    Tool_Main.glo_var.fail_playing = True
+                    glo_var.state.fail_playing = True
                 else :
                     self.decide_next_step_and_play(game_status)
 
     def test_wait_result(self):
-        Tool_Main.glo_var.set_record_time()
+        glo_var = Tool_Main.glo_var
+        glo_var.set_record_time()
         while True :
-            if Tool_Main.cal_time_out(3,sys._getframe().f_code.co_name) or Tool_Main.glo_var.fail_playing :
-                Tool_Main.glo_var.fail_playing = True
+            if Tool_Main.cal_time_out(glo_var, 3, sys._getframe().f_code.co_name) or glo_var.state.fail_playing :
+                glo_var.state.fail_playing = True
                 self.assertTrue(False,"time_out")
                 break
 
-            if Tool_Main.compare_sim("confirm",sys._getframe().f_code.co_name, precise = False) >= 0.9 : 
+            if Tool_Main.compare_sim(glo_var, "confirm", sys._getframe().f_code.co_name, precise=False) >= 0.9 :
                 # < call the process when the game is ended, usually include backend data crawling and checking data correctness >
                 # KPSZNN_End_thread().start()
                 # total_wait_time = 100
@@ -398,20 +411,23 @@ class Game_test_case(unittest.TestCase) :
                 #     if x % 10 == 1 :
                 #         print(f"remain waiting time : {str(total_wait_time-x)} seconds")
                 #     time.sleep(1)
-                # Tool_Main.click_mid("click confirm button") # website version don't have confirm button
-                Tool_Main.glo_var.end_time[Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len] = str(datetime.datetime.now().strftime(Tool_Main.format_for_db_time))
-                Tool_Main.print_to_output("此局結束時間 : " + Tool_Main.glo_var.end_time[Tool_Main.glo_var.round_count%Tool_Main.glo_var.list_len])
+                # Tool_Main.click_mid(glo_var, "click confirm button") # website version don't have confirm button
+                slot = glo_var.state.slot(glo_var.state.round_count)
+                glo_var.state.end_time[slot] = str(datetime.datetime.now().strftime(Tool_Main.format_for_db_time))
+                Tool_Main.print_to_output(glo_var.session.cmd_output_f,
+                    "Round end time: " + glo_var.state.end_time[slot])
                 break
 
     def test_new_game(self):
-        Tool_Main.glo_var.set_record_time()
+        glo_var = Tool_Main.glo_var
+        glo_var.set_record_time()
         while True :
-            if Tool_Main.cal_time_out(3,sys._getframe().f_code.co_name) or Tool_Main.glo_var.fail_playing :
-                Tool_Main.glo_var.fail_playing = True
+            if Tool_Main.cal_time_out(glo_var, 3, sys._getframe().f_code.co_name) or glo_var.state.fail_playing :
+                glo_var.state.fail_playing = True
                 self.assertTrue(False,"time_out")
                 break
 
-            if Tool_Main.compare_sim("new_game",sys._getframe().f_code.co_name, precise = False) >= 0.97 : 
+            if Tool_Main.compare_sim(glo_var, "new_game", sys._getframe().f_code.co_name, precise=False) >= 0.97 :
                 if WEB_API.start_new_game():
                     break
     # ── end of test cases - after entering game ──────────────────────────
@@ -438,12 +454,13 @@ if __name__=="__main__" :
     game_only_var = Game_only_var()
     round_count = round_count-1
     print("Tool_Main.glo_var : ",Tool_Main.glo_var)
+    glo_var = Tool_Main.glo_var
     if Game_envi == "Minesweeper_local_py" :
         game_only_var.mine = Minesweeper_manager()
         game_only_var.mine.thread_start()
         print("now in Minesweeper_local_py successfully")
     elif Game_envi == "Minesweeper_web" :
-        Tool_Main.open_game_web()
+        Tool_Main.open_game_web(glo_var)
         print("now in Minesweeper_web successfully")
     else :
         raise Exception(f"Game_envi {Game_envi} doesn't exist!")
@@ -455,17 +472,17 @@ if __name__=="__main__" :
         open_game=unittest.TestSuite()
         open_game.addTest(Game_test_case("test_choose_room"))
 
-        Tool_Main.glo_var.file_create_time = time.strftime("%Y-%m-%d-%H_%M_%S",time.localtime(time.time()))
-        fp=open(f"./testreport/Report-{Tool_Main.glo_var.file_create_time}(open_game).html",'wb')
-        runner=HTMLTestRun.HTMLTestRunner(stream=fp,title=game_name,description=u'Report for opening game:', file_create_time = Tool_Main.glo_var.file_create_time)
+        glo_var.state.file_create_time = time.strftime("%Y-%m-%d-%H_%M_%S",time.localtime(time.time()))
+        fp=open(f"./testreport/Report-{glo_var.state.file_create_time}(open_game).html",'wb')
+        runner=HTMLTestRun.HTMLTestRunner(stream=fp,title=game_name,description=u'Report for opening game:', file_create_time = glo_var.state.file_create_time)
         # start to run the test case
         runner.run(open_game)
         fp.close()
-        
-        while Tool_Main.glo_var.fail_playing == False:
+
+        while glo_var.state.fail_playing == False:
             # test cases in the game
             round_count = round_count+1
-            during_gameing=unittest.TestSuite() 
+            during_gameing=unittest.TestSuite()
             # combine the test cases (usually is the game flow)
             during_gameing.addTest(Game_test_case("test_state_prepare"))
             during_gameing.addTest(Game_test_case("test_click_middle"))
@@ -473,27 +490,28 @@ if __name__=="__main__" :
             during_gameing.addTest(Game_test_case("test_wait_result"))
             during_gameing.addTest(Game_test_case("test_new_game"))
 
-            Tool_Main.glo_var.file_create_time = time.strftime("%Y-%m-%d-%H_%M_%S",time.localtime(time.time()))
-            fp=open(f"./testreport/Report-{Tool_Main.glo_var.file_create_time}(playing_game) ({str(round_count)} round).html",'wb')
-            runner=HTMLTestRun.HTMLTestRunner(stream=fp,title=game_name,description=u'Report for playing game:', file_create_time = Tool_Main.glo_var.file_create_time)
+            glo_var.state.file_create_time = time.strftime("%Y-%m-%d-%H_%M_%S",time.localtime(time.time()))
+            fp=open(f"./testreport/Report-{glo_var.state.file_create_time}(playing_game) ({round_count} round).html",'wb')
+            runner=HTMLTestRun.HTMLTestRunner(stream=fp,title=game_name,description=u'Report for playing game:', file_create_time = glo_var.state.file_create_time)
             # start to run the test cases
             runner.run(during_gameing)
             fp.close()
-        
+
         sleep_time = 3
-        if Tool_Main.glo_var.fail_playing :
-            Tool_Main.report_error(round_count)
+        if glo_var.state.fail_playing :
+            Tool_Main.report_error(glo_var.session.error_f, round_count)
             if Game_envi == "Minesweeper_local_py" :
                 game_only_var.mine.thread_stop()
             elif Game_envi == "Minesweeper_web" :
-                Tool_Main.glo_var.game_driver.quit()
-            Tool_Main.print_to_output(f"Errfail_playing detected. Waiting {sleep_time}s...")
+                glo_var.session.game_driver.quit()
+            Tool_Main.print_to_output(glo_var.session.cmd_output_f,
+                f"fail_playing detected. Waiting {sleep_time}s...")
             time.sleep(sleep_time)
-            Tool_Main.print_to_output("Restarting.")
+            Tool_Main.print_to_output(glo_var.session.cmd_output_f, "Restarting.")
             if Game_envi == "Minesweeper_local_py" :
                 game_only_var.mine.thread_start()
             elif Game_envi == "Minesweeper_web" :
-                Tool_Main.open_game_web()
-            Tool_Main.glo_var.reset_var(round_count+1)
+                Tool_Main.open_game_web(glo_var)
+            glo_var.reset(round_count+1)
             continue
             
