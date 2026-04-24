@@ -3,7 +3,7 @@
 Module layout
 ─────────────
 1. Module constants / paths      — set once on import
-2. InputBackend strategy         — pyautogui vs selenium, picked by make_backend()
+2. ClickAbstract strategy         — pyautogui vs selenium, picked by buildClick()
 3. Pure utilities                — stateless helpers (read_pos, template matching, ...)
 4. GameConfig / GameState / GameSession — three data containers
 5. Glo_var                       — thin composition of the above; module-level singleton
@@ -15,7 +15,7 @@ Design notes
 • Functions that only need one or two pieces of state take them as explicit params
   (e.g. report_error(error_f, ...), mouse_drag(backend, ...)). Orchestrators that
   touch multiple fields take the whole glo_var.
-• Pyautogui vs selenium switching is handled once, inside InputBackend subclasses.
+• Pyautogui vs selenium switching is handled once, inside ClickAbstract subclasses.
   No caller needs to branch on use_sel / is_url directly.
 """
 
@@ -56,7 +56,6 @@ format_for_db_time = '%Y-%m-%d %H:%M'      # used for DB search timestamps
 HOME_POS = (952, 21)
 
 # use_sel: 0 = pyautogui (screen coords) / 1 = selenium (page coords)
-# set externally before Glo_var() if you want to override the default
 use_sel = 1
 
 # Game_envi: set by the entry script before Glo_var() is constructed
@@ -71,43 +70,57 @@ print("check/make folder successfully")
 
 
 # ════════════════════════════════════════════════════════════════════
-# 2. InputBackend — strategy for pyautogui vs selenium
+# 2. ClickAbstract — Click the screen for pyautogui vs selenium
 # ════════════════════════════════════════════════════════════════════
-
-class InputBackend:
-    """Abstract pointer-input backend. Subclasses: PyautoguiBackend, SeleniumBackend."""
+class ClickAbstract:
+    """Abstract pointer-input backend. Subclasses: ClickPyautogui, ClickSelenium."""
     # Subclasses override to shave off sleep that ActionChains already spends
     sleep_adjust = 0.0
 
-    def click(self, x, y, long_click=None, move_click=None):
+    @staticmethod
+    def click(x, y, long_click=None, move_click=None):
+        '''
+        move_click :
+            move to (x,y)
+            wait move_click seconds
+            and click
+        long_click :
+            mouse down at (x,y)
+            wait long_click seconds
+            mouse up
+        '''
         raise NotImplementedError
 
-    def drag_swipe(self, direction, times):
+    @staticmethod
+    def drag_swipe(direction, times):
         raise NotImplementedError
 
-    def cancel_swipe_hint(self):
+    @staticmethod
+    def cancel_swipe_hint():
         raise NotImplementedError
 
-    def move_home(self):
+    @staticmethod
+    def move_home():
         """Park the cursor somewhere neutral. Optional (selenium has no real cursor)."""
         pass
 
-
-class PyautoguiBackend(InputBackend):
+class ClickPyautogui(ClickAbstract):
     """Screen-coordinate input via pyautogui — works with any window."""
-    def click(self, x, y, long_click=None, move_click=None):
-        if move_click is not None:
-            pyautogui.moveTo(x, y)
-            time.sleep(move_click)
-        if long_click is None:
-            pyautogui.click(x, y)
-        else:
+    @staticmethod
+    def click(x, y, long_click=None, move_click=None):
+        if long_click is not None:
             pyautogui.mouseDown(x, y)
             time.sleep(long_click)
             pyautogui.mouseUp()
-        self.move_home()
+        else :
+            if move_click is not None:
+                pyautogui.moveTo(x, y)
+                time.sleep(move_click)
+            pyautogui.click(x, y)
+        ClickPyautogui.move_home()
 
-    def drag_swipe(self, direction, times):
+    @staticmethod
+    def drag_swipe(direction, times):
         for _ in range(times):
             if direction == "left":
                 pyautogui.mouseDown(400, 600)
@@ -121,9 +134,10 @@ class PyautoguiBackend(InputBackend):
                 time.sleep(0.4)
                 pyautogui.mouseUp()
                 time.sleep(0.2)
-        self.move_home()
+        ClickPyautogui.move_home()
 
-    def cancel_swipe_hint(self):
+    @staticmethod
+    def cancel_swipe_hint():
         # swipe left then back → hint dismissed, no game element actually moved
         pyautogui.mouseDown(1500, 600)
         pyautogui.moveTo(400, 600, 1.2)
@@ -131,13 +145,14 @@ class PyautoguiBackend(InputBackend):
         time.sleep(0.5)
         pyautogui.mouseUp()
         time.sleep(0.5)
-        self.move_home()
+        ClickPyautogui.move_home()
 
-    def move_home(self):
+    @staticmethod
+    def move_home():
         pyautogui.moveTo(*HOME_POS)
 
 
-class SeleniumBackend(InputBackend):
+class ClickSelenium(ClickAbstract):
     """Page-coordinate input via selenium ActionChains.
     Note: long_click / move_click are pyautogui-only — silently ignored here."""
 
@@ -185,15 +200,14 @@ class SeleniumBackend(InputBackend):
         ActionChains(self.driver).move_by_offset(*reset).perform()
 
 
-def make_backend(use_sel, is_url, driver=None) -> InputBackend:
-    """Pick the pointer backend.
-
+def buildClick(use_sel, is_url, driver=None) -> ClickAbstract:
+    """
     url-mode always uses pyautogui: selenium drag events are unreliable on
     url-type game pages.
     """
     if use_sel == 0 or is_url:
-        return PyautoguiBackend()
-    return SeleniumBackend(driver)
+        return ClickPyautogui()
+    return ClickSelenium(driver)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -430,7 +444,7 @@ class GameSession:
     Owns:
       • log file handles (pipe_output_f, cmd_output_f, error_f)
       • selenium WebDriver (game_driver)
-      • input backend (backend) — chosen by make_backend()
+      • input backend (backend) — chosen by buildClick()
       • actionChains (for direct selenium use outside the backend abstraction)
     """
 
@@ -450,7 +464,7 @@ class GameSession:
     def bind_driver(self, driver, use_sel, is_url):
         """Register a freshly created WebDriver and construct its input backend."""
         self.game_driver = driver
-        self.backend     = make_backend(use_sel, is_url, driver)
+        self.backend     = buildClick(use_sel, is_url, driver)
         self.actionChains = ActionChains(driver)
 
 
@@ -524,7 +538,7 @@ def click(backend, pos, stri=None, dosleep=0.3,
           long_click=None, move_click=None, limit_region=None, log=None):
     """Click at screen/page position pos via the given backend.
 
-    • long_click / move_click are pyautogui-only; SeleniumBackend ignores them.
+    • long_click / move_click are pyautogui-only; ClickSelenium ignores them.
     • limit_region, if given, skips the click when pos falls outside the region
       (returns False instead of clicking).
     • log — optional logger callable; defaults to builtin print.
