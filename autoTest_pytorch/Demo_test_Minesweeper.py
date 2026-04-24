@@ -9,6 +9,8 @@ import traceback
 import pyautogui
 from pynput import keyboard
 
+from util.Log import Logger, print_to_output, report_error, format_for_db_time
+
 IS_PAUSED = False
 def on_press(key):
     global IS_PAUSED
@@ -24,15 +26,14 @@ def check_pause():
     while IS_PAUSED:
         time.sleep(0.1)
 
-import HTMLTestRun
-import Tool_Main
-from Gf_Except import Game_fail_Exception
+import util.HTMLTestRun as HTMLTestRun
+import util.Tool_Main as Tool_Main
+from util.Gf_Except import Game_fail_Exception
 from Minesweeper_web_client import MinesweeperWebClient
 
 from Minesweeper.Minesweeper_manager import Minesweeper_manager
 from visual_discrete_agent_v2 import get_agent
 
-WEB_API = MinesweeperWebClient(default_difficulty="Training 6x6")
 REWARD_VALID_CLICK = 1.0
 REWARD_INVALID_CLICK = -0.5
 # design corrosponding to discount factor = 0.7
@@ -56,13 +57,13 @@ class Minesweeper_End_thread (Thread):
     def run(self):
         finish_time = datetime.datetime.now()
 
-        glo_var = Tool_Main.glo_var
+        global glo_var
         glo_var.state.round_count_for_pipe += 1
         pass_in_round_count_for_pipe = glo_var.state.round_count_for_pipe
         print(f"Starting round {pass_in_round_count_for_pipe}")
 
-        Tool_Main.cut_pic_data(glo_var, "player_money_aft", glo_var.config.player_num, glo_var.state.slot(glo_var.state.round_count),          cover=False)
-        Tool_Main.cut_pic_data(glo_var, "win_lose",         glo_var.config.player_num, glo_var.state.slot(pass_in_round_count_for_pipe), cover=False)
+        Tool_Main.cut_pic_data(glo_var, "player_money_aft", glo_var.state.player_num, glo_var.state.slot(glo_var.state.round_count),          cover=False)
+        Tool_Main.cut_pic_data(glo_var, "win_lose",         glo_var.state.player_num, glo_var.state.slot(pass_in_round_count_for_pipe), cover=False)
         print("finish screen shot card type")
 
         print("start identifing")
@@ -94,7 +95,7 @@ class Minesweeper_End_thread (Thread):
 
         #     Tool_Main.glo_var.fail_playing = True
         #     Tool_Main.glo_var.server_using = True
-        #     Tool_Main.glo_var.pipe_output_f.write("Pipeline round " + str(pass_in_round_count_for_pipe) + " — backend crawl error\n")
+        #     Logger.pipe_write("Pipeline round " + str(pass_in_round_count_for_pipe) + " — backend crawl error\n")
 
         #     raise Game_fail_Exception
 
@@ -103,12 +104,11 @@ class Minesweeper_End_thread (Thread):
 
 def KPSZNN_do_compare(server_data, pass_in_round_count_for_pipe):
     global game_only_var
-    glo_var = Tool_Main.glo_var
-    log_f = glo_var.session.cmd_output_f
+    global glo_var
     slot  = glo_var.state.slot(pass_in_round_count_for_pipe)
-    Tool_Main.print_to_output(log_f, "Round " + str(pass_in_round_count_for_pipe))
-    Tool_Main.print_to_output(log_f, "KPSZNN_do_compare client data: " + str(glo_var.state.client_data[slot]))
-    glo_var.session.pipe_output_f.write("Pipeline round " + str(pass_in_round_count_for_pipe) + "\n")
+    print_to_output("Round " + str(pass_in_round_count_for_pipe))
+    print_to_output("KPSZNN_do_compare client data: " + str(glo_var.state.client_data[slot]))
+    Logger.pipe_write("Pipeline round " + str(pass_in_round_count_for_pipe) + "\n")
 
         # 這裡放的是 只有這個 Main 會用到的全域變數
 class Game_only_var() :
@@ -124,8 +124,8 @@ class Game_test_case(unittest.TestCase) :
         pass
 
     def test_choose_room(self):
-        glo_var = Tool_Main.glo_var
-        glo_var.set_record_time()
+        global glo_var
+        glo_var.state.set_record_time()
 
         while True :
             if Tool_Main.cal_time_out(glo_var, 10, sys._getframe().f_code.co_name) or glo_var.state.fail_playing :
@@ -141,20 +141,19 @@ class Game_test_case(unittest.TestCase) :
     # ── test cases - after entering game ──────────────────────────
 
     def test_state_prepare(self) :
-        glo_var = Tool_Main.glo_var
-        glo_var.set_record_time()
+        global glo_var
+        glo_var.state.set_record_time()
         glo_var.state.round_count += 1
         slot = glo_var.state.slot(glo_var.state.round_count)
-        glo_var.state.begin_time[slot] = str((datetime.datetime.now()+datetime.timedelta(minutes=-3)).strftime(Tool_Main.format_for_db_time))
-        Tool_Main.print_to_output(glo_var.session.cmd_output_f,
-            f"Round {glo_var.state.round_count}, start at {glo_var.state.begin_time[slot]}")
+        glo_var.state.begin_time[slot] = str((datetime.datetime.now()+datetime.timedelta(minutes=-3)).strftime(format_for_db_time))
+        print_to_output(f"Round {glo_var.state.round_count}, start at {glo_var.state.begin_time[slot]}")
 
         # take screenshot for html report
         Tool_Main.compare_sim(glo_var, "", sys._getframe().f_code.co_name)
 
     def test_click_middle(self):
-        glo_var = Tool_Main.glo_var
-        glo_var.set_record_time()
+        global glo_var
+        glo_var.state.set_record_time()
 
         while True :
             if Tool_Main.cal_time_out(glo_var, 200, sys._getframe().f_code.co_name) or glo_var.state.fail_playing :
@@ -168,7 +167,7 @@ class Game_test_case(unittest.TestCase) :
                 break
 
     def decide_next_step_and_play(self, game_status):
-        Tool_Main.glo_var.set_record_time()  # glo_var.set_record_time() is a thin delegate to state
+        Tool_Main.glo_var.state.set_record_time()  # glo_var.state.set_record_time() is a thin delegate to state
         # looping until find a position that is in the game_region
         while True :
             check_pause()
@@ -216,11 +215,11 @@ class Game_test_case(unittest.TestCase) :
             self.update_model(game_status)
 
     def capture_grid_state(self, game_status):
-        glo_var = Tool_Main.glo_var
+        global glo_var
         game_status.save_pic_path = Tool_Main.cut_pic_data(
             glo_var,
             "grid_region",
-            glo_var.config.player_num,
+            glo_var.state.player_num,
             0,
             cover=True,
             comp=True
@@ -313,8 +312,8 @@ class Game_test_case(unittest.TestCase) :
             return self.total_reward / self.reward_count
 
     def test_RL(self):
-        glo_var = Tool_Main.glo_var
-        glo_var.set_record_time()
+        global glo_var
+        glo_var.state.set_record_time()
         UI_waiting_time = 1
         game_status = Game_test_case.Game_status()
         game_status.noise = True  # enable epsilon-greedy during play
@@ -394,8 +393,8 @@ class Game_test_case(unittest.TestCase) :
                     self.decide_next_step_and_play(game_status)
 
     def test_wait_result(self):
-        glo_var = Tool_Main.glo_var
-        glo_var.set_record_time()
+        global glo_var
+        glo_var.state.set_record_time()
         while True :
             if Tool_Main.cal_time_out(glo_var, 3, sys._getframe().f_code.co_name) or glo_var.state.fail_playing :
                 glo_var.state.fail_playing = True
@@ -413,14 +412,13 @@ class Game_test_case(unittest.TestCase) :
                 #     time.sleep(1)
                 # Tool_Main.click_mid(glo_var, "click confirm button") # website version don't have confirm button
                 slot = glo_var.state.slot(glo_var.state.round_count)
-                glo_var.state.end_time[slot] = str(datetime.datetime.now().strftime(Tool_Main.format_for_db_time))
-                Tool_Main.print_to_output(glo_var.session.cmd_output_f,
-                    "Round end time: " + glo_var.state.end_time[slot])
+                glo_var.state.end_time[slot] = str(datetime.datetime.now().strftime(format_for_db_time))
+                print_to_output("Round end time: " + glo_var.state.end_time[slot])
                 break
 
     def test_new_game(self):
-        glo_var = Tool_Main.glo_var
-        glo_var.set_record_time()
+        global glo_var
+        glo_var.state.set_record_time()
         while True :
             if Tool_Main.cal_time_out(glo_var, 3, sys._getframe().f_code.co_name) or glo_var.state.fail_playing :
                 glo_var.state.fail_playing = True
@@ -432,11 +430,8 @@ class Game_test_case(unittest.TestCase) :
                     break
     # ── end of test cases - after entering game ──────────────────────────
 
-Game_envi = "Minesweeper_web"
-Tool_Main.Game_envi = Game_envi
-
-# initialize all the parameter relevant to all games
-game_name = "Minesweeper_web"
+GAME_ENV = "Minesweeper_web"
+GAME_NAME = "Minesweeper_web"
 player_num = 1
 
 if __name__=="__main__" : 
@@ -445,25 +440,27 @@ if __name__=="__main__" :
     listener.start()
 
     round_count = 1
-    Tool_Main.glo_var = Tool_Main.Glo_var(
-        in_game_name = game_name, 
-        player_num = player_num,           # player_num is related to the number of screen shots
+    from util.Info.Glo_var import Glo_var
+    glo_var = Glo_var(
+        game_name = GAME_NAME,
+        game_env = GAME_ENV,
+        player_num = player_num,
         round_count = round_count
     )
-    print("initialize the parameter only for this game")
+    Tool_Main.set_glo_var(glo_var)
+
     game_only_var = Game_only_var()
     round_count = round_count-1
-    print("Tool_Main.glo_var : ",Tool_Main.glo_var)
-    glo_var = Tool_Main.glo_var
-    if Game_envi == "Minesweeper_local_py" :
+    if GAME_ENV == "Minesweeper_local_py" :
         game_only_var.mine = Minesweeper_manager()
         game_only_var.mine.thread_start()
         print("now in Minesweeper_local_py successfully")
-    elif Game_envi == "Minesweeper_web" :
-        Tool_Main.open_game_web(glo_var)
+    elif GAME_ENV == "Minesweeper_web" :
+        glo_var.driver = Tool_Main.open_game_web()
+        WEB_API = MinesweeperWebClient(glo_var.driver, default_difficulty="Training 6x6")
         print("now in Minesweeper_web successfully")
     else :
-        raise Exception(f"Game_envi {Game_envi} doesn't exist!")
+        raise Exception(f"GAME_ENV {GAME_ENV} doesn't exist!")
 
 
     # main loop — runs forever, restart on error
@@ -474,7 +471,7 @@ if __name__=="__main__" :
 
         glo_var.state.file_create_time = time.strftime("%Y-%m-%d-%H_%M_%S",time.localtime(time.time()))
         fp=open(f"./testreport/Report-{glo_var.state.file_create_time}(open_game).html",'wb')
-        runner=HTMLTestRun.HTMLTestRunner(stream=fp,title=game_name,description=u'Report for opening game:', file_create_time = glo_var.state.file_create_time)
+        runner=HTMLTestRun.HTMLTestRunner(stream=fp,title=GAME_NAME,description=u'Report for opening game:', file_create_time = glo_var.state.file_create_time)
         # start to run the test case
         runner.run(open_game)
         fp.close()
@@ -492,26 +489,25 @@ if __name__=="__main__" :
 
             glo_var.state.file_create_time = time.strftime("%Y-%m-%d-%H_%M_%S",time.localtime(time.time()))
             fp=open(f"./testreport/Report-{glo_var.state.file_create_time}(playing_game) ({round_count} round).html",'wb')
-            runner=HTMLTestRun.HTMLTestRunner(stream=fp,title=game_name,description=u'Report for playing game:', file_create_time = glo_var.state.file_create_time)
+            runner=HTMLTestRun.HTMLTestRunner(stream=fp,title=GAME_NAME,description=u'Report for playing game:', file_create_time = glo_var.state.file_create_time)
             # start to run the test cases
             runner.run(during_gameing)
             fp.close()
 
         sleep_time = 3
         if glo_var.state.fail_playing :
-            Tool_Main.report_error(glo_var.session.error_f, round_count)
-            if Game_envi == "Minesweeper_local_py" :
+            report_error(round_count)
+            if GAME_ENV == "Minesweeper_local_py" :
                 game_only_var.mine.thread_stop()
-            elif Game_envi == "Minesweeper_web" :
-                glo_var.session.game_driver.quit()
-            Tool_Main.print_to_output(glo_var.session.cmd_output_f,
-                f"fail_playing detected. Waiting {sleep_time}s...")
+            elif GAME_ENV == "Minesweeper_web" :
+                glo_var.driver.quit()
+            print_to_output(f"fail_playing detected. Waiting {sleep_time}s...")
             time.sleep(sleep_time)
-            Tool_Main.print_to_output(glo_var.session.cmd_output_f, "Restarting.")
-            if Game_envi == "Minesweeper_local_py" :
+            print_to_output("Restarting.")
+            if GAME_ENV == "Minesweeper_local_py" :
                 game_only_var.mine.thread_start()
-            elif Game_envi == "Minesweeper_web" :
-                Tool_Main.open_game_web(glo_var)
+            elif GAME_ENV == "Minesweeper_web" :
+                glo_var.driver = Tool_Main.open_game_web()
             glo_var.reset(round_count+1)
             continue
             

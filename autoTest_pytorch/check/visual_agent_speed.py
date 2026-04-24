@@ -2,7 +2,7 @@ import time
 import torch
 import numpy as np
 
-# from autoTest_pytorch.visual_discrete_agent import VisualDiscreteAgent
+# from visual_discrete_agent import VisualDiscreteAgent
 
 import sys
 import os

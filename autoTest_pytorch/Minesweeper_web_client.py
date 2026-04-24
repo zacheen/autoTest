@@ -1,30 +1,17 @@
 class MinesweeperWebClient:
     """Small client for interacting with the Minesweeper web API via Selenium."""
 
-    def __init__(self, default_difficulty="Training 6x6"):
+    def __init__(self, driver, default_difficulty="Training 6x6"):
         self.default_difficulty = default_difficulty
-
-    def _get_driver(self):
-        import Tool_Main
-
-        glo_var = Tool_Main.glo_var
-        driver = glo_var.session.game_driver if glo_var is not None else None
-        if driver is None:
-            print("[MinesweeperWebClient] Browser driver not ready")
-            return None
-        return driver
+        self.driver = driver
 
     def click_cell(self, row, col):
         result = self.click_cell_with_state(row, col)
         return bool(result and result.get("ok"))
 
     def click_cell_with_state(self, row, col):
-        driver = self._get_driver()
-        if driver is None:
-            return None
-
         try:
-            result = driver.execute_async_script(
+            result = self.driver.execute_async_script(
                 """
                 const row = arguments[0];
                 const col = arguments[1];
@@ -69,7 +56,7 @@ class MinesweeperWebClient:
             )
 
             if result and result.get("ok"):
-                driver.refresh() # will wait until the page is loaded
+                self.driver.refresh() # will wait until the page is loaded
                 return result
 
             print(f"[MinesweeperWebClient] Click API failed: {result}")
@@ -79,12 +66,8 @@ class MinesweeperWebClient:
             return None
 
     def get_game_state(self):
-        driver = self._get_driver()
-        if driver is None:
-            return None
-
         try:
-            result = driver.execute_async_script(
+            result = self.driver.execute_async_script(
                 """
                 const done = arguments[arguments.length - 1];
                 const gameId = window.localStorage.getItem('minesweeper-web-game-id');
@@ -116,14 +99,10 @@ class MinesweeperWebClient:
             return None
 
     def start_new_game(self, difficulty=None):
-        driver = self._get_driver()
-        if driver is None:
-            return False
-
         difficulty = difficulty or self.default_difficulty
 
         try:
-            result = driver.execute_async_script(
+            result = self.driver.execute_async_script(
                 """
                 const difficulty = arguments[0];
                 const done = arguments[arguments.length - 1];
@@ -147,7 +126,7 @@ class MinesweeperWebClient:
             )
 
             if result and result.get("ok"):
-                driver.refresh() # will wait until the page is loaded
+                self.driver.refresh() # will wait until the page is loaded
                 return True
 
             print(f"[MinesweeperWebClient] New game API failed: {result}")

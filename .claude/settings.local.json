@@ -25,7 +25,13 @@
       "Read(//c/Users/User/miniconda3/envs//**)",
       "Read(//c/Users/User/miniconda3/**)",
       "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import ast; ast.parse\\(open\\('autoTest_pytorch/yolo_grid_state_predictor.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('autoTest_pytorch/Demo_test_Minesweeper.py', encoding='utf-8'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
-      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c ' *)"
+      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c ' *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('Tool_Main.py', encoding='utf-8'\\).read\\(\\)\\); print\\('Tool_Main.py OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('autoTest_pytorch/Tool_Main.py', encoding='utf-8'\\).read\\(\\)\\); print\\('Tool_Main.py OK'\\)\")",
+      "Bash(py -3 -c \"import ast; ast.parse\\(open\\('autoTest_pytorch/Tool_Main.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('autoTest_pytorch/Demo_test_Minesweeper.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('autoTest_pytorch/Minesweeper_web_client.py', encoding='utf-8'\\).read\\(\\)\\); print\\('all files OK'\\)\")",
+      "Bash(ls /c/Python* /c/Users/User/AppData/Local/Programs/Python)",
+      "Read(//c/ProgramData/**)",
+      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import ast; ast.parse\\(open\\('autoTest_pytorch/Tool_Main.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('autoTest_pytorch/Demo_test_Minesweeper.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('autoTest_pytorch/Minesweeper_web_client.py', encoding='utf-8'\\).read\\(\\)\\); print\\('all files OK'\\)\")"
     ]
   }
 }
