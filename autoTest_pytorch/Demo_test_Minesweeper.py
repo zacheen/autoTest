@@ -32,7 +32,7 @@ from util.Gf_Except import Game_fail_Exception
 from Minesweeper_web_client import MinesweeperWebClient
 
 from Minesweeper.Minesweeper_manager import Minesweeper_manager
-from visual_discrete_agent_v2 import get_agent
+from visual_discrete_agent_v3 import get_agent
 
 REWARD_VALID_CLICK = 1.0
 REWARD_INVALID_CLICK = -0.5
@@ -392,6 +392,94 @@ class Game_test_case(unittest.TestCase) :
                 else :
                     self.decide_next_step_and_play(game_status)
 
+    def test_RL_server(self):
+        """RL training loop driven by server state instead of screenshot diffing.
+
+        Flow per step:
+          1. capture screenshot → YOLO/policy → choose action
+          2. POST /click via WEB_API → receive next server_state
+          3. classify reward based on server_state["status"] + board diff
+          4. capture next screenshot for replay buffer
+          5. agent.maybe_train_step()
+        """
+        global glo_var
+        glo_var.state.set_record_time()
+        UI_waiting_time = 1
+        game_status = Game_test_case.Game_status()
+        game_status.noise = True
+        game_status.server_state = WEB_API.get_game_state()
+        time.sleep(UI_waiting_time)
+        self.decide_next_step_and_play(game_status)
+        time.sleep(UI_waiting_time)
+
+        while True:
+            check_pause()
+            time.sleep(0.1)
+            if game_status.game_over:
+                game_status.agent.log_episode_metrics(
+                    win=game_status.won,
+                    invalid_click_rate=game_status.invalid_click_rate(),
+                    reward_mean=game_status.average_reward(),
+                )
+                game_status.agent.on_episode_end()
+                self.assertTrue(True, "game_over(really finish the game)")
+                break
+            elif glo_var.state.fail_playing:
+                game_status.agent.log_episode_metrics(
+                    win=False,
+                    invalid_click_rate=game_status.invalid_click_rate(),
+                    reward_mean=game_status.average_reward(),
+                )
+                game_status.agent.on_episode_end()
+                self.assertTrue(False, "time_out(reach max steps)")
+                break
+
+            if game_status.pending_server_state is None:
+                continue
+
+            game_status.step_count += 1
+            game_status.server_state = game_status.pending_server_state
+            game_status.pending_server_state = None
+            board_changed = game_status.pending_board_changed
+            game_status.pending_board_changed = False
+
+            server_status = game_status.server_state.get("status")
+            if server_status == "lost":
+                game_status.reward = REWARD_LOSE
+                game_status.game_over = 1
+                print("lose")
+            elif server_status == "won":
+                game_status.reward = REWARD_WIN
+                game_status.game_over = 1
+                game_status.won = True
+                print("win")
+            elif board_changed:
+                game_status.reward = REWARD_VALID_CLICK
+                print("valid click")
+            else:
+                game_status.reward = REWARD_INVALID_CLICK
+                game_status.invalid_click_count += 1
+                print("invalid click")
+
+            game_status.record_reward(game_status.reward)
+
+            if board_changed:
+                game_status.agent.clear_blocked_actions(reason="server board changed after valid click")
+                if not game_status.game_over:
+                    game_status.next_state = self.capture_grid_state(game_status)
+                else:
+                    game_status.next_state = None
+            else:
+                if game_status.current_pic is not None and game_status.action is not None:
+                    game_status.agent.block_action_for_state(game_status.current_pic, game_status.action)
+                game_status.next_state = game_status.current_pic
+
+            self.update_model(game_status)
+            if game_status.step_count > game_status.max_steps:
+                glo_var.state.fail_playing = True
+            elif not game_status.game_over:
+                self.decide_next_step_and_play(game_status)
+
     def test_wait_result(self):
         global glo_var
         glo_var.state.set_record_time()
@@ -483,7 +571,8 @@ if __name__=="__main__" :
             # combine the test cases (usually is the game flow)
             during_gameing.addTest(Game_test_case("test_state_prepare"))
             during_gameing.addTest(Game_test_case("test_click_middle"))
-            during_gameing.addTest(Game_test_case("test_RL"))
+            # during_gameing.addTest(Game_test_case("test_RL"))
+            during_gameing.addTest(Game_test_case("test_RL_server"))
             during_gameing.addTest(Game_test_case("test_wait_result"))
             during_gameing.addTest(Game_test_case("test_new_game"))
 
