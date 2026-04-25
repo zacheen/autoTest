@@ -1,6 +1,7 @@
 # model
 runs*
 rl_models*
+models*
 
 # data
 datasets*
