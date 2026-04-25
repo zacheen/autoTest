@@ -597,6 +597,7 @@ if __name__=="__main__" :
                 game_only_var.mine.thread_start()
             elif GAME_ENV == "Minesweeper_web" :
                 glo_var.driver = Tool_Main.open_game_web()
+                WEB_API = MinesweeperWebClient(glo_var.driver, default_difficulty="Training 6x6")
             glo_var.reset(round_count+1)
             continue
             
