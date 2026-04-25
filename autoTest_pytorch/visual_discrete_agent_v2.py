@@ -389,7 +389,7 @@ class VisualAgentV2:
             return None   # warm-up: buffer 未達 VISUAL_WARMUP_STEPS 不訓練
 
         self.total_it += 1
-        state, action, next_state, reward, done, sample_indices, _, discounts, n_steps = (
+        state, action, next_state, reward, done, sample_indices, is_weights, discounts, n_steps = (
             self.replay_buffer.sample(
                 VISUAL_BATCH_SIZE,
                 device=device,
@@ -446,7 +446,7 @@ class VisualAgentV2:
             )
             entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
             per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy.float()
-            loss = per_sample_loss.mean()
+            loss = (is_weights * per_sample_loss).mean()
 
             target_mean = target_quantiles.mean(dim=1, keepdim=True)
             td_error = (q_taken.detach().float() - target_mean.detach().float()).abs()
