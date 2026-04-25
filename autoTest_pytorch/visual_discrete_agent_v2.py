@@ -66,7 +66,8 @@ IMAGE_SIZE = (640, 640)
 GRID_H = 6
 GRID_W = 6
 NUM_ACTIONS = GRID_H * GRID_W
-VISUAL_BATCH_SIZE = 20
+VISUAL_BATCH_SIZE   = 20
+VISUAL_WARMUP_STEPS = 1000   # 不到這個數量不開始訓練
 
 # ── training hyper-params ────────────────────────────────────────────
 VISUAL_GAMMA = 0.7
@@ -77,6 +78,12 @@ TARGET_UPDATE_FREQ = 50
 SAVE_EVERY_N_EPISODES = 50
 VISUAL_HISTOGRAM_EVERY = 20
 USE_AMP = False
+
+# ── YOLO training control ─────────────────────────────────────────────
+# False = 診斷模式：backward 會流過 YOLO（可量測 grad），但 grad 在
+#         optimizer.step() 前被清零，YOLO 參數不會被更新。
+# True  = 完整訓練：YOLO 和 backbone/head 一起更新。
+YOLO_UPDATE_ENABLED = False
 
 # ── learning rates per module group ──────────────────────────────────
 LR_VISUAL_YOLO     = 2e-5
@@ -377,8 +384,9 @@ class VisualAgentV2:
     # ──────────────────────────── training step ────────────────────────
 
     def train_step(self):
-        if self.replay_buffer.size() < VISUAL_BATCH_SIZE:
-            return None
+        buf_size = self.replay_buffer.size()
+        if buf_size < VISUAL_WARMUP_STEPS:
+            return None   # warm-up: buffer 未達 VISUAL_WARMUP_STEPS 不訓練
 
         self.total_it += 1
         state, action, next_state, reward, done, sample_indices, _, discounts, n_steps = (
@@ -407,9 +415,17 @@ class VisualAgentV2:
                 target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
 
         # ── current branch (gradients flow through YOLO → backbone → head) ──
+        # 不呼叫 predict_grid_state（內部有 @torch.no_grad + self.eval()，會完全
+        # 阻斷 YOLO 的梯度）。直接呼叫 forward() 取 logits，接 scaled-sigmoid
+        # 作為 differentiable 的 grid-state 表示。
         with torch.autocast(device_type=device.type, dtype=torch.float16,
                             enabled=(USE_AMP and device.type == "cuda")):
-            grid_state = self.yolo_predictor.predict_grid_state(state, self.grid_h, self.grid_w)
+            # hard one-hot — 與 train_stage1_simple.py 的 input 格式完全相同
+            # 以便確認 Q_loss 是否從 Stage 1 繼承（argmax 會阻斷 YOLO 梯度，
+            # 但 yolo_pre 仍能量測到 0，代表梯度確實被擋住了）
+            yolo_logits = self.yolo_predictor.forward(state, self.grid_h, self.grid_w)
+            pred        = yolo_logits.argmax(dim=1, keepdim=True)          # (B, 1, H, W)
+            grid_state  = torch.zeros_like(yolo_logits).scatter_(1, pred, 1.0)  # (B, 12, H, W) one-hot
             features = self.backbone.get_features(grid_state)
             q_output = self.q_network(features)
             q_2d           = q_output["q_values"]
@@ -441,19 +457,24 @@ class VisualAgentV2:
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
 
-        # pre-clip gradient norms per module (diagnostic)
+        # ── pre-clip gradient norms per module (diagnostic) ──
         yolo_pre     = self._module_grad_norm(self.yolo_predictor)
         backbone_pre = self._module_grad_norm(self.backbone)
         head_pre     = self._module_grad_norm(self.q_network)
 
+        # 診斷模式：grad 已記錄，清空 YOLO grad → optimizer.step() 不更新 YOLO
+        if not YOLO_UPDATE_ENABLED:
+            for p in self.yolo_predictor.parameters():
+                if p.grad is not None:
+                    p.grad.zero_()
+
         params_to_clip = (
-            list(self.yolo_predictor.parameters())
-            + list(self.backbone.parameters())
+            list(self.backbone.parameters())
             + list(self.q_network.parameters())
         )
         grad_norm_total = torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=VISUAL_GRAD_CLIP_NORM)
 
-        yolo_post     = self._module_grad_norm(self.yolo_predictor)
+        yolo_post     = self._module_grad_norm(self.yolo_predictor)  # 診斷模式は 0
         backbone_post = self._module_grad_norm(self.backbone)
         head_post     = self._module_grad_norm(self.q_network)
 
@@ -496,6 +517,11 @@ class VisualAgentV2:
         self.tb_writer.add_scalar("train/done_rate",        done.mean().item(),           self.total_it)
         self.tb_writer.add_scalar("train/epsilon",          self.epsilon,                 self.total_it)
         self.tb_writer.add_scalar("train/buffer_size",      self.replay_buffer.size(),    self.total_it)
+        # td_error 診斷：找出 Q_loss 大的原因
+        self.tb_writer.add_scalar("train/td_error_mean",   td_error.mean().item(),       self.total_it)
+        self.tb_writer.add_scalar("train/td_error_max",    td_error.max().item(),        self.total_it)
+        self.tb_writer.add_scalar("train/target_q_mean",   target_quantiles.float().mean().item(), self.total_it)
+        self.tb_writer.add_scalar("train/reward_mean_batch", reward.mean().item(),        self.total_it)
         self.tb_writer.add_scalar("grad/total_norm",        float(grad_norm_total),       self.total_it)
         self.tb_writer.add_scalar("grad_pre/yolo",          yolo_pre,                     self.total_it)
         self.tb_writer.add_scalar("grad_pre/backbone",      backbone_pre,                 self.total_it)
@@ -563,8 +589,8 @@ class VisualAgentV2:
 
     def _adaptive_epsilon(
         self,
-        wr_min: float = 0.20, wr_max: float = 1.00,
-        eps_min: float = 0.01, eps_max: float = 0.30,
+        wr_min: float = 0.1, wr_max: float = 0.9,
+        eps_min: float = 0.001, eps_max: float = 0.30,
     ) -> float:
         """Log-interpolate epsilon from win_rate(last100)."""
         if not self._result_window:
