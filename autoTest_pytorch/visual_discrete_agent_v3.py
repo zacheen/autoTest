@@ -101,6 +101,10 @@ USE_AMP = False
 # ── learning rates ───────────────────────────────────────────────────
 LR_VISUAL_BACKBONE = 5e-5   # adapter + encoder + decoder + queries (random init → larger LR)
 LR_VISUAL_HEAD     = 5e-5
+# Linear LR warmup over the first N optimizer steps (transformer 早期穩定)
+# 從 base_lr * LR_WARMUP_START_FACTOR 線性增加到 base_lr
+LR_WARMUP_STEPS         = 1000
+LR_WARMUP_START_FACTOR  = 0.0
 
 # ── replay buffer ────────────────────────────────────────────────────
 VISUAL_BUFFER_CAPACITY = 2048
@@ -322,6 +326,8 @@ class VisualAgentV3:
             {"params": self.backbone.parameters(),  "lr": LR_VISUAL_BACKBONE},
             {"params": self.q_network.parameters(), "lr": LR_VISUAL_HEAD},
         ])
+        # 紀錄每個 param group 的 base lr，warmup 期間根據 total_it 動態縮放
+        self._base_lrs = [group["lr"] for group in self.optimizer.param_groups]
         self.scaler = torch.cuda.amp.GradScaler(enabled=(USE_AMP and device.type == "cuda"))
 
         # ── replay buffer (disk-backed) ──
@@ -594,6 +600,7 @@ class VisualAgentV3:
             return None
 
         self.total_it += 1
+        self._apply_lr_warmup()
         state, action, next_state, reward, done, sample_indices, is_weights, discounts, n_steps = (
             self.replay_buffer.sample(
                 VISUAL_BATCH_SIZE,
@@ -707,6 +714,8 @@ class VisualAgentV3:
         self.tb_writer.add_scalar("train/done_rate",         done.mean().item(),           self.total_it)
         self.tb_writer.add_scalar("train/epsilon",           self.epsilon,                 self.total_it)
         self.tb_writer.add_scalar("train/buffer_size",       self.replay_buffer.size(),    self.total_it)
+        for gi, group in enumerate(self.optimizer.param_groups):
+            self.tb_writer.add_scalar(f"train/lr_group{gi}",  group["lr"],                  self.total_it)
         self.tb_writer.add_scalar("train/td_error_mean",     td_error.mean().item(),       self.total_it)
         self.tb_writer.add_scalar("train/td_error_max",      td_error.max().item(),        self.total_it)
         self.tb_writer.add_scalar("train/target_q_mean",     target_quantiles.float().mean().item(), self.total_it)
@@ -1020,6 +1029,19 @@ class VisualAgentV3:
         self.replay_buffer.next_storage_id = loaded_count
         self.replay_buffer.insert_counter = loaded_count
         print(f"[V3] Loaded {loaded_count} replay buffer entries")
+
+    # ──────────────────────────── lr warmup ────────────────────────────
+
+    def _apply_lr_warmup(self) -> None:
+        """Linear LR warmup: scale every param group's lr from
+        (LR_WARMUP_START_FACTOR × base_lr) up to base_lr over LR_WARMUP_STEPS
+        optimizer steps. After warmup, lr stays at base_lr."""
+        if LR_WARMUP_STEPS <= 0:
+            return
+        progress = min(1.0, self.total_it / LR_WARMUP_STEPS)
+        factor = LR_WARMUP_START_FACTOR + (1.0 - LR_WARMUP_START_FACTOR) * progress
+        for group, base_lr in zip(self.optimizer.param_groups, self._base_lrs):
+            group["lr"] = base_lr * factor
 
     # ──────────────────────────── diagnostics ──────────────────────────
 
