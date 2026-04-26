@@ -365,7 +365,6 @@ class Game_test_case(unittest.TestCase) :
                     print("win")
 
                 game_status.record_reward(game_status.reward)
-                game_status.agent.clear_blocked_actions(reason="screen changed after valid click")
                 game_status.next_state = self.capture_grid_state(game_status)
                 self.update_model(game_status)
                 if not game_status.game_over :
@@ -464,7 +463,6 @@ class Game_test_case(unittest.TestCase) :
             game_status.record_reward(game_status.reward)
 
             if board_changed:
-                game_status.agent.clear_blocked_actions(reason="server board changed after valid click")
                 if not game_status.game_over:
                     game_status.next_state = self.capture_grid_state(game_status)
                 else:

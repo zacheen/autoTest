@@ -365,9 +365,12 @@ class VisualAgentV3:
         self._total_wins = 0
         self._total_episodes = 0
 
-        # ── blocked-action tracking ──
+        # ── blocked-action tracking (episode-scoped) ──
         self.blocked_actions: set[int] = set()
-        self.current_state_key: str | None = None
+
+        # ── action-image logging (record full episode every N episodes) ──
+        self.action_log_every_n_episodes = 10
+        self._log_actions_this_episode = False
 
         # ── text log + TensorBoard ──
         VISUAL_V3_TENSORBOARD_DIR.mkdir(parents=True, exist_ok=True)
@@ -463,17 +466,12 @@ class VisualAgentV3:
 
     # ──────────────────────────── blocked actions ──────────────────────
 
-    def clear_blocked_actions(self, reason: str = "state changed") -> None:
+    def clear_blocked_actions(self, reason: str = "episode reset") -> None:
         if self.blocked_actions:
             print(f"[V3] Clear blocked ({reason}): {sorted(self.blocked_actions)}")
         self.blocked_actions.clear()
-        self.current_state_key = None
 
     def block_action_for_state(self, state: torch.Tensor, action_id: int) -> None:
-        key = self._state_key(state)
-        if self.current_state_key != key:
-            self.current_state_key = key
-            self.blocked_actions.clear()
         self.blocked_actions.add(int(action_id))
         row, col = self.action_to_grid(action_id)
         print(f"[V3] Block action {action_id} -> ({row},{col})")
@@ -481,17 +479,10 @@ class VisualAgentV3:
     # ──────────────────────────── action selection ─────────────────────
 
     def select_action(self, state: torch.Tensor, add_noise: bool = True) -> tuple[int, dict]:
-        key = self._state_key(state)
-        if self.current_state_key != key:
-            if self.current_state_key is not None:
-                self.clear_blocked_actions(reason="new screenshot")
-            self.current_state_key = key
-
         blocked = set(self.blocked_actions)
         available = [i for i in range(self.num_actions) if i not in blocked]
         if not available:
             self.clear_blocked_actions(reason="all actions blocked")
-            self.current_state_key = key
             blocked = set()
             available = list(range(self.num_actions))
 
@@ -746,6 +737,14 @@ class VisualAgentV3:
 
     def reset_episode(self) -> None:
         self._flush_n_step_buffer()
+        self.clear_blocked_actions(reason="episode reset")
+        next_episode_idx = self._total_episodes + 1
+        self._log_actions_this_episode = (
+            self.action_log_every_n_episodes > 0
+            and next_episode_idx % self.action_log_every_n_episodes == 0
+        )
+        if self._log_actions_this_episode:
+            print(f"[V3] Action-image logging enabled for episode {next_episode_idx}")
 
     def on_episode_end(self) -> None:
         self._flush_n_step_buffer()
@@ -783,7 +782,7 @@ class VisualAgentV3:
 
     def _adaptive_epsilon(
         self,
-        wr_min: float = 0.1, wr_max: float = 0.9,
+        wr_min: float = 0.1, wr_max: float = 0.85,
         eps_min: float = 0.001, eps_max: float = 0.30,
     ) -> float:
         if not self._result_window:
@@ -1062,6 +1061,8 @@ class VisualAgentV3:
 
     def log_action_image(self, state, log_info, step_count, reward=None) -> None:
         if not LOG_ACTIONS or log_info is None:
+            return
+        if not self._log_actions_this_episode:
             return
         try:
             from PIL import ImageDraw, ImageFont
