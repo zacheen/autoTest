@@ -712,12 +712,14 @@ class VisualAgentV3:
                 for val, idx in zip(top_vals.tolist(), top_idx.tolist())
             ]
 
+        q_ratio_str = f"{q_mean / real_reward_mean:.3f}" if abs(real_reward_mean) > 0.1 else "n/a"
         self._io_log.write(
             f"[Step {self.total_it}] {datetime.datetime.now().strftime('%H:%M:%S')}\n"
             f"  reward_mean={reward.mean().item():.4f} | done_rate={done.mean().item():.4f}\n"
             f"  real_reward_mean={real_reward_mean:.4f}\n"
             f"  q_top5={top_actions}\n"
             f"  Q_loss={loss.item():.6f} | q_mean={q_mean:.6f} | epsilon={self.epsilon:.4f}\n"
+            f"  td_error_norm={td_error.mean().item():.6f} | q/reward_ratio={q_ratio_str}\n"
             f"  grad_total={float(grad_norm_total):.6f} | "
             f"backbone_pre={backbone_pre:.6f} head_pre={head_pre:.6f}\n"
             f"---\n"
@@ -732,9 +734,11 @@ class VisualAgentV3:
         self.tb_writer.add_scalar("train/buffer_size",       self.replay_buffer.size(),    self.total_it)
         for gi, group in enumerate(self.optimizer.param_groups):
             self.tb_writer.add_scalar(f"train/lr_group{gi}",  group["lr"],                  self.total_it)
-        self.tb_writer.add_scalar("train/td_error_mean",     td_error.mean().item(),       self.total_it)
+        self.tb_writer.add_scalar("train/td_error_norm",     td_error.mean().item(),       self.total_it)
         self.tb_writer.add_scalar("train/td_error_max",      td_error.max().item(),        self.total_it)
         self.tb_writer.add_scalar("train/target_q_mean",     target_quantiles.float().mean().item(), self.total_it)
+        if abs(real_reward_mean) > 0.1:
+            self.tb_writer.add_scalar("train/q_over_reward_ratio", q_mean / real_reward_mean, self.total_it)
         self.tb_writer.add_scalar("train/reward_mean_batch", reward.mean().item(),         self.total_it)
         self.tb_writer.add_scalar("grad/total_norm",         float(grad_norm_total),       self.total_it)
         self.tb_writer.add_scalar("grad_pre/backbone",       backbone_pre,                 self.total_it)
