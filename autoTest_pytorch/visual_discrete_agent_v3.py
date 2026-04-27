@@ -660,10 +660,11 @@ class VisualAgentV3:
             q_taken = q_2d[torch.arange(batch_size, device=device), row_idx, col_idx].unsqueeze(1)
             chosen_quantiles = q_quantiles[torch.arange(batch_size, device=device), action_flat]
 
-            per_sample_quantile_loss = _quantile_huber_loss(
+            per_sample_quantile_loss, frac_clipped = _quantile_huber_loss(
                 current_quantiles=chosen_quantiles.float(),
                 target_quantiles=target_quantiles.detach().float(),
                 tau_hats=tau_hats.detach().float(),
+                return_stats=True,
             )
             entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
             per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy.float()
@@ -719,7 +720,7 @@ class VisualAgentV3:
             f"  real_reward_mean={real_reward_mean:.4f}\n"
             f"  q_top5={top_actions}\n"
             f"  Q_loss={loss.item():.6f} | q_mean={q_mean:.6f} | epsilon={self.epsilon:.4f}\n"
-            f"  td_error_norm={td_error.mean().item():.6f} | q/reward_ratio={q_ratio_str}\n"
+            f"  td_error_norm={td_error.mean().item():.6f} | q/reward_ratio={q_ratio_str} | frac_clipped={frac_clipped:.3f}\n"
             f"  grad_total={float(grad_norm_total):.6f} | "
             f"backbone_pre={backbone_pre:.6f} head_pre={head_pre:.6f}\n"
             f"---\n"
@@ -734,6 +735,7 @@ class VisualAgentV3:
         self.tb_writer.add_scalar("train/buffer_size",       self.replay_buffer.size(),    self.total_it)
         for gi, group in enumerate(self.optimizer.param_groups):
             self.tb_writer.add_scalar(f"train/lr_group{gi}",  group["lr"],                  self.total_it)
+        self.tb_writer.add_scalar("train/frac_huber_clipped", frac_clipped,                 self.total_it)
         self.tb_writer.add_scalar("train/td_error_norm",     td_error.mean().item(),       self.total_it)
         self.tb_writer.add_scalar("train/td_error_max",      td_error.max().item(),        self.total_it)
         self.tb_writer.add_scalar("train/target_q_mean",     target_quantiles.float().mean().item(), self.total_it)

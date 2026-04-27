@@ -109,13 +109,17 @@ class TransformerActorNetwork(nn.Module):
         return self.load_state_dict(normalized, strict=strict)
 
 
-def _quantile_huber_loss(current_quantiles, target_quantiles, tau_hats):
+def _quantile_huber_loss(current_quantiles, target_quantiles, tau_hats, return_stats=False):
     td = target_quantiles.unsqueeze(1) - current_quantiles.unsqueeze(2)
     abs_td = td.abs()
     huber = torch.where(abs_td <= 1.0, 0.5 * td.pow(2), abs_td - 0.5)
     tau = tau_hats.unsqueeze(2)
     quantile_weight = (tau - (td.detach() < 0).float()).abs()
-    return (quantile_weight * huber).sum(dim=2).mean(dim=1, keepdim=True)
+    loss = (quantile_weight * huber).sum(dim=2).mean(dim=1, keepdim=True)
+    if return_stats:
+        frac_clipped = (abs_td > 1.0).float().mean().item()
+        return loss, frac_clipped
+    return loss
 
 
 class TransformerDiscreteAgent:
