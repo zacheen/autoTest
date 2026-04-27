@@ -503,11 +503,17 @@ class VisualAgentV3:
             }
 
         self._set_runtime_modes()
+        if device.type == "cuda": torch.cuda.synchronize(); print("[DBG select_action] before state.to(device)")
         screenshot_batch = state.unsqueeze(0).to(device)
+        if device.type == "cuda": torch.cuda.synchronize(); print("[DBG select_action] after state.to(device)")
         with torch.no_grad():
+            if device.type == "cuda": torch.cuda.synchronize(); print("[DBG select_action] before feature_extractor")
             yolo_feat = self.feature_extractor(screenshot_batch)
+            if device.type == "cuda": torch.cuda.synchronize(); print("[DBG select_action] after feature_extractor")
             features  = self.backbone.get_features(yolo_feat)
+            if device.type == "cuda": torch.cuda.synchronize(); print("[DBG select_action] after backbone")
             q_2d = self.q_network(features)["q_values"].squeeze(0)
+            if device.type == "cuda": torch.cuda.synchronize(); print("[DBG select_action] after q_network")
             q_flat = q_2d.view(-1)
 
             masked_q = q_flat.clone()
@@ -518,6 +524,7 @@ class VisualAgentV3:
             action_id = int(masked_q.argmax().item())
             topk = min(5, len(available))
             top_vals, top_idx = torch.topk(masked_q, k=topk)
+        if device.type == "cuda": torch.cuda.synchronize(); print("[DBG select_action] done")
         self._set_runtime_modes()
 
         row, col = self.action_to_grid(action_id)
@@ -601,6 +608,7 @@ class VisualAgentV3:
 
         self.total_it += 1
         self._apply_lr_warmup()
+        if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] before replay_buffer.sample")
         state, action, next_state, reward, done, sample_indices, is_weights, discounts, n_steps = (
             self.replay_buffer.sample(
                 VISUAL_BATCH_SIZE,
@@ -608,6 +616,7 @@ class VisualAgentV3:
                 include_extra=True,
             )
         )
+        if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] after replay_buffer.sample")
         batch_size = state.size(0)
         self._set_runtime_modes()
 
@@ -615,23 +624,30 @@ class VisualAgentV3:
         with torch.no_grad():
             with torch.autocast(device_type=device.type, dtype=torch.float16,
                                 enabled=(USE_AMP and device.type == "cuda")):
+                if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] before next feature_extractor")
                 next_yolo_feat = self.feature_extractor(next_state)
+                if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] after next feature_extractor")
                 next_features  = self.backbone.get_features(next_yolo_feat)
+                if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] after next backbone")
                 next_online    = self.q_network(next_features)
                 next_online_q_flat = next_online["q_values"].view(batch_size, -1)
                 next_best_flat = next_online_q_flat.argmax(dim=1)
                 next_target    = self.q_target(next_features)
+                if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] after q_target")
                 next_target_quantiles = next_target["quantiles"][
                     torch.arange(batch_size, device=device), next_best_flat
                 ]
                 target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
+        if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] target branch done")
 
         # ── current branch (gradients flow through backbone + head; YOLO frozen) ──
         with torch.autocast(device_type=device.type, dtype=torch.float16,
                             enabled=(USE_AMP and device.type == "cuda")):
             with torch.no_grad():
                 yolo_feat = self.feature_extractor(state)   # YOLO frozen → no grad needed
+            if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] after current feature_extractor")
             features  = self.backbone.get_features(yolo_feat)
+            if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] after current backbone")
             q_output  = self.q_network(features)
             q_2d           = q_output["q_values"]
             q_quantiles    = q_output["quantiles"]

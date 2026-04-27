@@ -356,18 +356,25 @@ class CategorizedReplayBuffer:
         # weights formulation: (1/N * 1/P_i) ^ beta
         weights = (N * probabilities + 1e-10) ** (-use_beta)
         weights = weights / weights.max()
+        _dbg_cuda = (device.type == "cuda") if hasattr(device, "type") else (str(device).startswith("cuda"))
+        if _dbg_cuda: import torch as _t; _t.cuda.synchronize(); print("[DBG sample] before weights.to(device)")
         weights = torch.tensor(weights, dtype=torch.float32).unsqueeze(1).to(device)
+        if _dbg_cuda: _t.cuda.synchronize(); print("[DBG sample] after weights.to(device)")
 
         # Stacking tensors manually depends heavily on the model requirements:
         # Returning lists or direct tensors:
+        if _dbg_cuda: _t.cuda.synchronize(); print("[DBG sample] before stack states")
         tensor_states = torch.stack(states).to(device) if torch.is_tensor(states[0]) else states
+        if _dbg_cuda: _t.cuda.synchronize(); print("[DBG sample] after stack states")
         tensor_next_states = torch.stack(next_states).to(device) if torch.is_tensor(next_states[0]) else next_states
-        
+        if _dbg_cuda: _t.cuda.synchronize(); print("[DBG sample] after stack next_states")
+
         tensor_actions = torch.tensor(np.array(actions), dtype=torch.long, device=device)
         tensor_rewards = torch.tensor(rewards, dtype=torch.float32, device=device).unsqueeze(1)
         tensor_dones = torch.tensor(dones, dtype=torch.float32, device=device).unsqueeze(1)
         tensor_discounts = torch.tensor(discounts, dtype=torch.float32, device=device).unsqueeze(1)
         tensor_n_steps = torch.tensor(n_steps, dtype=torch.long, device=device).unsqueeze(1)
+        if _dbg_cuda: _t.cuda.synchronize(); print("[DBG sample] all tensors created")
 
         result = (
             tensor_states,
