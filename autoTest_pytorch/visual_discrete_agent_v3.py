@@ -52,6 +52,77 @@ from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# ── debug logger (寫到檔案，CMD 刷掉也能看) ──────────────────────────
+import logging as _logging
+_dbg_log_path = Path("./models/visual_transformer_v3_6x6/cuda_debug.log")
+_dbg_log_path.parent.mkdir(parents=True, exist_ok=True)
+_dbg_logger = _logging.getLogger("cuda_dbg")
+_dbg_logger.setLevel(_logging.DEBUG)
+if not _dbg_logger.handlers:
+    _fh = _logging.FileHandler(_dbg_log_path, mode="a", encoding="utf-8")
+    _fh.setFormatter(_logging.Formatter("%(asctime)s %(message)s"))
+    _dbg_logger.addHandler(_fh)
+
+def _dbg(msg: str) -> None:
+    """sync GPU then log — error surfaces at the exact op that caused it."""
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    _dbg_logger.debug(msg)
+    for _h in _dbg_logger.handlers:
+        try: _h.flush()
+        except Exception: pass
+
+def _dbg_mem(tag: str) -> None:
+    """log GPU memory usage."""
+    if device.type != "cuda":
+        return
+    try:
+        alloc = torch.cuda.memory_allocated() / 1024**2
+        reserved = torch.cuda.memory_reserved() / 1024**2
+        peak = torch.cuda.max_memory_allocated() / 1024**2
+        _dbg_logger.debug(f"[MEM {tag}] alloc={alloc:.1f}MB reserved={reserved:.1f}MB peak={peak:.1f}MB")
+    except Exception as e:
+        _dbg_logger.debug(f"[MEM {tag}] failed: {e}")
+
+def _dbg_tensor(name: str, t, *, expect_max=None, expect_min=None, check_finite: bool = True) -> None:
+    """Check a tensor for NaN/Inf and out-of-range values; log shape, dtype, range.
+
+    expect_max/expect_min: hard bounds; logs FATAL if violated (likely bad index).
+    """
+    try:
+        if t is None:
+            _dbg_logger.debug(f"[TENSOR {name}] is None"); return
+        if not torch.is_tensor(t):
+            _dbg_logger.debug(f"[TENSOR {name}] type={type(t).__name__}"); return
+        # sync first so any pending error surfaces here, not later
+        if t.is_cuda:
+            torch.cuda.synchronize()
+        info = f"shape={tuple(t.shape)} dtype={t.dtype} dev={t.device}"
+        if t.numel() == 0:
+            _dbg_logger.debug(f"[TENSOR {name}] {info} EMPTY"); return
+        # only check stats on numeric tensors
+        if t.dtype.is_floating_point:
+            tmin = t.min().item(); tmax = t.max().item()
+            tnan = bool(torch.isnan(t).any().item()) if check_finite else False
+            tinf = bool(torch.isinf(t).any().item()) if check_finite else False
+            tag = ""
+            if tnan: tag += " !!NAN!!"
+            if tinf: tag += " !!INF!!"
+            _dbg_logger.debug(f"[TENSOR {name}] {info} min={tmin:.4g} max={tmax:.4g}{tag}")
+        else:
+            tmin = t.min().item(); tmax = t.max().item()
+            tag = ""
+            if expect_max is not None and tmax >= expect_max:
+                tag += f" !!OOB max>={expect_max}!!"
+            if expect_min is not None and tmin < expect_min:
+                tag += f" !!OOB min<{expect_min}!!"
+            _dbg_logger.debug(f"[TENSOR {name}] {info} min={tmin} max={tmax}{tag}")
+        for _h in _dbg_logger.handlers:
+            try: _h.flush()
+            except Exception: pass
+    except Exception as e:
+        _dbg_logger.debug(f"[TENSOR {name}] CHECK FAILED: {e!r}")
+
 # ── paths ────────────────────────────────────────────────────────────
 YOLO_PREDICTOR_PATH = Path("./models/yolo_grid_predictor/best.pth")
 
@@ -96,6 +167,7 @@ TRAIN_EVERY_N_STEPS = 1
 TARGET_UPDATE_FREQ = 50
 SAVE_EVERY_N_EPISODES = 50
 VISUAL_HISTOGRAM_EVERY = 20
+WEIGHT_DISTANCE_LOG_EVERY = 100
 USE_AMP = False
 
 # ── learning rates ───────────────────────────────────────────────────
@@ -394,6 +466,9 @@ class VisualAgentV3:
         print(f"[V3] Current run: {self.tensorboard_log_dir}")
 
         self.try_load_model()
+        self._init_weight_reference = self._capture_trainable_weight_snapshot()
+        self._rolling_weight_reference = self._capture_trainable_weight_snapshot()
+        self._rolling_weight_reference_step = self.total_it
         self._set_runtime_modes()
         atexit.register(self.save_persistent)
         atexit.register(self._close_tb_writer)
@@ -503,28 +578,47 @@ class VisualAgentV3:
             }
 
         self._set_runtime_modes()
-        if device.type == "cuda": torch.cuda.synchronize(); print("[DBG select_action] before state.to(device)")
+        _dbg(f"[select_action] ENTER total_it={self.total_it} blocked_size={len(blocked)} available_size={len(available)}")
+        _dbg_mem("select_action ENTER")
+        _dbg_tensor("select_action.state(input)", state)
+        _dbg("[select_action] before state.to(device)")
         screenshot_batch = state.unsqueeze(0).to(device)
-        if device.type == "cuda": torch.cuda.synchronize(); print("[DBG select_action] after state.to(device)")
+        _dbg_tensor("select_action.screenshot_batch", screenshot_batch)
+        _dbg("[select_action] after state.to(device)")
         with torch.no_grad():
-            if device.type == "cuda": torch.cuda.synchronize(); print("[DBG select_action] before feature_extractor")
+            _dbg("[select_action] before feature_extractor")
             yolo_feat = self.feature_extractor(screenshot_batch)
-            if device.type == "cuda": torch.cuda.synchronize(); print("[DBG select_action] after feature_extractor")
+            _dbg_tensor("select_action.yolo_feat", yolo_feat)
+            _dbg("[select_action] after feature_extractor")
             features  = self.backbone.get_features(yolo_feat)
-            if device.type == "cuda": torch.cuda.synchronize(); print("[DBG select_action] after backbone")
+            _dbg_tensor("select_action.features", features)
+            _dbg("[select_action] after backbone")
             q_2d = self.q_network(features)["q_values"].squeeze(0)
-            if device.type == "cuda": torch.cuda.synchronize(); print("[DBG select_action] after q_network")
+            _dbg_tensor("select_action.q_2d", q_2d)
+            _dbg("[select_action] after q_network")
             q_flat = q_2d.view(-1)
+            _dbg_tensor("select_action.q_flat", q_flat)
+            _dbg(f"[select_action] q_flat.numel()={q_flat.numel()} num_actions={self.num_actions}")
 
             masked_q = q_flat.clone()
             if blocked:
-                blocked_idx = torch.tensor(sorted(blocked), dtype=torch.long, device=masked_q.device)
+                blocked_sorted = sorted(blocked)
+                # bounds-check BEFORE indexing — out-of-range = illegal memory access
+                bad = [b for b in blocked_sorted if not (0 <= b < q_flat.numel())]
+                if bad:
+                    _dbg(f"[select_action] !!OOB blocked indices {bad} vs numel={q_flat.numel()}!!")
+                blocked_idx = torch.tensor(blocked_sorted, dtype=torch.long, device=masked_q.device)
+                _dbg_tensor("select_action.blocked_idx", blocked_idx,
+                            expect_min=0, expect_max=q_flat.numel())
                 masked_q[blocked_idx] = float("-inf")
+                _dbg("[select_action] after blocked-mask scatter")
 
             action_id = int(masked_q.argmax().item())
+            _dbg(f"[select_action] action_id={action_id} (num_actions={self.num_actions})")
             topk = min(5, len(available))
             top_vals, top_idx = torch.topk(masked_q, k=topk)
-        if device.type == "cuda": torch.cuda.synchronize(); print("[DBG select_action] done")
+        _dbg("[select_action] done")
+        _dbg_mem("select_action EXIT")
         self._set_runtime_modes()
 
         row, col = self.action_to_grid(action_id)
@@ -608,7 +702,9 @@ class VisualAgentV3:
 
         self.total_it += 1
         self._apply_lr_warmup()
-        if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] before replay_buffer.sample")
+        _dbg(f"[train_step] ENTER total_it={self.total_it} buf_size={buf_size}")
+        _dbg_mem("train_step ENTER")
+        _dbg("[train_step] before replay_buffer.sample")
         state, action, next_state, reward, done, sample_indices, is_weights, discounts, n_steps = (
             self.replay_buffer.sample(
                 VISUAL_BATCH_SIZE,
@@ -616,49 +712,81 @@ class VisualAgentV3:
                 include_extra=True,
             )
         )
-        if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] after replay_buffer.sample")
+        _dbg("[train_step] after replay_buffer.sample")
+        # ---- sanity-check sampled tensors ----
+        _dbg_tensor("train_step.state",      state)
+        _dbg_tensor("train_step.next_state", next_state)
+        _dbg_tensor("train_step.action",     action,
+                    expect_min=0, expect_max=self.num_actions)
+        _dbg_tensor("train_step.reward",     reward)
+        _dbg_tensor("train_step.done",       done)
+        _dbg_tensor("train_step.is_weights", is_weights)
+        _dbg_tensor("train_step.discounts",  discounts)
         batch_size = state.size(0)
+        _dbg(f"[train_step] batch_size={batch_size} num_actions={self.num_actions} grid={self.grid_h}x{self.grid_w}")
         self._set_runtime_modes()
 
         # ── target branch (no gradients) ──
         with torch.no_grad():
             with torch.autocast(device_type=device.type, dtype=torch.float16,
                                 enabled=(USE_AMP and device.type == "cuda")):
-                if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] before next feature_extractor")
+                _dbg("[train_step] before next feature_extractor")
                 next_yolo_feat = self.feature_extractor(next_state)
-                if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] after next feature_extractor")
+                _dbg_tensor("train_step.next_yolo_feat", next_yolo_feat)
+                _dbg("[train_step] after next feature_extractor")
                 next_features  = self.backbone.get_features(next_yolo_feat)
-                if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] after next backbone")
+                _dbg_tensor("train_step.next_features", next_features)
+                _dbg("[train_step] after next backbone")
                 next_online    = self.q_network(next_features)
+                _dbg_tensor("train_step.next_online.q_values", next_online["q_values"])
                 next_online_q_flat = next_online["q_values"].view(batch_size, -1)
+                _dbg_tensor("train_step.next_online_q_flat", next_online_q_flat)
                 next_best_flat = next_online_q_flat.argmax(dim=1)
+                _dbg_tensor("train_step.next_best_flat", next_best_flat,
+                            expect_min=0, expect_max=self.num_actions)
                 next_target    = self.q_target(next_features)
-                if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] after q_target")
+                _dbg_tensor("train_step.next_target.quantiles", next_target["quantiles"])
+                _dbg("[train_step] after q_target")
                 next_target_quantiles = next_target["quantiles"][
                     torch.arange(batch_size, device=device), next_best_flat
                 ]
+                _dbg_tensor("train_step.next_target_quantiles", next_target_quantiles)
                 target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
-        if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] target branch done")
+                _dbg_tensor("train_step.target_quantiles", target_quantiles)
+        _dbg("[train_step] target branch done")
 
         # ── current branch (gradients flow through backbone + head; YOLO frozen) ──
         with torch.autocast(device_type=device.type, dtype=torch.float16,
                             enabled=(USE_AMP and device.type == "cuda")):
             with torch.no_grad():
                 yolo_feat = self.feature_extractor(state)   # YOLO frozen → no grad needed
-            if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] after current feature_extractor")
+            _dbg_tensor("train_step.yolo_feat", yolo_feat)
+            _dbg("[train_step] after current feature_extractor")
             features  = self.backbone.get_features(yolo_feat)
-            if device.type == "cuda": torch.cuda.synchronize(); print("[DBG train_step] after current backbone")
+            _dbg_tensor("train_step.features", features)
+            _dbg("[train_step] after current backbone")
             q_output  = self.q_network(features)
             q_2d           = q_output["q_values"]
             q_quantiles    = q_output["quantiles"]
             tau_hats       = q_output["tau_hats"]
             fraction_probs = q_output["fraction_probs"]
+            _dbg_tensor("train_step.q_2d", q_2d)
+            _dbg_tensor("train_step.q_quantiles", q_quantiles)
+            _dbg_tensor("train_step.tau_hats", tau_hats)
+            _dbg_tensor("train_step.fraction_probs", fraction_probs)
 
             action_flat = action.long()
+            _dbg_tensor("train_step.action_flat", action_flat,
+                        expect_min=0, expect_max=self.num_actions)
             row_idx = action_flat // self.grid_w
             col_idx = action_flat %  self.grid_w
+            _dbg_tensor("train_step.row_idx", row_idx, expect_min=0, expect_max=self.grid_h)
+            _dbg_tensor("train_step.col_idx", col_idx, expect_min=0, expect_max=self.grid_w)
+            _dbg(f"[train_step] q_2d.shape={tuple(q_2d.shape)} q_quantiles.shape={tuple(q_quantiles.shape)}")
             q_taken = q_2d[torch.arange(batch_size, device=device), row_idx, col_idx].unsqueeze(1)
+            _dbg("[train_step] after q_taken gather")
             chosen_quantiles = q_quantiles[torch.arange(batch_size, device=device), action_flat]
+            _dbg("[train_step] after chosen_quantiles gather")
 
             per_sample_quantile_loss, frac_clipped = _quantile_huber_loss(
                 current_quantiles=chosen_quantiles.float(),
@@ -675,31 +803,60 @@ class VisualAgentV3:
             fpn_norm_entropy = (entropy.mean() / math.log(NUM_FQF_FRACTIONS)).item()
             fpn_tau_std = tau_hats.std(dim=1).mean().item()
 
+        _dbg_tensor("train_step.loss", loss)
+        _dbg_tensor("train_step.td_error", td_error)
         self.replay_buffer.update_priorities(sample_indices, td_error)
+        _dbg("[train_step] after update_priorities")
 
         self.optimizer.zero_grad(set_to_none=True)
+        _dbg("[train_step] before backward")
         self.scaler.scale(loss).backward()
+        _dbg("[train_step] after backward")
+        _dbg_mem("train_step after backward")
         self.scaler.unscale_(self.optimizer)
+        _dbg("[train_step] after unscale_")
 
         # ── pre-clip gradient norms (diagnostic) ──
         backbone_pre = self._module_grad_norm(self.backbone)
         head_pre     = self._module_grad_norm(self.q_network)
+        _dbg(f"[train_step] grad backbone_pre={backbone_pre:.4g} head_pre={head_pre:.4g}")
 
         params_to_clip = (
             list(self.backbone.parameters())
             + list(self.q_network.parameters())
         )
         grad_norm_total = torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=VISUAL_GRAD_CLIP_NORM)
+        _dbg(f"[train_step] after clip grad_norm_total={float(grad_norm_total):.4g}")
 
         backbone_post = self._module_grad_norm(self.backbone)
         head_post     = self._module_grad_norm(self.q_network)
 
+        _dbg("[train_step] before optimizer.step")
         self.scaler.step(self.optimizer)
         self.scaler.update()
+        _dbg("[train_step] after optimizer.step")
+        _dbg_mem("train_step after optimizer.step")
 
         if self.total_it % TARGET_UPDATE_FREQ == 0:
+            _dbg("[train_step] before target update")
             self.q_target.load_state_dict(self.q_network.state_dict())
             self.q_target.eval()
+            _dbg("[train_step] after target update")
+
+        weight_distance_log = None
+        if self.total_it % WEIGHT_DISTANCE_LOG_EVERY == 0:
+            current_snapshot = self._capture_trainable_weight_snapshot()
+            init_distance = self._snapshot_distance(current_snapshot, self._init_weight_reference)
+            rolling_distance = self._snapshot_distance(current_snapshot, self._rolling_weight_reference)
+            rolling_step_gap = self.total_it - self._rolling_weight_reference_step
+            weight_distance_log = {
+                "from_init": init_distance,
+                "from_prev_window": rolling_distance,
+                "prev_window_step": self._rolling_weight_reference_step,
+                "window_size": rolling_step_gap,
+            }
+            self._rolling_weight_reference = current_snapshot
+            self._rolling_weight_reference_step = self.total_it
 
         # ── logging ──
         with torch.no_grad():
@@ -716,6 +873,14 @@ class VisualAgentV3:
             ]
 
         q_ratio_str = f"{q_mean / real_reward_mean:.3f}" if abs(real_reward_mean) > 0.1 else "n/a"
+        weight_delta_line = ""
+        if weight_distance_log is not None:
+            weight_delta_line = (
+                f"  weight_delta_init={weight_distance_log['from_init']:.6e} | "
+                f"weight_delta_prev_{weight_distance_log['window_size']}="
+                f"{weight_distance_log['from_prev_window']:.6e} "
+                f"(ref_step={weight_distance_log['prev_window_step']})\n"
+            )
         self._io_log.write(
             f"[Step {self.total_it}] {datetime.datetime.now().strftime('%H:%M:%S')}\n"
             f"  reward_mean={reward.mean().item():.4f} | done_rate={done.mean().item():.4f}\n"
@@ -726,6 +891,7 @@ class VisualAgentV3:
             f"  fpn_norm_entropy={fpn_norm_entropy:.4f} | fpn_tau_std={fpn_tau_std:.4f}\n"
             f"  grad_total={float(grad_norm_total):.6f} | "
             f"backbone_pre={backbone_pre:.6f} head_pre={head_pre:.6f}\n"
+            f"{weight_delta_line}"
             f"---\n"
         )
         self._io_log.flush()
@@ -752,6 +918,9 @@ class VisualAgentV3:
         self.tb_writer.add_scalar("grad_pre/head",           head_pre,                     self.total_it)
         self.tb_writer.add_scalar("grad_post/backbone",      backbone_post,                self.total_it)
         self.tb_writer.add_scalar("grad_post/head",          head_post,                    self.total_it)
+        if weight_distance_log is not None:
+            self.tb_writer.add_scalar("weights/delta_from_init", weight_distance_log["from_init"], self.total_it)
+            self.tb_writer.add_scalar("weights/delta_from_prev_window", weight_distance_log["from_prev_window"], self.total_it)
 
         if self.scaler.is_enabled():
             self.tb_writer.add_scalar("train/scaler_scale", self.scaler.get_scale(), self.total_it)
@@ -760,6 +929,8 @@ class VisualAgentV3:
             self._log_tensorboard_histograms(self.total_it)
 
         self.tb_writer.flush()
+        _dbg(f"[train_step] EXIT total_it={self.total_it}")
+        _dbg_mem("train_step EXIT")
         return {"Q_loss": loss.item(), "q_mean": q_mean}
 
     def maybe_train_step(self, force: bool = False):
@@ -1080,12 +1251,39 @@ class VisualAgentV3:
             grad_sq_sum += float(param.grad.detach().float().pow(2).sum().item())
         return grad_sq_sum ** 0.5
 
-    def _log_tensorboard_histograms(self, global_step: int) -> None:
-        module_groups = {
-            "weights/backbone": self.backbone,
-            "weights/head":     self.q_network,
+    def _trainable_module_groups(self) -> dict[str, nn.Module]:
+        return {
+            "backbone": self.backbone,
+            "head": self.q_network,
         }
-        for tag, module in module_groups.items():
+
+    def _capture_trainable_weight_snapshot(self) -> dict[str, torch.Tensor]:
+        snapshot = {}
+        for group_name, module in self._trainable_module_groups().items():
+            for param_name, param in module.named_parameters():
+                snapshot[f"{group_name}.{param_name}"] = param.detach().float().cpu().clone()
+        return snapshot
+
+    def _snapshot_distance(
+        self,
+        current_snapshot: dict[str, torch.Tensor],
+        reference_snapshot: dict[str, torch.Tensor],
+        eps: float = 1e-12,
+    ) -> float:
+        diff_sq_sum = 0.0
+        ref_sq_sum = 0.0
+        for name, current_value in current_snapshot.items():
+            reference_value = reference_snapshot.get(name)
+            if reference_value is None:
+                continue
+            diff = current_value - reference_value
+            diff_sq_sum += float(diff.pow(2).sum().item())
+            ref_sq_sum += float(reference_value.pow(2).sum().item())
+        return (diff_sq_sum ** 0.5) / max(ref_sq_sum ** 0.5, eps)
+
+    def _log_tensorboard_histograms(self, global_step: int) -> None:
+        for group_name, module in self._trainable_module_groups().items():
+            tag = f"weights/{group_name}"
             values = [p.detach().float().reshape(-1).cpu() for p in module.parameters()]
             if values:
                 self.tb_writer.add_histogram(tag, torch.cat(values), global_step)

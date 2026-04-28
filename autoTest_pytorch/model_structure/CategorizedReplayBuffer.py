@@ -347,6 +347,15 @@ class CategorizedReplayBuffer:
             discounts.append(float(entry.get("discount", 1.0)))
             n_steps.append(int(entry.get("n_steps", 1)))
 
+        # ---- DBG: sanity-check stored actions before they get used to index Q tensor ----
+        try:
+            _bad_acts = [(i, a) for i, a in enumerate(actions) if not (isinstance(a, (int, np.integer)) and 0 <= int(a) < 36)]
+            if _bad_acts:
+                with open("./models/visual_transformer_v3_6x6/cuda_debug.log", "a", encoding="utf-8") as _lf:
+                    _lf.write(f"[REPLAY sample] !!BAD ACTIONS in batch!! {_bad_acts[:10]} (showing up to 10)\n")
+        except Exception:
+            pass
+
         # Important Sampling
         N = self.size_count
         priorities_arr = np.array(priorities, dtype=np.float64)
