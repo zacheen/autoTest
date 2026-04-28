@@ -49,6 +49,7 @@ from transformer_discrete_agent import (
     _quantile_huber_loss,
 )
 from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
+from model_structure.visual_agent_common import VisualAgentCommonMixin
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -104,7 +105,7 @@ VISUAL_AGE_DECAY       = 0.002
 LOG_ACTIONS = True
 
 
-class VisualAgentV2:
+class VisualAgentV2(VisualAgentCommonMixin):
     """Screenshot → YOLO → Stage 1 Q-network → action, with full end-to-end RL training.
 
     All parameters are unfrozen and trained via a single combined optimizer.
@@ -117,6 +118,18 @@ class VisualAgentV2:
         self.grid_h = grid_h
         self.grid_w = grid_w
         self.num_actions = grid_h * grid_w
+        self.device = device
+        self.deque_cls = deque
+        self.model_path = VISUAL_V2_MODEL_PATH
+        self.replay_path = VISUAL_V2_REPLAY_PATH
+        self.replay_persistent_path = VISUAL_V2_REPLAY_PERSISTENT_PATH
+        self.action_log_path = VISUAL_V2_ACTION_LOG_PATH
+        self.image_size = IMAGE_SIZE
+        self.save_capacity = VISUAL_SAVE_CAPACITY
+        self.priority_min = VISUAL_PRIORITY_MIN
+        self.priority_max = VISUAL_PRIORITY_MAX
+        self.log_prefix = "[V2]"
+        self.log_actions = LOG_ACTIONS
 
         # ── YOLO predictor — unfrozen ──
         self.yolo_predictor = YOLOGridStatePredictor().to(device)
@@ -604,19 +617,7 @@ class VisualAgentV2:
         torch.save(self.backbone.state_dict(),       VISUAL_V2_MODEL_PATH / "backbone.pth")
         torch.save(self.q_network.state_dict(),      VISUAL_V2_MODEL_PATH / "fqf_network.pth")
         torch.save(self.q_target.state_dict(),       VISUAL_V2_MODEL_PATH / "fqf_target.pth")
-        torch.save(
-            {
-                "optimizer": self.optimizer.state_dict(),
-                "scaler":    self.scaler.state_dict(),
-                "total_it":  self.total_it,
-                "episode_count": self.episode_count,
-                "epsilon":   self.epsilon,
-                "total_episodes": self._total_episodes,
-                "total_wins":     self._total_wins,
-                "result_window":  list(self._result_window),
-            },
-            VISUAL_V2_MODEL_PATH / "optimizer_state.pth",
-        )
+        self._save_optimizer_state()
 
     def save_persistent(self) -> None:
         """Copy a curated subset of the on-disk replay buffer to a persistent path."""
@@ -740,41 +741,8 @@ class VisualAgentV2:
             self.q_target.load_state_dict(self.q_network.state_dict())
             print("[V2] fqf_target.pth missing, initialized target from fqf_network.pth")
 
-        # Optimizer / scaler / counters
-        opt_path = VISUAL_V2_MODEL_PATH / "optimizer_state.pth"
-        if opt_path.exists():
-            try:
-                state = torch.load(opt_path, map_location=device, weights_only=False)
-                self.optimizer.load_state_dict(state["optimizer"])
-                self.total_it       = state.get("total_it", 0)
-                self.episode_count  = state.get("episode_count", 0)
-                self.epsilon        = state.get("epsilon", self.epsilon)
-                self._total_episodes = state.get("total_episodes", 0)
-                self._total_wins     = state.get("total_wins", 0)
-                self._result_window  = deque(state.get("result_window", []), maxlen=100)
-                print(
-                    f"[V2] Loaded optimizer: total_it={self.total_it}, "
-                    f"episode={self.episode_count}, epsilon={self.epsilon:.4f}, "
-                    f"total_episodes={self._total_episodes}, wins={self._total_wins}"
-                )
-                if "scaler" in state and self.scaler.is_enabled():
-                    try:
-                        self.scaler.load_state_dict(state["scaler"])
-                    except Exception as scaler_exc:
-                        print(f"[V2] Failed to load GradScaler state: {scaler_exc}")
-            except Exception as exc:
-                print(f"[V2] Failed to load optimizer state: {exc}")
-
-        # Replay buffer (persistent)
-        ts_path = VISUAL_V2_MODEL_PATH / "training_state.pth"
-        if ts_path.exists():
-            try:
-                state = torch.load(ts_path, map_location=device, weights_only=False)
-                persistent_index = state.get("persistent_index", [])
-                if persistent_index:
-                    self._load_persistent_buffer(persistent_index)
-            except Exception as exc:
-                print(f"[V2] Failed to load replay buffer: {exc}")
+        self._load_optimizer_state()
+        self._load_persistent_training_state()
 
     def _load_persistent_buffer(self, persistent_index) -> None:
         VISUAL_V2_REPLAY_PATH.mkdir(parents=True, exist_ok=True)
@@ -955,6 +923,17 @@ class VisualAgentV2:
 
 
 # ──────────────────────────── factory ────────────────────────────────
+
+VisualAgentV2.store_transition = VisualAgentCommonMixin.store_transition
+VisualAgentV2._commit_n_step_transition = VisualAgentCommonMixin._commit_n_step_transition
+VisualAgentV2._flush_n_step_buffer = VisualAgentCommonMixin._flush_n_step_buffer
+VisualAgentV2.save_persistent = VisualAgentCommonMixin.save_persistent
+VisualAgentV2._load_persistent_buffer = VisualAgentCommonMixin._load_persistent_buffer
+VisualAgentV2._module_grad_norm = VisualAgentCommonMixin._module_grad_norm
+VisualAgentV2.log_action_image = VisualAgentCommonMixin.log_action_image
+VisualAgentV2._save_optimizer_state = VisualAgentCommonMixin._save_optimizer_state
+VisualAgentV2._load_optimizer_state = VisualAgentCommonMixin._load_optimizer_state
+VisualAgentV2._load_persistent_training_state = VisualAgentCommonMixin._load_persistent_training_state
 
 _agent: VisualAgentV2 | None = None
 

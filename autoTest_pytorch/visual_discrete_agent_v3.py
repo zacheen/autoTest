@@ -49,6 +49,7 @@ from visual_discrete_agent import YOLO11nLastFeatureExtractor
 from transformer_discrete_agent import FQF_ENTROPY_COEF, NUM_FQF_FRACTIONS, _quantile_huber_loss
 from model_structure.transformer_shared import FQFQNetwork, TwoDimensionalPositionEmbedding
 from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
+from model_structure.visual_agent_common import VisualAgentCommonMixin
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -358,7 +359,7 @@ class VisualBackboneV3(nn.Module):
 # ════════════════════════════════════════════════════════════════════════
 # VisualAgentV3 — top-level RL agent
 # ════════════════════════════════════════════════════════════════════════
-class VisualAgentV3:
+class VisualAgentV3(VisualAgentCommonMixin):
     """Visual FQF agent: screenshot → frozen YOLO → custom transformer → 36 actions."""
 
     def __init__(self, screen_region=None, grid_h: int = GRID_H, grid_w: int = GRID_W):
@@ -366,6 +367,18 @@ class VisualAgentV3:
         self.grid_h = grid_h
         self.grid_w = grid_w
         self.num_actions = grid_h * grid_w
+        self.device = device
+        self.deque_cls = deque
+        self.model_path = VISUAL_V3_MODEL_PATH
+        self.replay_path = VISUAL_V3_REPLAY_PATH
+        self.replay_persistent_path = VISUAL_V3_REPLAY_PERSISTENT_PATH
+        self.action_log_path = VISUAL_V3_ACTION_LOG_PATH
+        self.image_size = IMAGE_SIZE
+        self.save_capacity = VISUAL_SAVE_CAPACITY
+        self.priority_min = VISUAL_PRIORITY_MIN
+        self.priority_max = VISUAL_PRIORITY_MAX
+        self.log_prefix = "[V3]"
+        self.log_actions = LOG_ACTIONS
 
         # ── YOLO feature extractor — FROZEN ──
         self.feature_extractor = YOLO11nLastFeatureExtractor().to(device)
@@ -1000,19 +1013,7 @@ class VisualAgentV3:
         torch.save(self.backbone.state_dict(),  VISUAL_V3_MODEL_PATH / "backbone.pth")
         torch.save(self.q_network.state_dict(), VISUAL_V3_MODEL_PATH / "fqf_network.pth")
         torch.save(self.q_target.state_dict(),  VISUAL_V3_MODEL_PATH / "fqf_target.pth")
-        torch.save(
-            {
-                "optimizer": self.optimizer.state_dict(),
-                "scaler":    self.scaler.state_dict(),
-                "total_it":  self.total_it,
-                "episode_count": self.episode_count,
-                "epsilon":   self.epsilon,
-                "total_episodes": self._total_episodes,
-                "total_wins":     self._total_wins,
-                "result_window":  list(self._result_window),
-            },
-            VISUAL_V3_MODEL_PATH / "optimizer_state.pth",
-        )
+        self._save_optimizer_state()
 
     def save_persistent(self) -> None:
         buf = self.replay_buffer
@@ -1121,39 +1122,8 @@ class VisualAgentV3:
         elif q_path.exists():
             self.q_target.load_state_dict(self.q_network.state_dict())
 
-        opt_path = VISUAL_V3_MODEL_PATH / "optimizer_state.pth"
-        if opt_path.exists():
-            try:
-                state = torch.load(opt_path, map_location=device, weights_only=False)
-                self.optimizer.load_state_dict(state["optimizer"])
-                self.total_it       = state.get("total_it", 0)
-                self.episode_count  = state.get("episode_count", 0)
-                self.epsilon        = state.get("epsilon", self.epsilon)
-                self._total_episodes = state.get("total_episodes", 0)
-                self._total_wins     = state.get("total_wins", 0)
-                self._result_window  = deque(state.get("result_window", []), maxlen=100)
-                print(
-                    f"[V3] Loaded optimizer: total_it={self.total_it}, "
-                    f"episode={self.episode_count}, epsilon={self.epsilon:.4f}, "
-                    f"total_episodes={self._total_episodes}, wins={self._total_wins}"
-                )
-                if "scaler" in state and self.scaler.is_enabled():
-                    try:
-                        self.scaler.load_state_dict(state["scaler"])
-                    except Exception as scaler_exc:
-                        print(f"[V3] Failed to load GradScaler state: {scaler_exc}")
-            except Exception as exc:
-                print(f"[V3] Failed to load optimizer state: {exc}")
-
-        ts_path = VISUAL_V3_MODEL_PATH / "training_state.pth"
-        if ts_path.exists():
-            try:
-                state = torch.load(ts_path, map_location=device, weights_only=False)
-                persistent_index = state.get("persistent_index", [])
-                if persistent_index:
-                    self._load_persistent_buffer(persistent_index)
-            except Exception as exc:
-                print(f"[V3] Failed to load replay buffer: {exc}")
+        self._load_optimizer_state()
+        self._load_persistent_training_state()
 
     def _load_persistent_buffer(self, persistent_index) -> None:
         VISUAL_V3_REPLAY_PATH.mkdir(parents=True, exist_ok=True)
@@ -1385,6 +1355,21 @@ class VisualAgentV3:
 
 
 # ──────────────────────────── factory ────────────────────────────────
+
+VisualAgentV3.store_transition = VisualAgentCommonMixin.store_transition
+VisualAgentV3._commit_n_step_transition = VisualAgentCommonMixin._commit_n_step_transition
+VisualAgentV3._flush_n_step_buffer = VisualAgentCommonMixin._flush_n_step_buffer
+VisualAgentV3.save_persistent = VisualAgentCommonMixin.save_persistent
+VisualAgentV3._load_persistent_buffer = VisualAgentCommonMixin._load_persistent_buffer
+VisualAgentV3._module_grad_norm = VisualAgentCommonMixin._module_grad_norm
+VisualAgentV3._capture_trainable_weight_snapshot = VisualAgentCommonMixin._capture_trainable_weight_snapshot
+VisualAgentV3._snapshot_distance = VisualAgentCommonMixin._snapshot_distance
+VisualAgentV3._tensor_norm = VisualAgentCommonMixin._tensor_norm
+VisualAgentV3._log_param_weight_and_grad_norm = VisualAgentCommonMixin._log_param_weight_and_grad_norm
+VisualAgentV3.log_action_image = VisualAgentCommonMixin.log_action_image
+VisualAgentV3._save_optimizer_state = VisualAgentCommonMixin._save_optimizer_state
+VisualAgentV3._load_optimizer_state = VisualAgentCommonMixin._load_optimizer_state
+VisualAgentV3._load_persistent_training_state = VisualAgentCommonMixin._load_persistent_training_state
 
 _agent: VisualAgentV3 | None = None
 
