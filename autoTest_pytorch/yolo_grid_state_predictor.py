@@ -592,11 +592,26 @@ class VisionSupervisedDataset(Dataset):
                       每張截圖約 1.2 MB（uint8），5000 筆 ≈ 5.9 GB，請先確認 RAM 夠用。
     """
 
-    def __init__(self, dataset_dir: Path, entries: list[dict], cache_in_ram: bool = False):
-        self.screenshots_dir = Path(dataset_dir) / "screenshots"
-        self.labels_dir = Path(dataset_dir) / "labels"
+    SCENE_CANVAS_SIZE = (1080, 1920)   # H, W
+
+    def __init__(
+        self,
+        dataset_dir: Path,
+        entries: list[dict],
+        cache_in_ram: bool = False,
+        augment: bool = False,
+        save_aug_debug: bool = False,
+    ):
+        self.dataset_dir = Path(dataset_dir)
+        self.screenshots_dir = self.dataset_dir / "screenshots"
+        self.labels_dir = self.dataset_dir / "labels"
         self.entries = entries
         self._cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        self.augment = augment
+        self.save_aug_debug = save_aug_debug
+        self.data_aug_dir = self.dataset_dir / "data_aug"
+        if self.save_aug_debug:
+            self.data_aug_dir.mkdir(parents=True, exist_ok=True)
 
         if cache_in_ram:
             n = len(entries)
@@ -617,18 +632,104 @@ class VisionSupervisedDataset(Dataset):
     def __len__(self) -> int:
         return len(self.entries)
 
+    @classmethod
+    def output_image_size(cls) -> tuple[int, int]:
+        canvas_h, canvas_w = cls.SCENE_CANVAS_SIZE
+        return canvas_h // 2, canvas_w // 2
+
+    @staticmethod
+    def _resize_uint8_image(image_u8: torch.Tensor, out_h: int, out_w: int) -> torch.Tensor:
+        resized = F.interpolate(
+            image_u8.unsqueeze(0).float(),
+            size=(out_h, out_w),
+            mode="bilinear",
+            align_corners=False,
+        )
+        return resized.squeeze(0).round().clamp(0, 255).to(torch.uint8)
+
+    @staticmethod
+    def _make_background(height: int, width: int) -> torch.Tensor:
+        mode = random.random()
+        if mode < 0.25:
+            value = 0 if random.random() < 0.5 else 255
+            return torch.full((3, height, width), value, dtype=torch.uint8)
+        if mode < 0.50:
+            value = random.randint(0, 255)
+            return torch.full((3, height, width), value, dtype=torch.uint8)
+        if mode < 0.75:
+            return torch.randint(0, 256, (3, height, width), dtype=torch.uint8)
+
+        bg = torch.full(
+            (3, height, width),
+            random.randint(0, 255),
+            dtype=torch.uint8,
+        )
+        for _ in range(random.randint(6, 16)):
+            rect_h = random.randint(max(32, height // 12), max(64, height // 3))
+            rect_w = random.randint(max(32, width // 12), max(64, width // 3))
+            top = random.randint(0, max(height - rect_h, 0))
+            left = random.randint(0, max(width - rect_w, 0))
+            color = torch.randint(0, 256, (3, 1, 1), dtype=torch.uint8)
+            bg[:, top:top + rect_h, left:left + rect_w] = color
+        return bg
+
+    def _compose_augmented_scene(self, screen_uint8: torch.Tensor) -> torch.Tensor:
+        canvas_h, canvas_w = self.SCENE_CANVAS_SIZE
+        bg = self._make_background(canvas_h, canvas_w)
+
+        _, src_h, src_w = screen_uint8.shape
+        scale = random.uniform(0.9, 1.1)
+        paste_h = max(32, min(canvas_h, int(round(src_h * scale))))
+        paste_w = max(32, min(canvas_w, int(round(src_w * scale))))
+        board = self._resize_uint8_image(screen_uint8, paste_h, paste_w)
+
+        top = random.randint(0, max(canvas_h - paste_h, 0))
+        left = random.randint(0, max(canvas_w - paste_w, 0))
+        bg[:, top:top + paste_h, left:left + paste_w] = board
+
+        out_h, out_w = self.output_image_size()
+        return self._resize_uint8_image(bg, out_h, out_w)
+
+    @staticmethod
+    def _light_image_jitter(image_float: torch.Tensor) -> torch.Tensor:
+        contrast = random.uniform(0.9, 1.1)
+        brightness = random.uniform(-0.05, 0.05)
+        image_float = (image_float - 0.5) * contrast + 0.5 + brightness
+        return image_float.clamp(0.0, 1.0)
+
+    def _save_aug_debug_image(self, image_u8: torch.Tensor, entry: dict) -> None:
+        entry_id = int(entry.get("id", 0))
+        if entry_id <= 0 or entry_id % 100 != 0:
+            return
+        out_path = self.data_aug_dir / f"aug_{entry_id:06d}.png"
+        arr = image_u8.permute(1, 2, 0).cpu().numpy()
+        Image.fromarray(arr, mode="RGB").save(out_path)
+
     def __getitem__(self, idx: int):
+        entry = self.entries[idx]
         if self._cache:
             screen_uint8, label = self._cache[idx]
         else:
-            entry = self.entries[idx]
             screen_uint8 = torch.load(
                 self.screenshots_dir / entry["screenshot"], map_location="cpu", weights_only=True
             )
             label = torch.load(
                 self.labels_dir / entry["label"], map_location="cpu", weights_only=True
             )
-        return screen_uint8.float() / 255.0, label
+
+        if self.augment:
+            screen_uint8 = self._compose_augmented_scene(screen_uint8)
+        else:
+            out_h, out_w = self.output_image_size()
+            screen_uint8 = self._resize_uint8_image(screen_uint8, out_h, out_w)
+
+        if self.save_aug_debug:
+            self._save_aug_debug_image(screen_uint8, entry)
+
+        image_float = screen_uint8.float() / 255.0
+        if self.augment:
+            image_float = self._light_image_jitter(image_float)
+        return image_float, label
 
     @staticmethod
     def load_and_split(
@@ -733,7 +834,13 @@ class YOLOGridStateTrainer:
         pf       = 4 if self.NUM_WORKERS > 0 else None  # prefetch_factor per worker
 
         self.train_loader = DataLoader(
-            VisionSupervisedDataset(self.dataset_dir, train_entries, cache_in_ram=self.CACHE_IN_RAM),
+            VisionSupervisedDataset(
+                self.dataset_dir,
+                train_entries,
+                cache_in_ram=self.CACHE_IN_RAM,
+                augment=True,
+                save_aug_debug=True,
+            ),
             batch_size=self.BATCH_SIZE,
             shuffle=True,
             num_workers=self.NUM_WORKERS,
@@ -742,7 +849,13 @@ class YOLOGridStateTrainer:
             prefetch_factor=pf,
         )
         self.val_loader = DataLoader(
-            VisionSupervisedDataset(self.dataset_dir, val_entries, cache_in_ram=self.CACHE_IN_RAM),
+            VisionSupervisedDataset(
+                self.dataset_dir,
+                val_entries,
+                cache_in_ram=self.CACHE_IN_RAM,
+                augment=False,
+                save_aug_debug=False,
+            ),
             batch_size=self.BATCH_SIZE,
             shuffle=False,
             num_workers=self.NUM_WORKERS,
