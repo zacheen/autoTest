@@ -21,6 +21,7 @@ from pathlib import Path
 from torch.utils.tensorboard import SummaryWriter
 
 from Minesweeper.MinesweeperLogic import MinesweeperLogic
+from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from transformer_discrete_agent import TransformerDiscreteAgent
 
 # ---------- 訓練參數 ----------
@@ -155,18 +156,18 @@ def compute_reward(result):
     """Reward values after applying the old squash transform.
 
     4 cases:
-        +3.6  WIN
-        +1.0  valid click
-        -1.0  mine
-        -0.5 invalid click
+        +win reward
+        +valid click reward
+        +lose reward
+        +invalid click reward
     """
     if not result.changed:
-        return -0.5 # design corrosponding to discount factor = 0.7
+        return MINESWEEPER_REWARD_CONFIG.invalid_click
     if result.win:
-        return 3.6
+        return MINESWEEPER_REWARD_CONFIG.win
     if result.game_over:
-        return -1.0
-    return 1.0
+        return MINESWEEPER_REWARD_CONFIG.lose
+    return MINESWEEPER_REWARD_CONFIG.valid_click
 
 
 def run_episode(logic, agent, add_noise=True):

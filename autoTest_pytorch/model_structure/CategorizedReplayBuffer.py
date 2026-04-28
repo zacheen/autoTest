@@ -5,6 +5,8 @@ from collections import defaultdict
 import numpy as np
 import torch
 
+from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
+
 class CategorizedReplayBuffer:
     """A generic Categorized Replay Buffer.
     
@@ -21,9 +23,9 @@ class CategorizedReplayBuffer:
         max_size: int,
         storage_mode: str = "ram",
         save_dir: str = None,
-        win_threshold: float = 3.0,
-        lose_threshold: float = -1.0,
-        invalid_threshold: float = 0.0,
+        win_threshold: float = MINESWEEPER_REWARD_CONFIG.replay_win_threshold,
+        lose_threshold: float = MINESWEEPER_REWARD_CONFIG.replay_lose_threshold,
+        invalid_threshold: float = MINESWEEPER_REWARD_CONFIG.replay_invalid_threshold,
         overflow_margin: int = 256,
         alpha: float = 0.6,
         uniform_mix: float = 0.2,

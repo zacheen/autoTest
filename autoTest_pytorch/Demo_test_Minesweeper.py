@@ -32,15 +32,8 @@ from util.Gf_Except import Game_fail_Exception
 from Minesweeper_web_client import MinesweeperWebClient
 
 from Minesweeper.Minesweeper_manager import Minesweeper_manager
+from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from visual_discrete_agent_v3 import get_agent
-
-REWARD_VALID_CLICK = 1.0
-REWARD_INVALID_CLICK = -0.5
-# design corrosponding to discount factor = 0.7
-# -0.5*0.7*0.7 + -0.5*0.7 + -0.5 = -1.095
-# a little bit less than REWARD_LOSE, since I hope model learn not to click invalid position
-REWARD_LOSE = -1.0
-REWARD_WIN = 3.6
 
 
 class Minesweeper_Begin_thread (Thread):
@@ -199,7 +192,7 @@ class Game_test_case(unittest.TestCase) :
                 break
 
             print("API action failed")
-            game_status.reward = REWARD_INVALID_CLICK
+            game_status.reward = MINESWEEPER_REWARD_CONFIG.invalid_click
             game_status.record_reward(game_status.reward)
             game_status.invalid_click_count += 1
             game_status.agent.block_action_for_state(game_status.current_pic, game_status.action)
@@ -347,19 +340,19 @@ class Game_test_case(unittest.TestCase) :
                 # case : something changed
                 # game status for valid click
                 game_status.step_count += 1
-                game_status.reward = REWARD_VALID_CLICK
+                game_status.reward = MINESWEEPER_REWARD_CONFIG.valid_click
                 print("valid click")
                 time.sleep(UI_waiting_time)
 
                 # check loss
                 if Tool_Main.compare_sim(glo_var, "lose", sys._getframe().f_code.co_name, precise=True) >= 0.9:
-                    game_status.reward = REWARD_LOSE
+                    game_status.reward = MINESWEEPER_REWARD_CONFIG.lose
                     game_status.game_over = 1
                     print("hit mine")
 
                 # check win
                 elif Tool_Main.compare_sim(glo_var, "win", sys._getframe().f_code.co_name, precise=True) >= 0.9:
-                    game_status.reward = REWARD_WIN
+                    game_status.reward = MINESWEEPER_REWARD_CONFIG.win
                     game_status.game_over = 1
                     game_status.won = True
                     print("win")
@@ -378,7 +371,7 @@ class Game_test_case(unittest.TestCase) :
 
                 # case : nothing change after a period
                 game_status.step_count += 1
-                game_status.reward = REWARD_INVALID_CLICK
+                game_status.reward = MINESWEEPER_REWARD_CONFIG.invalid_click
                 game_status.record_reward(game_status.reward)
                 game_status.invalid_click_count += 1
                 print("invalid click (no screen change)")
@@ -444,19 +437,19 @@ class Game_test_case(unittest.TestCase) :
 
             server_status = game_status.server_state.get("status")
             if server_status == "lost":
-                game_status.reward = REWARD_LOSE
+                game_status.reward = MINESWEEPER_REWARD_CONFIG.lose
                 game_status.game_over = 1
                 print("lose")
             elif server_status == "won":
-                game_status.reward = REWARD_WIN
+                game_status.reward = MINESWEEPER_REWARD_CONFIG.win
                 game_status.game_over = 1
                 game_status.won = True
                 print("win")
             elif board_changed:
-                game_status.reward = REWARD_VALID_CLICK
+                game_status.reward = MINESWEEPER_REWARD_CONFIG.valid_click
                 print("valid click")
             else:
-                game_status.reward = REWARD_INVALID_CLICK
+                game_status.reward = MINESWEEPER_REWARD_CONFIG.invalid_click
                 game_status.invalid_click_count += 1
                 print("invalid click")
 

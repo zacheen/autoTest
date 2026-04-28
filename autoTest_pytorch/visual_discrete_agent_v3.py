@@ -47,6 +47,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from visual_discrete_agent import YOLO11nLastFeatureExtractor
 from transformer_discrete_agent import FQF_ENTROPY_COEF, NUM_FQF_FRACTIONS, _quantile_huber_loss
+from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from model_structure.transformer_shared import FQFQNetwork, TwoDimensionalPositionEmbedding
 from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 from model_structure.visual_agent_common import VisualAgentCommonMixin
@@ -422,9 +423,9 @@ class VisualAgentV3(VisualAgentCommonMixin):
             max_size=VISUAL_BUFFER_CAPACITY,
             storage_mode="disk",
             save_dir=VISUAL_V3_REPLAY_PATH,
-            win_threshold=3.0,
-            lose_threshold=-1.0,
-            invalid_threshold=0.0,
+            win_threshold=MINESWEEPER_REWARD_CONFIG.replay_win_threshold,
+            lose_threshold=MINESWEEPER_REWARD_CONFIG.replay_lose_threshold,
+            invalid_threshold=MINESWEEPER_REWARD_CONFIG.replay_invalid_threshold,
             overflow_margin=VISUAL_BUFFER_OVERFLOW,
             alpha=VISUAL_PER_ALPHA,
             uniform_mix=VISUAL_PER_UNIFORM_MIX,

@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 from model_structure.transformer_shared import EncoderDecoderTransformer, FQFQNetwork, TwoDimensionalPositionEmbedding
+from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -158,9 +159,9 @@ class TransformerDiscreteAgent:
         self.replay_buffer = CategorizedReplayBuffer(
             max_size=PER_CAPACITY,
             storage_mode="ram",
-            win_threshold=3.0,
-            lose_threshold=-1.0, 
-            invalid_threshold=0.0,
+            win_threshold=MINESWEEPER_REWARD_CONFIG.replay_win_threshold,
+            lose_threshold=MINESWEEPER_REWARD_CONFIG.replay_lose_threshold,
+            invalid_threshold=MINESWEEPER_REWARD_CONFIG.replay_invalid_threshold,
             alpha=PER_ALPHA,
             beta_start=PER_BETA_START
         )
