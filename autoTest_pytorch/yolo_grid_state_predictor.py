@@ -294,7 +294,6 @@ class VisionDatasetRecorder:
 # --------------------------------------------------------------------------- #
 # YOLO Grid-State Predictor 模型                                               #
 # --------------------------------------------------------------------------- #
-YOLO_FEATURE_SIZE = 40       # YOLO11n 第 6 層輸出 40x40（固定，與 screenshot 640x640 對應）
 YOLO_FEATURE_CHANNELS = 128  # 第 6 層 channel 數
 
 
@@ -381,6 +380,7 @@ class YOLOGridStatePredictor(nn.Module):
         self,
         grid_h: int = 6,
         grid_w: int = 6,
+        input_image_size: tuple[int, int] = (640, 640),
         nhead: int = 4,
         num_cross_attn_layers: int = 2,
         dim_feedforward: int = 512,
@@ -393,15 +393,15 @@ class YOLOGridStatePredictor(nn.Module):
         self.grid_w = grid_w
         self.num_queries = grid_h * grid_w
         self.num_classes = num_classes
-        self.memory_h = YOLO_FEATURE_SIZE
-        self.memory_w = YOLO_FEATURE_SIZE
-        self.num_memory_tokens = self.memory_h * self.memory_w
+        self.input_image_size = input_image_size
         in_dim = PREDICTOR_ENCODER_DIMS[0]
         out_dim = PREDICTOR_ENCODER_DIMS[-1]
 
         # YOLO backbone（import 放在這裡避免 module import 時就載入 ultralytics / torch CUDA 初始化）
         from visual_discrete_agent import YOLO11nLastFeatureExtractor
         self.feature_extractor = YOLO11nLastFeatureExtractor(model_path=yolo_model_path)
+        self.memory_h, self.memory_w = self._infer_memory_shape()
+        self.num_memory_tokens = self.memory_h * self.memory_w
 
         # YOLO (128, 40, 40) → token sequence (1600, 128)
         self.token_adapter = nn.Sequential(
@@ -438,6 +438,17 @@ class YOLOGridStatePredictor(nn.Module):
         # Classification head：d_model → 12 class
         self.classification_head = nn.Linear(out_dim, num_classes)
 
+    def _infer_memory_shape(self) -> tuple[int, int]:
+        with torch.no_grad():
+            dummy = torch.zeros(1, 3, *self.input_image_size, dtype=torch.float32)
+            features = self.feature_extractor(dummy)
+        _, channels, height, width = features.shape
+        if channels != YOLO_FEATURE_CHANNELS:
+            raise ValueError(
+                f"Expected {YOLO_FEATURE_CHANNELS} YOLO channels, got {channels}"
+            )
+        return int(height), int(width)
+
     # --------------------- parameter group accessors --------------------- #
     def yolo_parameters(self):
         return list(self.feature_extractor.parameters())
@@ -464,9 +475,15 @@ class YOLOGridStatePredictor(nn.Module):
 
     # --------------------- forward pieces --------------------- #
     def _build_memory(self, screenshot: torch.Tensor) -> torch.Tensor:
-        """screenshot (B, 3, 640, 640) → memory tokens (B, 1600, 128)."""
-        features = self.feature_extractor(screenshot)  # (B, 128, 40, 40)
-        B = features.size(0)
+        """screenshot (B, 3, H, W) → memory tokens (B, Hf*Wf, 128)."""
+        features = self.feature_extractor(screenshot)
+        B, _, memory_h, memory_w = features.shape
+        if memory_h != self.memory_h or memory_w != self.memory_w:
+            raise ValueError(
+                f"YOLO feature map changed from {self.memory_h}x{self.memory_w} "
+                f"to {memory_h}x{memory_w}. Recreate the predictor with "
+                f"input_image_size={(screenshot.shape[-2], screenshot.shape[-1])}."
+            )
         tokens = (
             features.permute(0, 2, 3, 1)
             .reshape(B, self.num_memory_tokens, YOLO_FEATURE_CHANNELS)
@@ -712,7 +729,11 @@ class YOLOGridStateTrainer:
         )
 
         # 模型 + loss
-        self.model = YOLOGridStatePredictor(grid_h=self.grid_h, grid_w=self.grid_w).to(self.device)
+        self.model = YOLOGridStatePredictor(
+            grid_h=self.grid_h,
+            grid_w=self.grid_w,
+            input_image_size=(640, 640),
+        ).to(self.device)
         self.loss_fn = nn.CrossEntropyLoss()
 
         # optimizer / scheduler：在 train() 中依 phase 初始化
