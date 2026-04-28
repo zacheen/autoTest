@@ -920,7 +920,7 @@ class VisualAgentV3:
             self.tb_writer.add_scalar("train/scaler_scale", self.scaler.get_scale(), self.total_it)
 
         if self.total_it % VISUAL_HISTOGRAM_EVERY == 0:
-            self._log_tensorboard_histograms(self.total_it)
+            self._log_backbone_weight_norms(self.total_it)
 
         self.tb_writer.flush()
         _dbg(f"[train_step] EXIT total_it={self.total_it}")
@@ -1275,18 +1275,47 @@ class VisualAgentV3:
             ref_sq_sum += float(reference_value.pow(2).sum().item())
         return (diff_sq_sum ** 0.5) / max(ref_sq_sum ** 0.5, eps)
 
-    def _log_tensorboard_histograms(self, global_step: int) -> None:
-        for group_name, module in self._trainable_module_groups().items():
-            tag = f"weights/{group_name}"
-            values = [p.detach().float().reshape(-1).cpu() for p in module.parameters()]
-            if values:
-                self.tb_writer.add_histogram(tag, torch.cat(values), global_step)
-            grads = [
-                p.grad.detach().float().reshape(-1).cpu()
-                for p in module.parameters() if p.grad is not None
-            ]
-            if grads:
-                self.tb_writer.add_histogram(tag.replace("weights", "grads"), torch.cat(grads), global_step)
+    def _tensor_norm(self, tensor: torch.Tensor | None) -> float | None:
+        if tensor is None:
+            return None
+        return float(tensor.detach().float().norm().item())
+
+    def _log_param_weight_and_grad_norm(
+        self,
+        tag_prefix: str,
+        param: nn.Parameter | None,
+        global_step: int,
+    ) -> None:
+        if param is None:
+            return
+        weight_norm = self._tensor_norm(param)
+        if weight_norm is not None:
+            self.tb_writer.add_scalar(f"weight_norm/{tag_prefix}", weight_norm, global_step)
+        grad_norm = self._tensor_norm(param.grad)
+        if grad_norm is not None:
+            self.tb_writer.add_scalar(f"grad_norm/{tag_prefix}", grad_norm, global_step)
+
+    def _log_backbone_weight_norms(self, global_step: int) -> None:
+        # Log per-layer transformer norms to pinpoint where instability starts.
+        for layer_idx, layer in enumerate(self.backbone.encoder.layers):
+            prefix = f"encoder/layer{layer_idx}"
+            self_attn = layer.attn.self_attn
+            self._log_param_weight_and_grad_norm(f"{prefix}/self_attn_in_proj", self_attn.in_proj_weight, global_step)
+            self._log_param_weight_and_grad_norm(f"{prefix}/self_attn_out_proj", self_attn.out_proj.weight, global_step)
+            self._log_param_weight_and_grad_norm(f"{prefix}/ffn_linear1", layer.attn.linear1.weight, global_step)
+            self._log_param_weight_and_grad_norm(f"{prefix}/ffn_linear2", layer.attn.linear2.weight, global_step)
+
+            if isinstance(layer.proj, nn.Sequential) and len(layer.proj) > 1 and isinstance(layer.proj[1], nn.Linear):
+                self._log_param_weight_and_grad_norm(f"{prefix}/proj", layer.proj[1].weight, global_step)
+
+        for layer_idx, layer in enumerate(self.backbone.decoder.layers):
+            prefix = f"decoder/layer{layer_idx}"
+            self._log_param_weight_and_grad_norm(f"{prefix}/self_attn_in_proj", layer.self_attn.in_proj_weight, global_step)
+            self._log_param_weight_and_grad_norm(f"{prefix}/self_attn_out_proj", layer.self_attn.out_proj.weight, global_step)
+            self._log_param_weight_and_grad_norm(f"{prefix}/cross_attn_in_proj", layer.multihead_attn.in_proj_weight, global_step)
+            self._log_param_weight_and_grad_norm(f"{prefix}/cross_attn_out_proj", layer.multihead_attn.out_proj.weight, global_step)
+            self._log_param_weight_and_grad_norm(f"{prefix}/ffn_linear1", layer.linear1.weight, global_step)
+            self._log_param_weight_and_grad_norm(f"{prefix}/ffn_linear2", layer.linear2.weight, global_step)
 
     # ──────────────────────────── cleanup ──────────────────────────────
 
