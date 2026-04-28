@@ -809,23 +809,13 @@ class YOLOGridStateTrainer:
         self.tb_writer.add_scalar("val/loss",   val_m["loss"],   epoch)
         self.tb_writer.add_scalar("val/acc",    val_m["acc"],    epoch)
 
-        for c, name in enumerate(_CLASS_NAMES):
-            self.tb_writer.add_scalar(
-                f"val/acc_{name}", float(val_m["acc_per_class"][c]), epoch
-            )
         self.tb_writer.flush()
 
         # Console：只印還沒學好（acc < 0.95）的 class，減少雜訊
-        low_acc = [
-            f"{_CLASS_NAMES[c]}={float(val_m['acc_per_class'][c]):.2f}"
-            for c in range(NUM_CHANNELS)
-            if float(val_m["acc_per_class"][c]) < 0.95
-        ]
         print(
             f"  Epoch {epoch:03d} | "
             f"train loss={train_m['loss']:.4f} acc={train_m['acc']:.3f} | "
             f"val loss={val_m['loss']:.4f} acc={val_m['acc']:.3f}"
-            + (f" | low: {', '.join(low_acc)}" if low_acc else "")
         )
 
     def save_checkpoint(self, epoch: int, is_best: bool = False) -> None:
