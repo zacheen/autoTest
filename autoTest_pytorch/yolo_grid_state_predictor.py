@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import math
 import random
 from pathlib import Path
 from typing import Optional
@@ -380,7 +381,6 @@ class YOLOGridStatePredictor(nn.Module):
         self,
         grid_h: int = 6,
         grid_w: int = 6,
-        input_image_size: tuple[int, int] = (640, 640),
         nhead: int = 4,
         num_cross_attn_layers: int = 2,
         dim_feedforward: int = 512,
@@ -393,23 +393,19 @@ class YOLOGridStatePredictor(nn.Module):
         self.grid_w = grid_w
         self.num_queries = grid_h * grid_w
         self.num_classes = num_classes
-        self.input_image_size = input_image_size
         in_dim = PREDICTOR_ENCODER_DIMS[0]
         out_dim = PREDICTOR_ENCODER_DIMS[-1]
 
         # YOLO backbone（import 放在這裡避免 module import 時就載入 ultralytics / torch CUDA 初始化）
         from visual_discrete_agent import YOLO11nLastFeatureExtractor
         self.feature_extractor = YOLO11nLastFeatureExtractor(model_path=yolo_model_path)
-        self.memory_h, self.memory_w = self._infer_memory_shape()
-        self.num_memory_tokens = self.memory_h * self.memory_w
+        self.memory_d_model = in_dim
+        self._memory_position_cache: dict[tuple[int, int, torch.device, torch.dtype], torch.Tensor] = {}
 
         # YOLO (128, 40, 40) → token sequence (1600, 128)
         self.token_adapter = nn.Sequential(
             nn.LayerNorm(YOLO_FEATURE_CHANNELS),
             nn.Linear(YOLO_FEATURE_CHANNELS, in_dim),
-        )
-        self.memory_position = TwoDimensionalPositionEmbedding(
-            self.memory_h, self.memory_w, in_dim
         )
 
         # Hierarchical encoder + learned queries for the fixed grid.
@@ -438,16 +434,45 @@ class YOLOGridStatePredictor(nn.Module):
         # Classification head：d_model → 12 class
         self.classification_head = nn.Linear(out_dim, num_classes)
 
-    def _infer_memory_shape(self) -> tuple[int, int]:
-        with torch.no_grad():
-            dummy = torch.zeros(1, 3, *self.input_image_size, dtype=torch.float32)
-            features = self.feature_extractor(dummy)
-        _, channels, height, width = features.shape
-        if channels != YOLO_FEATURE_CHANNELS:
+    def _get_fixed_memory_position(
+        self,
+        height: int,
+        width: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        key = (height, width, device, dtype)
+        cached = self._memory_position_cache.get(key)
+        if cached is not None:
+            return cached
+
+        d_model = self.memory_d_model
+        if d_model % 4 != 0:
             raise ValueError(
-                f"Expected {YOLO_FEATURE_CHANNELS} YOLO channels, got {channels}"
+                f"Fixed 2D sinusoidal positional encoding needs d_model % 4 == 0, got {d_model}"
             )
-        return int(height), int(width)
+
+        quarter_dim = d_model // 4
+        half_dim = d_model // 2
+        ys = torch.linspace(0.0, 1.0, steps=height, device=device, dtype=torch.float32)
+        xs = torch.linspace(0.0, 1.0, steps=width, device=device, dtype=torch.float32)
+        div_term = torch.exp(
+            torch.arange(0, quarter_dim, device=device, dtype=torch.float32)
+            * (-math.log(10000.0) / max(quarter_dim, 1))
+        )
+
+        y_angles = ys.unsqueeze(1) * div_term.unsqueeze(0)
+        x_angles = xs.unsqueeze(1) * div_term.unsqueeze(0)
+        y_embed = torch.cat([torch.sin(y_angles), torch.cos(y_angles)], dim=1)
+        x_embed = torch.cat([torch.sin(x_angles), torch.cos(x_angles)], dim=1)
+
+        pos = torch.cat([
+            y_embed.unsqueeze(1).expand(height, width, half_dim),
+            x_embed.unsqueeze(0).expand(height, width, half_dim),
+        ], dim=2).reshape(height * width, d_model)
+        pos = pos.to(dtype=dtype)
+        self._memory_position_cache[key] = pos
+        return pos
 
     # --------------------- parameter group accessors --------------------- #
     def yolo_parameters(self):
@@ -457,7 +482,6 @@ class YOLOGridStatePredictor(nn.Module):
         """除了 YOLO backbone 以外的所有可學習參數（adapter / coord / cross-attn / head）。"""
         other = []
         other += list(self.token_adapter.parameters())
-        other += list(self.memory_position.parameters())
         other += list(self.encoder.parameters())
         other += list(self.query_position.parameters())
         other += [self.query_tokens]
@@ -478,18 +502,17 @@ class YOLOGridStatePredictor(nn.Module):
         """screenshot (B, 3, H, W) → memory tokens (B, Hf*Wf, 128)."""
         features = self.feature_extractor(screenshot)
         B, _, memory_h, memory_w = features.shape
-        if memory_h != self.memory_h or memory_w != self.memory_w:
-            raise ValueError(
-                f"YOLO feature map changed from {self.memory_h}x{self.memory_w} "
-                f"to {memory_h}x{memory_w}. Recreate the predictor with "
-                f"input_image_size={(screenshot.shape[-2], screenshot.shape[-1])}."
-            )
+        self.memory_h = int(memory_h)
+        self.memory_w = int(memory_w)
+        self.num_memory_tokens = self.memory_h * self.memory_w
         tokens = (
             features.permute(0, 2, 3, 1)
             .reshape(B, self.num_memory_tokens, YOLO_FEATURE_CHANNELS)
         )
         memory = self.token_adapter(tokens)
-        memory = memory + self.memory_position().unsqueeze(0)
+        memory = memory + self._get_fixed_memory_position(
+            self.memory_h, self.memory_w, memory.device, memory.dtype
+        ).unsqueeze(0)
         return memory
 
     def _build_queries(self, batch_size: int) -> torch.Tensor:
@@ -732,7 +755,6 @@ class YOLOGridStateTrainer:
         self.model = YOLOGridStatePredictor(
             grid_h=self.grid_h,
             grid_w=self.grid_w,
-            input_image_size=(640, 640),
         ).to(self.device)
         self.loss_fn = nn.CrossEntropyLoss()
 
