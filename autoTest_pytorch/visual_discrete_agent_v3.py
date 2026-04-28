@@ -672,6 +672,8 @@ class VisualAgentV3:
 
             target_mean = target_quantiles.mean(dim=1, keepdim=True)
             td_error = (q_taken.detach().float() - target_mean.detach().float()).abs()
+            fpn_norm_entropy = (entropy.mean() / math.log(NUM_FQF_FRACTIONS)).item()
+            fpn_tau_std = tau_hats.std(dim=1).mean().item()
 
         self.replay_buffer.update_priorities(sample_indices, td_error)
 
@@ -721,6 +723,7 @@ class VisualAgentV3:
             f"  q_top5={top_actions}\n"
             f"  Q_loss={loss.item():.6f} | q_mean={q_mean:.6f} | epsilon={self.epsilon:.4f}\n"
             f"  td_error_norm={td_error.mean().item():.6f} | q/reward_ratio={q_ratio_str} | frac_clipped={frac_clipped:.3f}\n"
+            f"  fpn_norm_entropy={fpn_norm_entropy:.4f} | fpn_tau_std={fpn_tau_std:.4f}\n"
             f"  grad_total={float(grad_norm_total):.6f} | "
             f"backbone_pre={backbone_pre:.6f} head_pre={head_pre:.6f}\n"
             f"---\n"
@@ -736,6 +739,8 @@ class VisualAgentV3:
         for gi, group in enumerate(self.optimizer.param_groups):
             self.tb_writer.add_scalar(f"train/lr_group{gi}",  group["lr"],                  self.total_it)
         self.tb_writer.add_scalar("train/frac_huber_clipped", frac_clipped,                 self.total_it)
+        self.tb_writer.add_scalar("fpn/norm_entropy",         fpn_norm_entropy,             self.total_it)
+        self.tb_writer.add_scalar("fpn/tau_std",              fpn_tau_std,                  self.total_it)
         self.tb_writer.add_scalar("train/td_error_norm",     td_error.mean().item(),       self.total_it)
         self.tb_writer.add_scalar("train/td_error_max",      td_error.max().item(),        self.total_it)
         self.tb_writer.add_scalar("train/target_q_mean",     target_quantiles.float().mean().item(), self.total_it)
