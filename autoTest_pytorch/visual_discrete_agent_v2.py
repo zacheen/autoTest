@@ -501,7 +501,6 @@ class VisualAgentV2:
 
         self._io_log.write(
             f"[Step {self.total_it}] {datetime.datetime.now().strftime('%H:%M:%S')}\n"
-            f"  reward_mean={reward.mean().item():.4f} | done_rate={done.mean().item():.4f}\n"
             f"  real_reward_mean={real_reward_mean:.4f}\n"
             f"  q_top5={top_actions}\n"
             f"  Q_loss={loss.item():.6f} | q_mean={q_mean:.6f} | epsilon={self.epsilon:.4f}\n"
@@ -514,14 +513,11 @@ class VisualAgentV2:
         self.tb_writer.add_scalar("train/Q_loss",           loss.item(),                  self.total_it)
         self.tb_writer.add_scalar("train/q_mean",           q_mean,                       self.total_it)
         self.tb_writer.add_scalar("train/real_reward_mean", real_reward_mean,             self.total_it)
-        self.tb_writer.add_scalar("train/done_rate",        done.mean().item(),           self.total_it)
         self.tb_writer.add_scalar("train/epsilon",          self.epsilon,                 self.total_it)
-        self.tb_writer.add_scalar("train/buffer_size",      self.replay_buffer.size(),    self.total_it)
         # td_error 診斷：找出 Q_loss 大的原因
         self.tb_writer.add_scalar("train/td_error_mean",   td_error.mean().item(),       self.total_it)
         self.tb_writer.add_scalar("train/td_error_max",    td_error.max().item(),        self.total_it)
         self.tb_writer.add_scalar("train/target_q_mean",   target_quantiles.float().mean().item(), self.total_it)
-        self.tb_writer.add_scalar("train/reward_mean_batch", reward.mean().item(),        self.total_it)
         self.tb_writer.add_scalar("grad/total_norm",        float(grad_norm_total),       self.total_it)
         self.tb_writer.add_scalar("grad_pre/yolo",          yolo_pre,                     self.total_it)
         self.tb_writer.add_scalar("grad_pre/backbone",      backbone_pre,                 self.total_it)

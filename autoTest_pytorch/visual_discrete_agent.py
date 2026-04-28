@@ -621,7 +621,6 @@ class VisualDiscreteAgent:
 
         self._io_log.write(
             f"[Step {self.total_it}] {datetime.datetime.now().strftime('%H:%M:%S')}\n"
-            f"  reward_mean={reward.mean().item():.4f} | done_rate={done.mean().item():.4f}\n"
             f"  real_reward_mean={real_reward_mean:.4f}\n"
             f"  action_batch={action.tolist()}\n"
             f"  q_top5={top_actions}\n"
@@ -637,7 +636,6 @@ class VisualDiscreteAgent:
         self.tb_writer.add_scalar("train/Q_loss", loss.item(), self.total_it)
         self.tb_writer.add_scalar("train/q_mean", q_mean, self.total_it)
         self.tb_writer.add_scalar("train/real_reward_mean", real_reward_mean, self.total_it)
-        self.tb_writer.add_scalar("train/done_rate", done.mean().item(), self.total_it)
         self.tb_writer.add_scalar("train/epsilon", self.epsilon, self.total_it)
         self.tb_writer.add_scalar("grad/total_norm", float(grad_norm_total), self.total_it)
         self.tb_writer.add_scalar("grad/yolo_norm", grad_norm_yolo, self.total_it)
