@@ -35,6 +35,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
@@ -785,20 +786,13 @@ class VisionSupervisedDataset(Dataset):
 # Trainer                                                                      #
 # --------------------------------------------------------------------------- #
 class YOLOGridStateTrainer:
-    """監督式訓練：(screenshot, grid_label) → YOLOGridStatePredictor。
-
-    兩階段訓練：
-        Phase 1 (PHASE1_EPOCHS)：凍住 YOLO backbone，只訓練 adapter / coord / cross-attn / head。
-                                  讓新加的模組先在不更動 YOLO 權重的情況下穩定。
-        Phase 2 (PHASE2_EPOCHS)：解凍 YOLO，用極小 LR (LR_YOLO=1e-5) 做 fine-tune。
-    """
+    """監督式訓練：(screenshot, grid_label) → YOLOGridStatePredictor。"""
 
     # ---- 超參數（可直接改這裡） ----
     BATCH_SIZE    = 8
-    LR_YOLO       = 1e-5   # Phase 2 YOLO fine-tune LR（設小，避免破壞預訓練特徵）
+    LR_YOLO       = 1e-5   # YOLO backbone LR
     LR_OTHER      = 5e-4   # adapter / encoder / learned queries / cross-attn / head
-    PHASE1_EPOCHS = 10     # 凍 YOLO 的暖機 epochs
-    PHASE2_EPOCHS = 40     # 解凍 YOLO 後繼續訓練的 epochs
+    TOTAL_EPOCHS  = 50
     VAL_RATIO     = 0.15
     SEED          = 42
     # DataLoader 並行讀取數量。
@@ -871,7 +865,7 @@ class YOLOGridStateTrainer:
         ).to(self.device)
         self.loss_fn = nn.CrossEntropyLoss()
 
-        # optimizer / scheduler：在 train() 中依 phase 初始化
+        # optimizer / scheduler
         self.optimizer: Optional[optim.Optimizer] = None
         self.scheduler: Optional[optim.lr_scheduler.LRScheduler] = None
 
@@ -888,17 +882,12 @@ class YOLOGridStateTrainer:
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
     # ------------------------------------------------------------------ #
-    def _build_optimizer(self, yolo_frozen: bool) -> None:
-        """依照目前 phase 建立 optimizer（phase 轉換時重建）。"""
-        if yolo_frozen:
-            param_groups = [
-                {"params": self.model.non_yolo_parameters(), "lr": self.LR_OTHER},
-            ]
-        else:
-            param_groups = [
-                {"params": self.model.yolo_parameters(),     "lr": self.LR_YOLO},
-                {"params": self.model.non_yolo_parameters(), "lr": self.LR_OTHER},
-            ]
+    def _build_optimizer(self) -> None:
+        """Build optimizer for joint YOLO + predictor training."""
+        param_groups = [
+            {"params": self.model.yolo_parameters(),     "lr": self.LR_YOLO},
+            {"params": self.model.non_yolo_parameters(), "lr": self.LR_OTHER},
+        ]
         self.optimizer = optim.AdamW(param_groups, weight_decay=1e-4)
 
     def _train_epoch(self, epoch: int) -> dict:
@@ -1004,32 +993,17 @@ class YOLOGridStateTrainer:
     # Main training entry point                                            #
     # ------------------------------------------------------------------ #
     def train(self) -> None:
-        """兩階段訓練主迴圈。可中斷後重跑（自動讀取 checkpoint）。"""
-        total_epochs = self.PHASE1_EPOCHS + self.PHASE2_EPOCHS
+        """單階段訓練主迴圈。可中斷後重跑（自動讀取 checkpoint）。"""
+        total_epochs = self.TOTAL_EPOCHS
         start_epoch = self.load_checkpoint()
-
-        current_phase = 0  # 用來偵測 phase 切換
+        self.model.unfreeze_yolo()
+        self._build_optimizer()
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=max(total_epochs - start_epoch, 1), eta_min=1e-6
+        )
+        print(f"\n[Trainer] === Joint training (epochs {start_epoch}~{total_epochs - 1}) — YOLO trainable ===")
 
         for epoch in range(start_epoch, total_epochs):
-            in_phase1 = epoch < self.PHASE1_EPOCHS
-            phase = 1 if in_phase1 else 2
-
-            # Phase 轉換時重建 optimizer + scheduler
-            if phase != current_phase:
-                current_phase = phase
-                if phase == 1:
-                    print(f"\n[Trainer] === Phase 1 (epochs 0~{self.PHASE1_EPOCHS - 1}) — YOLO frozen ===")
-                    self.model.freeze_yolo()
-                    remaining = self.PHASE1_EPOCHS
-                else:
-                    print(f"\n[Trainer] === Phase 2 (epochs {self.PHASE1_EPOCHS}~{total_epochs - 1}) — YOLO unfrozen ===")
-                    self.model.unfreeze_yolo()
-                    remaining = self.PHASE2_EPOCHS
-
-                self._build_optimizer(yolo_frozen=in_phase1)
-                self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                    self.optimizer, T_max=remaining, eta_min=1e-6
-                )
 
             train_m = self._train_epoch(epoch)
             val_m   = self._validate(epoch)
@@ -1057,7 +1031,7 @@ if __name__ == "__main__":
     GRID_W = 6
 
     # ---- 選擇性覆蓋超參數 ----
-    # YOLOGridStateTrainer.PHASE1_EPOCHS = 15
+    # YOLOGridStateTrainer.TOTAL_EPOCHS = 50
     # YOLOGridStateTrainer.BATCH_SIZE    = 4
     #
     # GPU 使用率低（~10%）的調整建議：
