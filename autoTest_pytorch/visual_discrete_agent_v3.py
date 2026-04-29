@@ -7,7 +7,7 @@ Pipeline:
         ↓   token_adapter + 2D sinusoidal pos encoding → (1600, 128)
         ↓   HierarchicalEncoder [128→64→32] → (1600, 32)
     encoded memory (B, 1600, 32)
-        ↓ TransformerDecoder × 2 layers（cross-attn，36 learned query tokens）
+        ↓ TransformerDecoder × 5 layers（pre-LN, cross-attn，36 learned query tokens）
     decoded features (B, 36, 32)
         ↓ FQFQNetwork (d_model=32, num_fractions=8)
     Q-values (B, 6, 6) → masked argmax → action
@@ -141,7 +141,7 @@ ENCODER_DIMS = DEFAULT_ENCODER_DIMS
 # ── Decoder spec ─────────────────────────────────────────────────────
 DECODER_D_MODEL    = ENCODER_DIMS[-1]   # 32
 DECODER_NHEAD      = 4
-DECODER_NUM_LAYERS = 2
+DECODER_NUM_LAYERS = 5
 DECODER_FF_DIM     = 128
 DECODER_DROPOUT    = 0.1
 
@@ -218,6 +218,7 @@ class VisualBackboneV3(YOLOEncoderBase):
             dropout=decoder_dropout,
             activation="gelu",
             batch_first=True,
+            norm_first=True,
         )
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=decoder_num_layers)
 

@@ -97,6 +97,7 @@ class EncoderDecoderTransformer(nn.Module):
             dropout=dropout,
             activation="gelu",
             batch_first=True,
+            norm_first=True,
         )
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
@@ -105,6 +106,7 @@ class EncoderDecoderTransformer(nn.Module):
             dropout=dropout,
             activation="gelu",
             batch_first=True,
+            norm_first=True,
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)

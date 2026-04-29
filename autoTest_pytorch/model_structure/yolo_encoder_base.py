@@ -40,6 +40,7 @@ class HierarchicalEncoderLayer(nn.Module):
         self.attn = nn.TransformerEncoderLayer(
             d_model=d_in, nhead=nhead, dim_feedforward=dim_feedforward,
             dropout=dropout, activation="gelu", batch_first=True,
+            norm_first=True,
         )
         self.proj = (
             nn.Sequential(nn.LayerNorm(d_in), nn.Linear(d_in, d_out))
