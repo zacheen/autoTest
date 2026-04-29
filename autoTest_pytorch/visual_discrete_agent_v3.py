@@ -40,7 +40,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from transformer_discrete_agent import FQF_ENTROPY_COEF, NUM_FQF_FRACTIONS, _quantile_huber_loss
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
-from model_structure.transformer_shared import FQFQNetwork, TwoDimensionalPositionEmbedding
+from model_structure.transformer_shared import FQFQNetwork
 from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 from model_structure.visual_agent_common import VisualAgentCommonMixin
 from model_structure.yolo_encoder_base import YOLOEncoderBase, DEFAULT_ENCODER_DIMS
@@ -209,7 +209,6 @@ class VisualBackboneV3(YOLOEncoderBase):
         self.num_queries = grid_h * grid_w
         out_dim = self.out_dim   # 32
 
-        self.query_position = TwoDimensionalPositionEmbedding(grid_h, grid_w, out_dim)
         self.query_tokens = nn.Parameter(torch.randn(1, self.num_queries, out_dim) * 0.02)
 
         decoder_layer = nn.TransformerDecoderLayer(
@@ -223,7 +222,7 @@ class VisualBackboneV3(YOLOEncoderBase):
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=decoder_num_layers)
 
     def _build_queries(self, batch_size: int) -> torch.Tensor:
-        return self.query_tokens.expand(batch_size, -1, -1) + self.query_position().unsqueeze(0)
+        return self.query_tokens.expand(batch_size, -1, -1)
 
     def get_features(self, screenshot: torch.Tensor) -> torch.Tensor:
         """screenshot (B, 3, H, W) → cell features (B, 36, out_dim)."""

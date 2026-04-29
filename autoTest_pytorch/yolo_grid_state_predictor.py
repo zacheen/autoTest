@@ -38,7 +38,6 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from model_structure.transformer_shared import TwoDimensionalPositionEmbedding
 from model_structure.yolo_encoder_base import (
     YOLOEncoderBase, HierarchicalEncoder, HierarchicalEncoderLayer,
     DEFAULT_ENCODER_DIMS, DEFAULT_ENCODER_FF_MULT,
@@ -335,7 +334,6 @@ class YOLOGridStatePredictor(YOLOEncoderBase):
         self.num_classes = num_classes
         out_dim = self.out_dim
 
-        self.query_position = TwoDimensionalPositionEmbedding(grid_h, grid_w, out_dim)
         self.query_tokens = nn.Parameter(torch.randn(1, self.num_queries, out_dim) * 0.02)
 
         decoder_layer = nn.TransformerDecoderLayer(
@@ -360,7 +358,6 @@ class YOLOGridStatePredictor(YOLOEncoderBase):
         other = []
         other += list(self.token_adapter.parameters())
         other += list(self.encoder.parameters())
-        other += list(self.query_position.parameters())
         other += [self.query_tokens]
         other += list(self.cross_attn_core.parameters())
         other += list(self.classification_head.parameters())
@@ -380,7 +377,7 @@ class YOLOGridStatePredictor(YOLOEncoderBase):
 
     # --------------------- forward --------------------- #
     def _build_queries(self, batch_size: int) -> torch.Tensor:
-        return self.query_tokens.expand(batch_size, -1, -1) + self.query_position().unsqueeze(0)
+        return self.query_tokens.expand(batch_size, -1, -1)
 
     def forward(self, screenshot: torch.Tensor) -> torch.Tensor:
         """
