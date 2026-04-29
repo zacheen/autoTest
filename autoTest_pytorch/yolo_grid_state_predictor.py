@@ -498,6 +498,11 @@ class YOLOGridStatePredictor(nn.Module):
         for p in self.feature_extractor.parameters():
             p.requires_grad_(True)
 
+    def set_yolo_bn_eval(self) -> None:
+        for module in self.feature_extractor.modules():
+            if isinstance(module, nn.modules.batchnorm._BatchNorm):
+                module.eval()
+
     # --------------------- forward pieces --------------------- #
     def _build_memory(self, screenshot: torch.Tensor) -> torch.Tensor:
         """screenshot (B, 3, H, W) → memory tokens (B, Hf*Wf, 128)."""
@@ -594,6 +599,7 @@ class VisionSupervisedDataset(Dataset):
     """
 
     SCENE_CANVAS_SIZE = (1080, 1920)   # H, W
+    USE_ORIGINAL_IMAGE_PROB = 0.20
 
     def __init__(
         self,
@@ -706,6 +712,18 @@ class VisionSupervisedDataset(Dataset):
         arr = image_u8.permute(1, 2, 0).cpu().numpy()
         Image.fromarray(arr, mode="RGB").save(out_path)
 
+    @staticmethod
+    def collate_with_padding(batch):
+        images, labels = zip(*batch)
+        max_h = max(img.shape[1] for img in images)
+        max_w = max(img.shape[2] for img in images)
+        padded_images = []
+        for img in images:
+            pad_h = max_h - img.shape[1]
+            pad_w = max_w - img.shape[2]
+            padded_images.append(F.pad(img, (0, pad_w, 0, pad_h), value=0.0))
+        return torch.stack(padded_images, dim=0), torch.stack(labels, dim=0)
+
     def __getitem__(self, idx: int):
         entry = self.entries[idx]
         if self._cache:
@@ -718,9 +736,10 @@ class VisionSupervisedDataset(Dataset):
                 self.labels_dir / entry["label"], map_location="cpu", weights_only=True
             )
 
-        if self.augment:
+        use_original = random.random() < self.USE_ORIGINAL_IMAGE_PROB
+        if self.augment and not use_original:
             screen_uint8 = self._compose_augmented_scene(screen_uint8)
-        else:
+        elif not use_original:
             out_h, out_w = self.output_image_size()
             screen_uint8 = self._resize_uint8_image(screen_uint8, out_h, out_w)
 
@@ -789,7 +808,7 @@ class YOLOGridStateTrainer:
     """監督式訓練：(screenshot, grid_label) → YOLOGridStatePredictor。"""
 
     # ---- 超參數（可直接改這裡） ----
-    BATCH_SIZE    = 8
+    TRAIN_BATCH_SIZE = 16
     LR_YOLO       = 1e-5   # YOLO backbone LR
     LR_OTHER      = 5e-4   # adapter / encoder / learned queries / cross-attn / head
     TOTAL_EPOCHS  = 50
@@ -835,27 +854,29 @@ class YOLOGridStateTrainer:
                 augment=True,
                 save_aug_debug=True,
             ),
-            batch_size=self.BATCH_SIZE,
+            batch_size=self.TRAIN_BATCH_SIZE,
             shuffle=True,
             num_workers=self.NUM_WORKERS,
             pin_memory=use_pin,
             persistent_workers=use_pw,
             prefetch_factor=pf,
+            collate_fn=VisionSupervisedDataset.collate_with_padding,
         )
         self.val_loader = DataLoader(
             VisionSupervisedDataset(
                 self.dataset_dir,
                 val_entries,
                 cache_in_ram=self.CACHE_IN_RAM,
-                augment=False,
+                augment=True,
                 save_aug_debug=False,
             ),
-            batch_size=self.BATCH_SIZE,
+            batch_size=self.TRAIN_BATCH_SIZE,
             shuffle=False,
             num_workers=self.NUM_WORKERS,
             pin_memory=use_pin,
             persistent_workers=use_pw,
             prefetch_factor=pf,
+            collate_fn=VisionSupervisedDataset.collate_with_padding,
         )
 
         # 模型 + loss
@@ -892,6 +913,7 @@ class YOLOGridStateTrainer:
 
     def _train_epoch(self, epoch: int) -> dict:
         self.model.train()
+        self.model.set_yolo_bn_eval()
         total_loss = 0.0
         correct = 0
         n_pixels = 0
