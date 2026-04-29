@@ -599,7 +599,6 @@ class VisionSupervisedDataset(Dataset):
     """
 
     SCENE_CANVAS_SIZE = (1080, 1920)   # H, W
-    USE_ORIGINAL_IMAGE_PROB = 0.20
 
     def __init__(
         self,
@@ -708,21 +707,10 @@ class VisionSupervisedDataset(Dataset):
         entry_id = int(entry.get("id", 0))
         if entry_id <= 0 or entry_id % 100 != 0:
             return
-        out_path = self.data_aug_dir / f"aug_{entry_id:06d}.png"
+        prefix = "aug" if self.augment else "orig"
+        out_path = self.data_aug_dir / f"{prefix}_{entry_id:06d}.png"
         arr = image_u8.permute(1, 2, 0).cpu().numpy()
         Image.fromarray(arr, mode="RGB").save(out_path)
-
-    @staticmethod
-    def collate_with_padding(batch):
-        images, labels = zip(*batch)
-        max_h = max(img.shape[1] for img in images)
-        max_w = max(img.shape[2] for img in images)
-        padded_images = []
-        for img in images:
-            pad_h = max_h - img.shape[1]
-            pad_w = max_w - img.shape[2]
-            padded_images.append(F.pad(img, (0, pad_w, 0, pad_h), value=0.0))
-        return torch.stack(padded_images, dim=0), torch.stack(labels, dim=0)
 
     def __getitem__(self, idx: int):
         entry = self.entries[idx]
@@ -736,11 +724,12 @@ class VisionSupervisedDataset(Dataset):
                 self.labels_dir / entry["label"], map_location="cpu", weights_only=True
             )
 
-        use_original = random.random() < self.USE_ORIGINAL_IMAGE_PROB
-        if self.augment and not use_original:
+        if self.augment:
             screen_uint8 = self._compose_augmented_scene(screen_uint8)
-        elif not use_original:
-            out_h, out_w = self.output_image_size()
+        else:
+            _, src_h, src_w = screen_uint8.shape
+            out_h = max(1, src_h // 2)
+            out_w = max(1, src_w // 2)
             screen_uint8 = self._resize_uint8_image(screen_uint8, out_h, out_w)
 
         if self.save_aug_debug:
@@ -809,6 +798,7 @@ class YOLOGridStateTrainer:
 
     # ---- 超參數（可直接改這裡） ----
     TRAIN_BATCH_SIZE = 16
+    ORIGINAL_BATCH_PROB = 0.20
     LR_YOLO       = 1e-5   # YOLO backbone LR
     LR_OTHER      = 5e-4   # adapter / encoder / learned queries / cross-attn / head
     TOTAL_EPOCHS  = 50
@@ -846,7 +836,22 @@ class YOLOGridStateTrainer:
         use_pw   = self.NUM_WORKERS > 0   # persistent_workers 需要 num_workers > 0
         pf       = 4 if self.NUM_WORKERS > 0 else None  # prefetch_factor per worker
 
-        self.train_loader = DataLoader(
+        self.train_loader_original = DataLoader(
+            VisionSupervisedDataset(
+                self.dataset_dir,
+                train_entries,
+                cache_in_ram=self.CACHE_IN_RAM,
+                augment=False,
+                save_aug_debug=False,
+            ),
+            batch_size=self.TRAIN_BATCH_SIZE,
+            shuffle=True,
+            num_workers=self.NUM_WORKERS,
+            pin_memory=use_pin,
+            persistent_workers=use_pw,
+            prefetch_factor=pf,
+        )
+        self.train_loader_augmented = DataLoader(
             VisionSupervisedDataset(
                 self.dataset_dir,
                 train_entries,
@@ -860,9 +865,23 @@ class YOLOGridStateTrainer:
             pin_memory=use_pin,
             persistent_workers=use_pw,
             prefetch_factor=pf,
-            collate_fn=VisionSupervisedDataset.collate_with_padding,
         )
-        self.val_loader = DataLoader(
+        self.val_loader_original = DataLoader(
+            VisionSupervisedDataset(
+                self.dataset_dir,
+                val_entries,
+                cache_in_ram=self.CACHE_IN_RAM,
+                augment=False,
+                save_aug_debug=False,
+            ),
+            batch_size=self.TRAIN_BATCH_SIZE,
+            shuffle=False,
+            num_workers=self.NUM_WORKERS,
+            pin_memory=use_pin,
+            persistent_workers=use_pw,
+            prefetch_factor=pf,
+        )
+        self.val_loader_augmented = DataLoader(
             VisionSupervisedDataset(
                 self.dataset_dir,
                 val_entries,
@@ -876,7 +895,6 @@ class YOLOGridStateTrainer:
             pin_memory=use_pin,
             persistent_workers=use_pw,
             prefetch_factor=pf,
-            collate_fn=VisionSupervisedDataset.collate_with_padding,
         )
 
         # 模型 + loss
@@ -911,64 +929,88 @@ class YOLOGridStateTrainer:
         ]
         self.optimizer = optim.AdamW(param_groups, weight_decay=1e-4)
 
-    def _train_epoch(self, epoch: int) -> dict:
-        self.model.train()
-        self.model.set_yolo_bn_eval()
+    @staticmethod
+    def _next_batch(loader, iterator):
+        try:
+            batch = next(iterator)
+        except StopIteration:
+            iterator = iter(loader)
+            batch = next(iterator)
+        return batch, iterator
+
+    def _run_epoch_batches(self, original_loader, augmented_loader, *, training: bool) -> dict:
+        if training:
+            self.model.train()
+            self.model.set_yolo_bn_eval()
+        else:
+            self.model.eval()
+
         total_loss = 0.0
         correct = 0
         n_pixels = 0
+        per_class_correct = torch.zeros(NUM_CHANNELS)
+        per_class_total = torch.zeros(NUM_CHANNELS)
 
-        for screen, label in self.train_loader:
-            screen = screen.to(self.device)     # (B, 3, 640, 640)
-            label = label.to(self.device)       # (B, H, W)
+        original_iter = iter(original_loader)
+        augmented_iter = iter(augmented_loader)
+        num_steps = max(len(original_loader), len(augmented_loader))
 
-            logits = self.model(screen)  # (B, 12, H, W)
-            loss = self.loss_fn(logits, label)
+        for _ in range(num_steps):
+            use_original = random.random() < self.ORIGINAL_BATCH_PROB
+            if use_original:
+                (screen, label), original_iter = self._next_batch(original_loader, original_iter)
+            else:
+                (screen, label), augmented_iter = self._next_batch(augmented_loader, augmented_iter)
 
-            self.optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.optimizer.step()
+            screen = screen.to(self.device)
+            label = label.to(self.device)
+
+            if training:
+                logits = self.model(screen)
+                loss = self.loss_fn(logits, label)
+                self.optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
+            else:
+                with torch.no_grad():
+                    logits = self.model(screen)
+                    loss = self.loss_fn(logits, label)
 
             total_loss += float(loss.item())
-            pred = logits.argmax(dim=1)
-            correct  += int((pred == label).sum().item())
-            n_pixels += int(label.numel())
+            pred = logits.argmax(dim=1).cpu()
+            label_cpu = label.cpu()
+            correct += int((pred == label_cpu).sum().item())
+            n_pixels += int(label_cpu.numel())
 
-        return {
-            "loss": total_loss / max(len(self.train_loader), 1),
-            "acc":  correct / max(n_pixels, 1),
+            if not training:
+                for c in range(NUM_CHANNELS):
+                    mask = label_cpu == c
+                    per_class_correct[c] += float((pred[mask] == c).sum().item())
+                    per_class_total[c] += float(mask.sum().item())
+
+        metrics = {
+            "loss": total_loss / max(num_steps, 1),
+            "acc": correct / max(n_pixels, 1),
         }
+        if not training:
+            metrics["acc_per_class"] = per_class_correct / (per_class_total + 1e-8)
+        return metrics
+
+    def _train_epoch(self, epoch: int) -> dict:
+        return self._run_epoch_batches(
+            self.train_loader_original,
+            self.train_loader_augmented,
+            training=True,
+        )
 
     @torch.no_grad()
     def _validate(self, epoch: int) -> dict:
-        self.model.eval()
-        total_loss = 0.0
-        per_class_correct = torch.zeros(NUM_CHANNELS)
-        per_class_total   = torch.zeros(NUM_CHANNELS)
-
-        for screen, label in self.val_loader:
-            screen = screen.to(self.device)
-            label  = label.to(self.device)
-
-            logits = self.model(screen)
-            total_loss += float(self.loss_fn(logits, label).item())
-
-            pred      = logits.argmax(dim=1).cpu()
-            label_cpu = label.cpu()
-            for c in range(NUM_CHANNELS):
-                mask = label_cpu == c
-                per_class_correct[c] += float((pred[mask] == c).sum().item())
-                per_class_total[c]   += float(mask.sum().item())
-
-        overall_acc = float(
-            per_class_correct.sum() / (per_class_total.sum() + 1e-8)
+        return self._run_epoch_batches(
+            self.val_loader_original,
+            self.val_loader_augmented,
+            training=False,
         )
-        return {
-            "loss":          total_loss / max(len(self.val_loader), 1),
-            "acc":           overall_acc,
-            "acc_per_class": per_class_correct / (per_class_total + 1e-8),  # tensor(12,)
-        }
 
     def _log_metrics(self, epoch: int, train_m: dict, val_m: dict) -> None:
         self.tb_writer.add_scalar("train/loss", train_m["loss"], epoch)
