@@ -16,11 +16,12 @@ Pipeline:
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import torch
 import torch.nn as nn
+
+from model_structure.transformer_shared import FixedSinusoidalPositionEmbedding
 
 
 YOLO_FEATURE_CHANNELS = 128
@@ -91,55 +92,15 @@ class YOLOEncoderBase(nn.Module):
         self.feature_extractor = YOLO11nLastFeatureExtractor(model_path=yolo_model_path)
 
         in_dim = encoder_dims[0]
-        self._pos_d_model = in_dim
         self.token_adapter = nn.Sequential(
             nn.LayerNorm(YOLO_FEATURE_CHANNELS),
             nn.Linear(YOLO_FEATURE_CHANNELS, in_dim),
         )
+        self.memory_position = FixedSinusoidalPositionEmbedding(in_dim)
         self.encoder = HierarchicalEncoder(
             dims=encoder_dims, nhead=nhead, ff_mult=ff_mult, dropout=dropout,
         )
         self.out_dim = encoder_dims[-1]
-        self._pos_cache: dict = {}
-
-    # ── positional encoding ──────────────────────────────────────────────
-
-    def _get_fixed_memory_position(
-        self,
-        height: int,
-        width: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        """Fixed 2D sinusoidal positional encoding, shape (H*W, d_model). Cached."""
-        key = (height, width, device, dtype)
-        cached = self._pos_cache.get(key)
-        if cached is not None:
-            return cached
-
-        d_model = self._pos_d_model
-        if d_model % 4 != 0:
-            raise ValueError(
-                f"Fixed 2D sinusoidal pos encoding needs d_model % 4 == 0, got {d_model}"
-            )
-        quarter_dim = d_model // 4
-        half_dim    = d_model // 2
-        ys = torch.linspace(0.0, 1.0, steps=height, device=device, dtype=torch.float32)
-        xs = torch.linspace(0.0, 1.0, steps=width,  device=device, dtype=torch.float32)
-        div_term = torch.exp(
-            torch.arange(0, quarter_dim, device=device, dtype=torch.float32)
-            * (-math.log(10000.0) / max(quarter_dim, 1))
-        )
-        y_angles = ys.unsqueeze(1) * div_term.unsqueeze(0)
-        x_angles = xs.unsqueeze(1) * div_term.unsqueeze(0)
-        y_embed = torch.cat([torch.sin(y_angles), torch.cos(y_angles)], dim=1)
-        x_embed = torch.cat([torch.sin(x_angles), torch.cos(x_angles)], dim=1)
-        pos = torch.cat([
-            y_embed.unsqueeze(1).expand(height, width, half_dim),
-            x_embed.unsqueeze(0).expand(height, width, half_dim),
-        ], dim=2).reshape(height * width, d_model).to(dtype=dtype)
-        self._pos_cache[key] = pos
-        return pos
 
     # ── forward ──────────────────────────────────────────────────────────
 
@@ -149,9 +110,7 @@ class YOLOEncoderBase(nn.Module):
         B, _, h, w = features.shape
         tokens = features.permute(0, 2, 3, 1).reshape(B, h * w, YOLO_FEATURE_CHANNELS)
         memory = self.token_adapter(tokens)
-        memory = memory + self._get_fixed_memory_position(
-            h, w, memory.device, memory.dtype
-        ).unsqueeze(0)
+        memory = memory + self.memory_position(h, w).unsqueeze(0)
         return self.encoder(memory)
 
     # ── freeze / unfreeze ─────────────────────────────────────────────────
