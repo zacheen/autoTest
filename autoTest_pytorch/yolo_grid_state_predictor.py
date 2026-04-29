@@ -39,8 +39,11 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-# 避免 circular import：YOLO11n extractor 與 pos-embed 從 visual_discrete_agent / shared module 匯入
 from model_structure.transformer_shared import TwoDimensionalPositionEmbedding
+from model_structure.yolo_encoder_base import (
+    YOLOEncoderBase, HierarchicalEncoder, HierarchicalEncoderLayer,
+    DEFAULT_ENCODER_DIMS, DEFAULT_ENCODER_FF_MULT,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -296,86 +299,17 @@ class VisionDatasetRecorder:
 # --------------------------------------------------------------------------- #
 # YOLO Grid-State Predictor 模型                                               #
 # --------------------------------------------------------------------------- #
-YOLO_FEATURE_CHANNELS = 128  # 第 6 層 channel 數
 
 
-PREDICTOR_ENCODER_DIMS = [128, 64, 32]
-PREDICTOR_ENCODER_FF_MULT = 4
-
-
-class HierarchicalEncoderLayer(nn.Module):
-    """Self-attention block followed by an optional projection."""
-
-    def __init__(self, d_in: int, d_out: int, nhead: int,
-                 dim_feedforward: int, dropout: float):
-        super().__init__()
-        self.attn = nn.TransformerEncoderLayer(
-            d_model=d_in,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-        )
-        if d_in != d_out:
-            self.proj = nn.Sequential(
-                nn.LayerNorm(d_in),
-                nn.Linear(d_in, d_out),
-            )
-        else:
-            self.proj = nn.Identity()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj(self.attn(x))
-
-
-class HierarchicalEncoder(nn.Module):
-    """Encoder whose width shrinks across layers."""
-
-    def __init__(self, dims: list[int], nhead: int, ff_mult: int, dropout: float):
-        super().__init__()
-        if len(dims) < 2:
-            raise ValueError(f"HierarchicalEncoder needs at least 2 dims, got {dims}")
-        for d in dims:
-            if d % nhead != 0:
-                raise ValueError(f"dim {d} must be divisible by nhead {nhead}")
-
-        self.layers = nn.ModuleList([
-            HierarchicalEncoderLayer(
-                d_in=d_in,
-                d_out=d_out,
-                nhead=nhead,
-                dim_feedforward=d_in * ff_mult,
-                dropout=dropout,
-            )
-            for d_in, d_out in zip(dims[:-1], dims[1:])
-        ])
-        self.out_dim = dims[-1]
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        for layer in self.layers:
-            x = layer(x)
-        return x
-
-
-class YOLOGridStatePredictor(nn.Module):
+class YOLOGridStatePredictor(YOLOEncoderBase):
     """Screenshot → 12-channel grid state（fixed-grid learned-query variant）。
 
     設計重點：
+      * 繼承 YOLOEncoderBase（YOLO + token_adapter + HierarchicalEncoder [128→64→32]）
       * YOLO backbone 整個跟著 fine-tune（LR 設小一點：1e-5）
-      * 2-layer hierarchical encoder: 128 -> 64 -> 32
       * Learned queries + 2D positional embedding for a fixed grid
       * Cross-attention 2 層（nn.TransformerDecoder），含 self-attn + cross-attn + FFN
       * 輸出 (B, 12, H, W) logits，配合 nn.CrossEntropyLoss（12 class 互斥）
-
-    Args:
-        grid_h, grid_w: learned query 對應的固定網格大小。
-        nhead: multi-head attention 頭數。
-        num_cross_attn_layers: cross-attention 層數（設計決定：2 層）。
-        dim_feedforward: TransformerDecoderLayer 內 FFN 維度。
-        dropout: dropout 比例。
-        num_classes: 輸出 channel 數（預設 12，對應 Minesweeper 12 個 cell class）。
-        yolo_model_path: YOLO11n checkpoint 路徑。
     """
 
     def __init__(
@@ -384,42 +318,27 @@ class YOLOGridStatePredictor(nn.Module):
         grid_w: int = 6,
         nhead: int = 4,
         num_cross_attn_layers: int = 2,
-        dim_feedforward: int = 512,
+        dim_feedforward: int = 128,
         dropout: float = 0.1,
         num_classes: int = NUM_CHANNELS,
         yolo_model_path: str = "yolo11n.pt",
     ):
-        super().__init__()
+        super().__init__(
+            encoder_dims=DEFAULT_ENCODER_DIMS,
+            nhead=nhead,
+            ff_mult=DEFAULT_ENCODER_FF_MULT,
+            dropout=dropout,
+            yolo_model_path=yolo_model_path,
+        )
         self.grid_h = grid_h
         self.grid_w = grid_w
         self.num_queries = grid_h * grid_w
         self.num_classes = num_classes
-        in_dim = PREDICTOR_ENCODER_DIMS[0]
-        out_dim = PREDICTOR_ENCODER_DIMS[-1]
+        out_dim = self.out_dim
 
-        # YOLO backbone（import 放在這裡避免 module import 時就載入 ultralytics / torch CUDA 初始化）
-        from visual_discrete_agent import YOLO11nLastFeatureExtractor
-        self.feature_extractor = YOLO11nLastFeatureExtractor(model_path=yolo_model_path)
-        self.memory_d_model = in_dim
-        self._memory_position_cache: dict[tuple[int, int, torch.device, torch.dtype], torch.Tensor] = {}
-
-        # YOLO (128, 40, 40) → token sequence (1600, 128)
-        self.token_adapter = nn.Sequential(
-            nn.LayerNorm(YOLO_FEATURE_CHANNELS),
-            nn.Linear(YOLO_FEATURE_CHANNELS, in_dim),
-        )
-
-        # Hierarchical encoder + learned queries for the fixed grid.
-        self.encoder = HierarchicalEncoder(
-            dims=PREDICTOR_ENCODER_DIMS,
-            nhead=nhead,
-            ff_mult=PREDICTOR_ENCODER_FF_MULT,
-            dropout=dropout,
-        )
         self.query_position = TwoDimensionalPositionEmbedding(grid_h, grid_w, out_dim)
         self.query_tokens = nn.Parameter(torch.randn(1, self.num_queries, out_dim) * 0.02)
 
-        # Cross-Attention core：nn.TransformerDecoder（self-attn + cross-attn + FFN）x num_cross_attn_layers
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=out_dim,
             nhead=nhead,
@@ -431,56 +350,14 @@ class YOLOGridStatePredictor(nn.Module):
         self.cross_attn_core = nn.TransformerDecoder(
             decoder_layer, num_layers=num_cross_attn_layers
         )
-
-        # Classification head：d_model → 12 class
         self.classification_head = nn.Linear(out_dim, num_classes)
-
-    def _get_fixed_memory_position(
-        self,
-        height: int,
-        width: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        key = (height, width, device, dtype)
-        cached = self._memory_position_cache.get(key)
-        if cached is not None:
-            return cached
-
-        d_model = self.memory_d_model
-        if d_model % 4 != 0:
-            raise ValueError(
-                f"Fixed 2D sinusoidal positional encoding needs d_model % 4 == 0, got {d_model}"
-            )
-
-        quarter_dim = d_model // 4
-        half_dim = d_model // 2
-        ys = torch.linspace(0.0, 1.0, steps=height, device=device, dtype=torch.float32)
-        xs = torch.linspace(0.0, 1.0, steps=width, device=device, dtype=torch.float32)
-        div_term = torch.exp(
-            torch.arange(0, quarter_dim, device=device, dtype=torch.float32)
-            * (-math.log(10000.0) / max(quarter_dim, 1))
-        )
-
-        y_angles = ys.unsqueeze(1) * div_term.unsqueeze(0)
-        x_angles = xs.unsqueeze(1) * div_term.unsqueeze(0)
-        y_embed = torch.cat([torch.sin(y_angles), torch.cos(y_angles)], dim=1)
-        x_embed = torch.cat([torch.sin(x_angles), torch.cos(x_angles)], dim=1)
-
-        pos = torch.cat([
-            y_embed.unsqueeze(1).expand(height, width, half_dim),
-            x_embed.unsqueeze(0).expand(height, width, half_dim),
-        ], dim=2).reshape(height * width, d_model)
-        pos = pos.to(dtype=dtype)
-        self._memory_position_cache[key] = pos
-        return pos
 
     # --------------------- parameter group accessors --------------------- #
     def yolo_parameters(self):
         return list(self.feature_extractor.parameters())
 
     def non_yolo_parameters(self):
-        """除了 YOLO backbone 以外的所有可學習參數（adapter / coord / cross-attn / head）。"""
+        """除了 YOLO backbone 以外的所有可學習參數（adapter / encoder / decoder / head）。"""
         other = []
         other += list(self.token_adapter.parameters())
         other += list(self.encoder.parameters())
@@ -490,6 +367,7 @@ class YOLOGridStatePredictor(nn.Module):
         other += list(self.classification_head.parameters())
         return other
 
+    # freeze_yolo / unfreeze_yolo / set_yolo_bn_eval 繼承自 YOLOEncoderBase
     def freeze_yolo(self):
         for p in self.feature_extractor.parameters():
             p.requires_grad_(False)
@@ -499,51 +377,26 @@ class YOLOGridStatePredictor(nn.Module):
             p.requires_grad_(True)
 
     def set_yolo_bn_eval(self) -> None:
-        for module in self.feature_extractor.modules():
-            if isinstance(module, nn.modules.batchnorm._BatchNorm):
-                module.eval()
+        self.set_bn_eval()
 
-    # --------------------- forward pieces --------------------- #
-    def _build_memory(self, screenshot: torch.Tensor) -> torch.Tensor:
-        """screenshot (B, 3, H, W) → memory tokens (B, Hf*Wf, 128)."""
-        features = self.feature_extractor(screenshot)
-        B, _, memory_h, memory_w = features.shape
-        self.memory_h = int(memory_h)
-        self.memory_w = int(memory_w)
-        self.num_memory_tokens = self.memory_h * self.memory_w
-        tokens = (
-            features.permute(0, 2, 3, 1)
-            .reshape(B, self.num_memory_tokens, YOLO_FEATURE_CHANNELS)
-        )
-        memory = self.token_adapter(tokens)
-        memory = memory + self._get_fixed_memory_position(
-            self.memory_h, self.memory_w, memory.device, memory.dtype
-        ).unsqueeze(0)
-        return memory
-
+    # --------------------- forward --------------------- #
     def _build_queries(self, batch_size: int) -> torch.Tensor:
-        """Return learned query tokens for the configured grid."""
         return self.query_tokens.expand(batch_size, -1, -1) + self.query_position().unsqueeze(0)
 
-    def forward(
-        self,
-        screenshot: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, screenshot: torch.Tensor) -> torch.Tensor:
         """
         Args:
             screenshot: (B, 3, 640, 640) float tensor，已正規化到 [0, 1]。
 
         Returns:
             logits: (B, num_classes, grid_h, grid_w)，**尚未過 softmax**。
-            搭配 nn.CrossEntropyLoss(logits, label_HW) 做訓練。
         """
-        memory = self.encoder(self._build_memory(screenshot))  # (B, 1600, 32)
+        memory  = self.encode(screenshot)                            # (B, 1600, 32)
+        queries = self._build_queries(batch_size=memory.size(0))     # (B, 36,   32)
+        decoded = self.cross_attn_core(queries, memory)              # (B, 36,   32)
+        logits_flat = self.classification_head(decoded)              # (B, 36,   num_classes)
         B = memory.size(0)
-        queries = self._build_queries(batch_size=B)
-        decoded = self.cross_attn_core(queries, memory)  # (B, H*W, d)
-        logits_flat = self.classification_head(decoded)  # (B, H*W, num_classes)
-        logits = logits_flat.transpose(1, 2).reshape(B, self.num_classes, self.grid_h, self.grid_w)
-        return logits
+        return logits_flat.transpose(1, 2).reshape(B, self.num_classes, self.grid_h, self.grid_w)
 
     # --------------------- inference helpers --------------------- #
     @torch.no_grad()

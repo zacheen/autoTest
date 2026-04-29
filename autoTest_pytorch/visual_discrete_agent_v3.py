@@ -1,28 +1,21 @@
-"""visual_discrete_agent_v3.py — Stage 2 Agent (raw YOLO features → custom transformer).
+"""visual_discrete_agent_v3.py — Stage 2 Agent（screenshot → FQF Q-network）。
 
 Pipeline:
     screenshot (3, 640, 640)
-        ↓ YOLO11n backbone (FROZEN, only feature_extractor weights from yolo_grid_predictor)
-    raw features (128, 40, 40)
-        ↓ token_adapter: LayerNorm(128) + Linear(128, 128)
-        ↓ + memory_position(40×40, d_model=128)
-    memory tokens (B, 1600, 128)
-        ↓ HierarchicalEncoder
-        ↓   layer 1: SelfAttn(d=128) → proj 128→64
-        ↓   layer 2: SelfAttn(d=64)  → proj 64→32
-        ↓   layer 3: SelfAttn(d=32)
-        ↓   layer 4: SelfAttn(d=32)
+        ↓ YOLOEncoderBase（FROZEN，從 YOLOGridStatePredictor checkpoint 載入）
+        ↓   YOLO11n backbone → (128, 40, 40)
+        ↓   token_adapter + 2D sinusoidal pos encoding → (1600, 128)
+        ↓   HierarchicalEncoder [128→64→32] → (1600, 32)
     encoded memory (B, 1600, 32)
-        ↓ TransformerDecoder × 2 layers (cross-attn with 36 query tokens)
+        ↓ TransformerDecoder × 2 layers（cross-attn，36 learned query tokens）
     decoded features (B, 36, 32)
         ↓ FQFQNetwork (d_model=32, num_fractions=8)
     Q-values (B, 6, 6) → masked argmax → action
 
-Differences vs v2:
-    • YOLO 完全凍結（只 load `feature_extractor.*` 權重，eval 模式，BN stats 不漂移）
-    • Encoder 是自製 HierarchicalEncoder，d_model 從 128 逐層減半到 32
-    • Transformer / FQF 全部 random init（不繼承 Stage 1）
-    • 訓練只更新 backbone（adapter + encoder + decoder + queries）+ FQF head
+架構說明：
+    • VisualBackboneV3 繼承 YOLOEncoderBase（與 YOLOGridStatePredictor 共用）
+    • YOLO + token_adapter + encoder 全部凍結（BN eval mode）
+    • 可訓練部分：decoder + query tokens + FQF head
 """
 
 from __future__ import annotations
@@ -45,12 +38,12 @@ import torchvision.transforms as transforms
 from PIL import Image
 from torch.utils.tensorboard import SummaryWriter
 
-from visual_discrete_agent import YOLO11nLastFeatureExtractor
 from transformer_discrete_agent import FQF_ENTROPY_COEF, NUM_FQF_FRACTIONS, _quantile_huber_loss
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from model_structure.transformer_shared import FQFQNetwork, TwoDimensionalPositionEmbedding
 from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 from model_structure.visual_agent_common import VisualAgentCommonMixin
+from model_structure.yolo_encoder_base import YOLOEncoderBase, DEFAULT_ENCODER_DIMS
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -142,17 +135,8 @@ NUM_ACTIONS = GRID_H * GRID_W
 VISUAL_BATCH_SIZE   = 32
 VISUAL_WARMUP_STEPS = 300
 
-# ── YOLO feature spec (must match YOLO11nLastFeatureExtractor) ───────
-YOLO_FEATURE_CHANNELS = 128
-YOLO_FEATURE_SIZE     = 40
-
-# ── HierarchicalEncoder dim plan ─────────────────────────────────────
-# d_model halves at each layer until floor=32, then stays.
-# Length is the number of self-attn LAYERS + 1 (the first dim is input).
-ENCODER_DIMS    = [128, 64, 32, 32, 32]   # 4 layers: 128→64→32→32→32
-ENCODER_NHEAD   = 4
-ENCODER_FF_MULT = 4
-ENCODER_DROPOUT = 0.1
+# ── Encoder dims（與 YOLOGridStatePredictor 共用 DEFAULT_ENCODER_DIMS = [128,64,32]）──
+ENCODER_DIMS = DEFAULT_ENCODER_DIMS
 
 # ── Decoder spec ─────────────────────────────────────────────────────
 DECODER_D_MODEL    = ENCODER_DIMS[-1]   # 32
@@ -195,130 +179,36 @@ LOG_ACTIONS = True
 
 
 # ════════════════════════════════════════════════════════════════════════
-# HierarchicalEncoder — self-attention + optional dim projection per layer
+# VisualBackboneV3 — YOLOEncoderBase（frozen）+ cross-attn decoder
 # ════════════════════════════════════════════════════════════════════════
-class HierarchicalEncoderLayer(nn.Module):
-    """Self-attention block at d_in, then optional Linear projection to d_out.
+class VisualBackboneV3(YOLOEncoderBase):
+    """screenshot (B,3,H,W) → 36 cell features (B, 36, 32).
 
-    Standard nn.TransformerEncoderLayer keeps d_model constant — we wrap it and
-    add a LayerNorm + Linear at the end when d_in != d_out so the next layer
-    can run at a smaller dim.
-    """
-
-    def __init__(self, d_in: int, d_out: int, nhead: int,
-                 dim_feedforward: int, dropout: float):
-        super().__init__()
-        self.d_in  = d_in
-        self.d_out = d_out
-        self.attn = nn.TransformerEncoderLayer(
-            d_model=d_in,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-        )
-        if d_in != d_out:
-            self.proj = nn.Sequential(
-                nn.LayerNorm(d_in),
-                nn.Linear(d_in, d_out),
-            )
-        else:
-            self.proj = nn.Identity()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.attn(x)
-        return self.proj(x)
-
-
-class HierarchicalEncoder(nn.Module):
-    """Encoder whose d_model halves layer-by-layer until a floor.
-
-    Args:
-        dims: e.g. [128, 64, 32, 32, 32] → 4 layers (one per consecutive pair).
-              The first element is the INPUT dim; the last element is the
-              OUTPUT dim fed to the decoder.
-    """
-
-    def __init__(self, dims: list[int], nhead: int, ff_mult: int, dropout: float):
-        super().__init__()
-        if len(dims) < 2:
-            raise ValueError(f"HierarchicalEncoder needs at least 2 dims, got {dims}")
-        for d in dims:
-            if d % nhead != 0:
-                raise ValueError(f"dim {d} must be divisible by nhead {nhead}")
-
-        self.dims = dims
-        self.layers = nn.ModuleList()
-        for d_in, d_out in zip(dims[:-1], dims[1:]):
-            self.layers.append(HierarchicalEncoderLayer(
-                d_in=d_in,
-                d_out=d_out,
-                nhead=nhead,
-                dim_feedforward=d_in * ff_mult,
-                dropout=dropout,
-            ))
-        self.out_dim = dims[-1]
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        for layer in self.layers:
-            x = layer(x)
-        return x
-
-
-# ════════════════════════════════════════════════════════════════════════
-# VisualBackboneV3 — token_adapter + HierarchicalEncoder + cross-attn decoder
-# ════════════════════════════════════════════════════════════════════════
-class VisualBackboneV3(nn.Module):
-    """Take YOLO features (B, 128, 40, 40) → 36 cell features (B, 36, 32).
-
-    Note: feature_extractor (YOLO) is NOT inside this module.  The agent owns
-    YOLO so freezing/eval-mode is managed at the agent level; the backbone is
-    purely the trainable transformer stack.
+    YOLO + token_adapter + HierarchicalEncoder 繼承自 YOLOEncoderBase，
+    並在初始化時從 YOLOGridStatePredictor checkpoint 載入後凍結。
+    Decoder（cross-attn + queries）為 random init，是唯一可訓練的部分。
     """
 
     def __init__(
         self,
         grid_h: int = GRID_H,
         grid_w: int = GRID_W,
-        encoder_dims: list[int] = ENCODER_DIMS,
-        encoder_nhead: int = ENCODER_NHEAD,
-        encoder_ff_mult: int = ENCODER_FF_MULT,
-        encoder_dropout: float = ENCODER_DROPOUT,
         decoder_nhead: int = DECODER_NHEAD,
         decoder_num_layers: int = DECODER_NUM_LAYERS,
         decoder_ff_dim: int = DECODER_FF_DIM,
         decoder_dropout: float = DECODER_DROPOUT,
     ):
-        super().__init__()
+        super().__init__(
+            encoder_dims=ENCODER_DIMS,
+            nhead=DECODER_NHEAD,
+            ff_mult=4,
+            dropout=decoder_dropout,
+        )
         self.grid_h = grid_h
         self.grid_w = grid_w
         self.num_queries = grid_h * grid_w
-        self.memory_h = YOLO_FEATURE_SIZE
-        self.memory_w = YOLO_FEATURE_SIZE
-        self.num_memory_tokens = self.memory_h * self.memory_w
+        out_dim = self.out_dim   # 32
 
-        in_dim  = encoder_dims[0]    # 128
-        out_dim = encoder_dims[-1]   # 32
-
-        # token_adapter: YOLO 128-channel feature → encoder input tokens
-        self.token_adapter = nn.Sequential(
-            nn.LayerNorm(YOLO_FEATURE_CHANNELS),
-            nn.Linear(YOLO_FEATURE_CHANNELS, in_dim),
-        )
-        self.memory_position = TwoDimensionalPositionEmbedding(
-            self.memory_h, self.memory_w, in_dim
-        )
-
-        # Hierarchical encoder (d_model halves layer-by-layer)
-        self.encoder = HierarchicalEncoder(
-            dims=encoder_dims,
-            nhead=encoder_nhead,
-            ff_mult=encoder_ff_mult,
-            dropout=encoder_dropout,
-        )
-
-        # Decoder: 36 learned queries + 2D position embed
         self.query_position = TwoDimensionalPositionEmbedding(grid_h, grid_w, out_dim)
         self.query_tokens = nn.Parameter(torch.randn(1, self.num_queries, out_dim) * 0.02)
 
@@ -331,30 +221,18 @@ class VisualBackboneV3(nn.Module):
             batch_first=True,
         )
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=decoder_num_layers)
-        self.out_dim = out_dim
-
-    def _embed_memory(self, yolo_features: torch.Tensor) -> torch.Tensor:
-        """yolo_features (B, 128, 40, 40) → memory tokens (B, 1600, in_dim)."""
-        B = yolo_features.size(0)
-        tokens = (
-            yolo_features
-            .permute(0, 2, 3, 1)
-            .reshape(B, self.num_memory_tokens, YOLO_FEATURE_CHANNELS)
-        )
-        x = self.token_adapter(tokens)
-        return x + self.memory_position().unsqueeze(0)
 
     def _build_queries(self, batch_size: int) -> torch.Tensor:
         return self.query_tokens.expand(batch_size, -1, -1) + self.query_position().unsqueeze(0)
 
-    def get_features(self, yolo_features: torch.Tensor) -> torch.Tensor:
-        """yolo_features (B, 128, 40, 40) → cell features (B, 36, out_dim)."""
-        memory = self.encoder(self._embed_memory(yolo_features))           # (B, 1600, out_dim)
-        queries = self._build_queries(yolo_features.size(0))               # (B, 36,   out_dim)
-        return self.decoder(queries, memory)                               # (B, 36,   out_dim)
+    def get_features(self, screenshot: torch.Tensor) -> torch.Tensor:
+        """screenshot (B, 3, H, W) → cell features (B, 36, out_dim)."""
+        memory  = self.encode(screenshot)                        # (B, 1600, 32)
+        queries = self._build_queries(memory.size(0))            # (B, 36,   32)
+        return self.decoder(queries, memory)                     # (B, 36,   32)
 
-    def forward(self, yolo_features: torch.Tensor) -> torch.Tensor:
-        return self.get_features(yolo_features)
+    def forward(self, screenshot: torch.Tensor) -> torch.Tensor:
+        return self.get_features(screenshot)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -381,13 +259,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.log_prefix = "[V3]"
         self.log_actions = LOG_ACTIONS
 
-        # ── YOLO feature extractor — FROZEN ──
-        self.feature_extractor = YOLO11nLastFeatureExtractor().to(device)
-        self._load_yolo_weights()
-        self._freeze_yolo()
-
-        # ── Backbone (random init) ──
+        # ── Backbone：載入 Predictor 權重後凍結 YOLO + encoder ──
         self.backbone = VisualBackboneV3(grid_h=grid_h, grid_w=grid_w).to(device)
+        self.backbone.load_encoder_weights_from_checkpoint(YOLO_PREDICTOR_PATH)
+        self.backbone.freeze()
 
         # ── FQF heads (random init) ──
         self.q_network = FQFQNetwork(
@@ -407,9 +282,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.q_target.load_state_dict(self.q_network.state_dict())
         self.q_target.eval()
 
-        # ── Optimizer (only trainable modules) ──
+        # ── Optimizer（只更新 backbone decoder + queries，YOLO+encoder 已凍結）──
+        backbone_trainable = [p for p in self.backbone.parameters() if p.requires_grad]
         self.optimizer = optim.AdamW([
-            {"params": self.backbone.parameters(),  "lr": LR_VISUAL_BACKBONE},
+            {"params": backbone_trainable,          "lr": LR_VISUAL_BACKBONE},
             {"params": self.q_network.parameters(), "lr": LR_VISUAL_HEAD},
         ])
         # 紀錄每個 param group 的 base lr，warmup 期間根據 total_it 動態縮放
@@ -488,48 +364,11 @@ class VisualAgentV3(VisualAgentCommonMixin):
         atexit.register(self._close_tb_writer)
         atexit.register(self._close_io_log)
 
-    # ──────────────────────────── YOLO load + freeze ────────────────────
-
-    def _load_yolo_weights(self) -> None:
-        """Load only `feature_extractor.*` keys from yolo_grid_predictor checkpoint."""
-        if not YOLO_PREDICTOR_PATH.exists():
-            raise FileNotFoundError(
-                f"YOLOGridStatePredictor checkpoint not found: {YOLO_PREDICTOR_PATH}\n"
-                "Run python yolo_grid_state_predictor.py first."
-            )
-        ckpt = torch.load(YOLO_PREDICTOR_PATH, map_location=device, weights_only=False)
-        full_state = ckpt["model"]
-        prefix = "feature_extractor."
-        fe_state = {
-            k[len(prefix):]: v
-            for k, v in full_state.items()
-            if k.startswith(prefix)
-        }
-        if not fe_state:
-            raise RuntimeError(
-                f"No `feature_extractor.*` keys found in {YOLO_PREDICTOR_PATH}. "
-                f"Checkpoint keys (sample): {list(full_state.keys())[:5]}"
-            )
-        missing, unexpected = self.feature_extractor.load_state_dict(fe_state, strict=False)
-        print(
-            f"[V3] YOLO feature_extractor loaded "
-            f"({len(fe_state)} tensors, val_acc={ckpt.get('best_val_acc', '?')})"
-        )
-        if missing:
-            print(f"[V3] YOLO missing keys: {missing[:3]}{'...' if len(missing) > 3 else ''}")
-        if unexpected:
-            print(f"[V3] YOLO unexpected keys: {unexpected[:3]}{'...' if len(unexpected) > 3 else ''}")
-
-    def _freeze_yolo(self) -> None:
-        for p in self.feature_extractor.parameters():
-            p.requires_grad_(False)
-        self.feature_extractor.eval()
-
     # ──────────────────────────── runtime modes ──────────────────────────
 
     def _set_runtime_modes(self) -> None:
-        self.feature_extractor.eval()      # 永遠保持 eval（凍結 BN running stats）
-        self.backbone.train()
+        self.backbone.train()          # decoder + queries → train mode
+        self.backbone.set_bn_eval()    # YOLO BN layers 保持 eval（凍結 running stats）
         self.q_network.train()
         self.q_target.eval()
 
@@ -553,11 +392,6 @@ class VisualAgentV3(VisualAgentCommonMixin):
     def _state_key(self, state: torch.Tensor) -> str:
         arr = state.detach().cpu().clamp(0, 1).mul(255).to(torch.uint8).numpy()
         return hashlib.sha1(arr.tobytes()).hexdigest()
-
-    def _yolo_features(self, screenshot_batch: torch.Tensor) -> torch.Tensor:
-        """Wrap YOLO feature extraction.  Always no-grad (frozen)."""
-        with torch.no_grad():
-            return self.feature_extractor(screenshot_batch)
 
     # ──────────────────────────── blocked actions ──────────────────────
 
@@ -600,11 +434,8 @@ class VisualAgentV3(VisualAgentCommonMixin):
         _dbg_tensor("select_action.screenshot_batch", screenshot_batch)
         _dbg("[select_action] after state.to(device)")
         with torch.no_grad():
-            _dbg("[select_action] before feature_extractor")
-            yolo_feat = self.feature_extractor(screenshot_batch)
-            _dbg_tensor("select_action.yolo_feat", yolo_feat)
-            _dbg("[select_action] after feature_extractor")
-            features  = self.backbone.get_features(yolo_feat)
+            _dbg("[select_action] before backbone")
+            features  = self.backbone.get_features(screenshot_batch)
             _dbg_tensor("select_action.features", features)
             _dbg("[select_action] after backbone")
             q_2d = self.q_network(features)["q_values"].squeeze(0)
@@ -744,11 +575,8 @@ class VisualAgentV3(VisualAgentCommonMixin):
         with torch.no_grad():
             with torch.autocast(device_type=device.type, dtype=torch.float16,
                                 enabled=(USE_AMP and device.type == "cuda")):
-                _dbg("[train_step] before next feature_extractor")
-                next_yolo_feat = self.feature_extractor(next_state)
-                _dbg_tensor("train_step.next_yolo_feat", next_yolo_feat)
-                _dbg("[train_step] after next feature_extractor")
-                next_features  = self.backbone.get_features(next_yolo_feat)
+                _dbg("[train_step] before next backbone")
+                next_features  = self.backbone.get_features(next_state)
                 _dbg_tensor("train_step.next_features", next_features)
                 _dbg("[train_step] after next backbone")
                 next_online    = self.q_network(next_features)
@@ -769,14 +597,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
                 _dbg_tensor("train_step.target_quantiles", target_quantiles)
         _dbg("[train_step] target branch done")
 
-        # ── current branch (gradients flow through backbone + head; YOLO frozen) ──
+        # ── current branch (gradients flow through decoder + FQF；YOLO+encoder 已凍結）──
         with torch.autocast(device_type=device.type, dtype=torch.float16,
                             enabled=(USE_AMP and device.type == "cuda")):
-            with torch.no_grad():
-                yolo_feat = self.feature_extractor(state)   # YOLO frozen → no grad needed
-            _dbg_tensor("train_step.yolo_feat", yolo_feat)
-            _dbg("[train_step] after current feature_extractor")
-            features  = self.backbone.get_features(yolo_feat)
+            features  = self.backbone.get_features(state)
             _dbg_tensor("train_step.features", features)
             _dbg("[train_step] after current backbone")
             q_output  = self.q_network(features)
