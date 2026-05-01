@@ -146,7 +146,6 @@ DECODER_FF_DIM     = 128
 DECODER_DROPOUT    = 0.1
 
 # ── training hyper-params ────────────────────────────────────────────
-VISUAL_GAMMA = 0.9
 VISUAL_N_STEP = 1
 VISUAL_GRAD_CLIP_NORM = 5.0   # 1600-token encoder, allow larger grad room early
 TRAIN_EVERY_N_STEPS = 1
@@ -323,7 +322,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.train_every_n_steps = TRAIN_EVERY_N_STEPS
         self.pending_train_steps = 0
         self.n_step = VISUAL_N_STEP
-        self.n_step_gamma = VISUAL_GAMMA
+        self.n_step_gamma = MINESWEEPER_REWARD_CONFIG.gamma
         self.n_step_buffer = deque()
         self.recent_real_rewards = deque(maxlen=100)
 

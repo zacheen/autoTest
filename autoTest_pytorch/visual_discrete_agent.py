@@ -46,7 +46,6 @@ VISUAL_NHEAD = 4
 VISUAL_BACKBONE_LAYERS = 4
 VISUAL_FF_DIM = 256
 VISUAL_DROPOUT = 0.1
-VISUAL_GAMMA = 0.7
 VISUAL_N_STEP = 1
 LR_VISUAL_YOLO = 2e-5
 LR_VISUAL_ADAPTER = 3e-5
@@ -258,7 +257,7 @@ class VisualDiscreteAgent:
         self.train_every_n_steps = TRAIN_EVERY_N_STEPS
         self.pending_train_steps = 0
         self.n_step = VISUAL_N_STEP
-        self.n_step_gamma = VISUAL_GAMMA
+        self.n_step_gamma = MINESWEEPER_REWARD_CONFIG.gamma
         self.n_step_buffer = deque()
         self.recent_real_rewards = deque(maxlen=100)
         self.epsilon = 0.30

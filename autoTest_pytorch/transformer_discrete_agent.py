@@ -16,7 +16,6 @@ from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BATCH_SIZE = 128
-GAMMA = 0.7
 GRID_STATE_CHANNELS = 12
 LR_DDQN = 5e-5
 PER_CAPACITY = 10000
@@ -168,7 +167,7 @@ class TransformerDiscreteAgent:
         self.total_it = 0
         self.episode_count = 0
         self.n_step = N_STEP
-        self.n_step_gamma = GAMMA
+        self.n_step_gamma = MINESWEEPER_REWARD_CONFIG.gamma
         self.n_step_buffer = deque()
 
         self.epsilon = 0.3

@@ -9,6 +9,7 @@ class RewardConfig:
     invalid_click: float
     lose: float
     win: float
+    gamma: float
 
     @property
     def replay_win_threshold(self) -> float:
@@ -24,8 +25,9 @@ class RewardConfig:
 
 
 MINESWEEPER_REWARD_CONFIG = RewardConfig(
-    valid_click=0.5,
-    invalid_click=-0.25,
-    lose=-0.5,
-    win=1,
+    valid_click = 0.5,
+    invalid_click = -0.25,
+    lose = -0.7,
+    win = 1,
+    gamma = 0.9,
 )

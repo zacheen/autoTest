@@ -72,7 +72,6 @@ VISUAL_BATCH_SIZE   = 20
 VISUAL_WARMUP_STEPS = 1000   # 不到這個數量不開始訓練
 
 # ── training hyper-params ────────────────────────────────────────────
-VISUAL_GAMMA = 0.7
 VISUAL_N_STEP = 1
 VISUAL_GRAD_CLIP_NORM = 1.0
 TRAIN_EVERY_N_STEPS = 1
@@ -194,7 +193,7 @@ class VisualAgentV2(VisualAgentCommonMixin):
         self.train_every_n_steps = TRAIN_EVERY_N_STEPS
         self.pending_train_steps = 0
         self.n_step = VISUAL_N_STEP
-        self.n_step_gamma = VISUAL_GAMMA
+        self.n_step_gamma = MINESWEEPER_REWARD_CONFIG.gamma
         self.n_step_buffer = deque()
         self.recent_real_rewards = deque(maxlen=100)
 
