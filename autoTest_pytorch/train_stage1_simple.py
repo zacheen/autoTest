@@ -16,6 +16,7 @@ import csv
 import time
 import datetime
 import numpy as np
+import torch
 from collections import deque
 from pathlib import Path
 from torch.utils.tensorboard import SummaryWriter
@@ -117,7 +118,7 @@ def run_demo_episode(f, logic, agent, mode="validation"):
     f.write(f"\n  --- {label} demo ---\n")
 
     while not done and step < MAX_STEPS_PER_EPISODE:
-        state = logic.get_grid_state_tensor()
+        state = torch.from_numpy(logic.get_grid_state_array())
         row, col = agent.select_action(state, add_noise=add_noise)
 
         result = logic.click(row, col)
@@ -181,7 +182,7 @@ def run_episode(logic, agent, add_noise=True):
     train_info_list = []
 
     while not done and episode_steps < MAX_STEPS_PER_EPISODE:
-        state = logic.get_grid_state_tensor()
+        state = torch.from_numpy(logic.get_grid_state_array())
         row, col = agent.select_action(state, add_noise=add_noise)
 
         result = logic.click(row, col)
@@ -195,7 +196,7 @@ def run_episode(logic, agent, add_noise=True):
 
         done = result.game_over or result.win
         is_win = result.win
-        next_state = logic.get_grid_state_tensor()
+        next_state = torch.from_numpy(logic.get_grid_state_array())
 
         if add_noise:
             # 跳過第一步：第一次點擊一定有效，沒有學習價值，會稀釋 valid group

@@ -67,7 +67,7 @@ def create_game_state(seed):
         if not logic.game_over and not logic.is_win:
             logic.click(cell[0], cell[1])
 
-    state = logic.get_grid_state_tensor()
+    state = torch.from_numpy(logic.get_grid_state_array())
     return logic, state
 
 

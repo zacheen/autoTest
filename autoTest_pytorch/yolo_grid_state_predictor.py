@@ -45,7 +45,7 @@ from model_structure.yolo_encoder_base import (
 
 
 # --------------------------------------------------------------------------- #
-# 12-channel 定義（須與 Minesweeper/MinesweeperLogic.py 的 get_grid_state_tensor 一致） #
+# 12-channel 定義（須與 Minesweeper/MinesweeperLogic.py 的 get_grid_state_array 一致） #
 # --------------------------------------------------------------------------- #
 CH_UNREVEALED = 0
 CH_FLAGGED = 1
@@ -402,7 +402,7 @@ class YOLOGridStatePredictor(YOLOEncoderBase):
     ) -> torch.Tensor:
         """推論介面：輸出 one-hot-like grid state tensor (B, 12, H, W)，可直接餵給 TransformerDiscreteAgent。
 
-        注意：這裡把 argmax 結果轉成 one-hot（與 MinesweeperLogic.get_grid_state_tensor 同格式）。
+        注意：這裡把 argmax 結果轉成 one-hot（與 MinesweeperLogic.get_grid_state_array 同格式）。
         若要保留 soft distribution，改用 forward() 後手動 softmax 即可。
         """
         self.eval()

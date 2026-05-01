@@ -7,17 +7,14 @@ import random
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 
-try:
-    import torch
-except ImportError:  # pragma: no cover - torch is optional for the web UI runtime
-    torch = None
+import numpy as np
 
 
 # Grid state 常數 (給 get_grid_state 用)
 CELL_UNREVEALED = -1
 CELL_FLAGGED = -2
 
-# One-hot channel 索引 (給 get_grid_state_tensor 用)
+# One-hot channel 索引 (給 get_grid_state_array 用)
 CH_UNREVEALED = 0
 CH_FLAGGED = 1
 CH_NUM_0 = 2     # 已翻開空白 (數字 0)
@@ -174,36 +171,35 @@ class MinesweeperLogic:
             grid.append(row)
         return grid
 
-    def get_grid_state_tensor(self):
-        """取得 one-hot 編碼的 grid state tensor。
+    def get_grid_state_array(self):
+        """取得 one-hot 編碼的 grid state array。
 
         Returns:
-            torch.Tensor: shape (NUM_CHANNELS, rows, cols), float32
+            np.ndarray: shape (NUM_CHANNELS, rows, cols), float32
                 channel 0: 未翻開
                 channel 1: 已標旗
                 channel 2-10: 數字 0-8
                 channel 11: 地雷 (只有 game_over 時才可見)
-        """
-        if torch is None:
-            raise ImportError("torch is required to call get_grid_state_tensor().")
 
-        tensor = torch.zeros(NUM_CHANNELS, self.rows, self.cols, dtype=torch.float32)
+        若呼叫端需要 torch tensor，請在外部用 ``torch.from_numpy(...)`` 轉換。
+        """
+        arr = np.zeros((NUM_CHANNELS, self.rows, self.cols), dtype=np.float32)
 
         for r in range(self.rows):
             for c in range(self.cols):
                 if (r, c) in self.flags:
-                    tensor[CH_FLAGGED, r, c] = 1.0
+                    arr[CH_FLAGGED, r, c] = 1.0
                 elif (r, c) in self.revealed:
                     if (r, c) in self.mines:
                         # 踩雷後才看得到地雷
-                        tensor[CH_MINE, r, c] = 1.0
+                        arr[CH_MINE, r, c] = 1.0
                     else:
                         num = self._count_adjacent_mines(r, c)
-                        tensor[CH_NUM_0 + num, r, c] = 1.0
+                        arr[CH_NUM_0 + num, r, c] = 1.0
                 else:
-                    tensor[CH_UNREVEALED, r, c] = 1.0
+                    arr[CH_UNREVEALED, r, c] = 1.0
 
-        return tensor
+        return arr
 
     def _get_neighbors(self, row: int, col: int):
         """取得 (row, col) 的合法 8 鄰居座標。"""
