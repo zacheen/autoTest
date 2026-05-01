@@ -45,6 +45,7 @@ class FixedSinusoidalPositionEmbedding(nn.Module):
             )
         self.d_model = d_model
         self._cache: dict = {}
+        self.register_buffer("_device_tracker", torch.zeros(1), persistent=False)
 
     def forward(self, height: int, width: int) -> torch.Tensor:
         """回傳 (H*W, d_model) 的 positional encoding tensor。

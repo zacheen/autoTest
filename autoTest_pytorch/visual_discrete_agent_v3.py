@@ -133,7 +133,7 @@ GRID_H = 6
 GRID_W = 6
 NUM_ACTIONS = GRID_H * GRID_W
 VISUAL_BATCH_SIZE   = 32
-VISUAL_WARMUP_STEPS = 300
+MINIMUM_DATA_SIZE = 500 # below this amount, won't start training
 
 # ── Encoder dims（與 YOLOGridStatePredictor 共用 DEFAULT_ENCODER_DIMS = [128,64,32]）──
 ENCODER_DIMS = DEFAULT_ENCODER_DIMS
@@ -161,7 +161,7 @@ LR_VISUAL_BACKBONE = 5e-5   # adapter + encoder + decoder + queries (random init
 LR_VISUAL_HEAD     = 5e-5
 # Linear LR warmup over the first N optimizer steps (transformer 早期穩定)
 # 從 base_lr * LR_WARMUP_START_FACTOR 線性增加到 base_lr
-LR_WARMUP_STEPS         = 1000
+LR_WARMUP_STEPS         = 2000
 LR_WARMUP_START_FACTOR  = 0.0
 
 # ── replay buffer ────────────────────────────────────────────────────
@@ -542,7 +542,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
     def train_step(self):
         buf_size = self.replay_buffer.size()
-        if buf_size < VISUAL_WARMUP_STEPS:
+        if buf_size < MINIMUM_DATA_SIZE:
             return None
 
         self.total_it += 1
@@ -659,6 +659,11 @@ class VisualAgentV3(VisualAgentCommonMixin):
         head_pre     = self._module_grad_norm(self.q_network)
         _dbg(f"[train_step] grad backbone_pre={backbone_pre:.4g} head_pre={head_pre:.4g}")
 
+        # ── per-layer grad/weight norms must be logged BEFORE clip_grad_norm_，
+        # 否則 grad 會被 in-place 縮過,看不出哪一層真的爆掉。
+        if self.total_it % VISUAL_HISTOGRAM_EVERY == 0:
+            self._log_backbone_weight_norms(self.total_it)
+
         params_to_clip = (
             list(self.backbone.parameters())
             + list(self.q_network.parameters())
@@ -724,7 +729,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
             f"  real_reward_mean={real_reward_mean:.4f}\n"
             f"  q_top5={top_actions}\n"
             f"  Q_loss={loss.item():.6f} | q_mean={q_mean:.6f} | epsilon={self.epsilon:.4f}\n"
-            f"  td_error_norm={td_error.mean().item():.6f} | q/reward_ratio={q_ratio_str} | frac_clipped={frac_clipped:.3f}\n"
+            f"  td_error_mean={td_error.mean().item():.6f} | q/reward_ratio={q_ratio_str} | frac_clipped={frac_clipped:.3f}\n"
             f"  fpn_norm_entropy={fpn_norm_entropy:.4f} | fpn_tau_std={fpn_tau_std:.4f}\n"
             f"  grad_total={float(grad_norm_total):.6f} | "
             f"backbone_pre={backbone_pre:.6f} head_pre={head_pre:.6f}\n"
@@ -740,7 +745,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.tb_writer.add_scalar("train/frac_huber_clipped", frac_clipped,                 self.total_it)
         self.tb_writer.add_scalar("fpn/norm_entropy",         fpn_norm_entropy,             self.total_it)
         self.tb_writer.add_scalar("fpn/tau_std",              fpn_tau_std,                  self.total_it)
-        self.tb_writer.add_scalar("train/td_error_norm",     td_error.mean().item(),       self.total_it)
+        self.tb_writer.add_scalar("train/td_error_mean",     td_error.mean().item(),       self.total_it)
         self.tb_writer.add_scalar("train/td_error_max",      td_error.max().item(),        self.total_it)
         self.tb_writer.add_scalar("train/target_q_mean",     target_quantiles.float().mean().item(), self.total_it)
         if abs(real_reward_mean) > 0.1:
@@ -756,9 +761,6 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
         if self.scaler.is_enabled():
             self.tb_writer.add_scalar("train/scaler_scale", self.scaler.get_scale(), self.total_it)
-
-        if self.total_it % VISUAL_HISTOGRAM_EVERY == 0:
-            self._log_backbone_weight_norms(self.total_it)
 
         self.tb_writer.flush()
         _dbg(f"[train_step] EXIT total_it={self.total_it}")
