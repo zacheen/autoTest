@@ -1,71 +1,160 @@
 # Current Implementation Status
 
-## Active Development Branch: `_test_replace_attention`
+## Active Development Branch: `VisionDatasetRecorder_encoder+decoder`
 
-The project is iterating on Stage 1 pre-training to validate whether SAC can learn Minesweeper before investing in the full visual pipeline.
+Training reward_mean is slowly increasing and td_error_mean is decreasing, indicating the FQF distributional Q-network is learning.
 
 ## What Exists Today
 
-### Three Agent Variants in `RL_Agent.py`
+### Two Agent Variants
 
-| Agent | Architecture | Action Space | Status |
-|-------|-------------|-------------|--------|
-| `Stage1SACAgent` | GridEncoder + HierarchicalAttention + SAC | Continuous (x, y) via ScaledSigmoid | Iterating — testing attention architecture |
-| `SimpleDiscreteAgent` | Flatten → MLP (256→256→100) + SAC-Discrete | Discrete (100 cells) with action masking | Diagnostic — validates RL pipeline |
-| `SACAgent` | YOLO11n + HierarchicalAttention + SAC | Continuous (x, y) via Tanh | Stage 2 — code exists, waiting for Stage 1 success |
+| Agent | File | Architecture | Action Space | Status |
+|-------|------|-------------|-------------|--------|
+| `TransformerDiscreteAgent` | `transformer_discrete_agent.py` | Encoder-Decoder Transformer + FQF | Discrete 10×10 = 100 cells | Stage 1 — grid-state training |
+| `VisualDiscreteAgentV3` | `visual_discrete_agent_v3.py` | YOLO (frozen) + Encoder + Decoder + FQF | Discrete 6×6 = 36 cells | Stage 2 — screenshot training, actively iterating |
 
-### Stage 1 SAC (Continuous, with Attention)
+---
 
-**RL Algorithm**: SAC (Soft Actor-Critic) with valid-rate-based alpha
+## Stage 1: Transformer Discrete Agent (`transformer_discrete_agent.py`)
 
-- **Actor**: GridEncoder → (128, 80, 80) → HierarchicalAttentionHead → 256-d → Gaussian policy → ScaledSigmoid → (x, y) ≈ [-0.05, 1.05]
-- **Critic**: Separate GridEncoder + HierarchicalAttentionHead → 256-d + action → twin Q-values
-- **Alpha**: Not auto-tuned; set by `ALPHA_MAX - (ALPHA_MAX - ALPHA_MIN) * avg_valid_rate` (sliding window of 50 episodes)
-- **Replay buffer**: Per-class circular buffer (`Stage1ReplayBuffer`) with balanced sampling across reward classes
+**RL Algorithm**: FQF (Fully parameterized Quantile Function) distributional Q-learning
 
-### Simple MLP (Discrete, No Attention)
-
-**RL Algorithm**: SAC-Discrete with auto-alpha (clamped)
-
-- **Actor**: Flatten(1200) → FC(256) → FC(256) → FC(100) → softmax (with action masking from state channel 0)
-- **Critic**: Same MLP architecture → 100 Q-values (twin)
-- **Alpha**: Auto-tuned with `target_entropy = 0.8 * ln(100) ≈ 3.7`, clamped to [0.05, 0.3]
-- **Replay buffer**: Same `Stage1ReplayBuffer` with per-class balanced sampling
+- **Input**: Grid state `(B, 12, 10, 10)` — 12-channel one-hot per cell
+- **Token embed**: `Linear(12 → 64)` + `TwoDimensionalPositionEmbedding(10, 10, 64)`
+- **Query tokens**: 100 learned query vectors, 10×10 grid (no positional encoding on queries)
+- **Core**: `EncoderDecoderTransformer` (pre-LN, GELU) — `d_model=64, nhead=4, num_layers=4, ff_dim=256`
+- **Head**: `FQFQNetwork(d_model=64, num_fractions=8)` → Q-values `(B, 100)` over 10×10 cells
+- **Action masking**: hard mask via state channel 0 (unrevealed cells only), `-1e8` for masked logits
 
 ### Hyperparameters
 
 | Parameter | Value |
 |-----------|-------|
-| Batch Size | 32 |
-| Actor LR | 3e-4 |
-| Critic LR | 3e-4 |
-| Alpha LR (discrete) | 1e-5 |
-| Gamma | 0.99 |
-| TAU | 0.005 |
-| Buffer Capacity | 2000 per class |
-| Save Capacity | 150 |
+| Batch Size | 128 |
+| LR | 5e-4 |
+| Gamma | 0.9 |
+| Target Update Freq | 50 steps |
+| FQF Fractions | 8 |
+| FQF Entropy Coef | 1e-3 |
+| Buffer Capacity (PER) | 10,000 |
+| Save Capacity | 2,000 |
 | Save Every N Episodes | 50 |
 
-### Reward Structure (Both Agents)
+---
+
+## Stage 2: Visual Discrete Agent V3 (`visual_discrete_agent_v3.py`)
+
+**RL Algorithm**: FQF distributional Q-learning with PER (Prioritized Experience Replay)
+
+### Network Architecture
+
+```
+Screenshot (B, 3, 640, 640)
+    ↓ YOLOEncoderBase  (FROZEN — loaded from YOLOGridStatePredictor checkpoint)
+      YOLO11n backbone → (B, 128, 40, 40)
+      token_adapter: LayerNorm(128) + Linear(128→128)
+      + fixed 2D sinusoidal positional encoding
+    (B, 1600, 128)
+      HierarchicalEncoder [128→64→32]  (3 pre-LN self-attn blocks, FROZEN)
+encoded memory (B, 1600, 32)
+    ↓ TransformerDecoder × 5 layers  (pre-LN, cross-attention)
+      36 learned query tokens (no positional encoding on queries)
+decoded features (B, 36, 32)
+    ↓ FQFQNetwork (d_model=32, num_fractions=8)
+Q-values (B, 36) → masked argmax → grid cell (row, col in 6×6)
+```
+
+**Frozen**: YOLO backbone + token_adapter + HierarchicalEncoder (BN in eval mode)
+
+**Trainable**: TransformerDecoder + 36 query tokens + FQFQNetwork head
+
+### Hyperparameters
+
+| Parameter | Value |
+|-----------|-------|
+| Grid | 6×6 = 36 actions |
+| Batch Size | 32 |
+| LR (decoder + head) | 5e-5 |
+| LR warmup | 2,000 steps (0 → 5e-5 linearly) |
+| Gamma | 0.9 |
+| Target Update Freq | 1,000 steps |
+| FQF Fractions | 8 |
+| Grad Clip Norm | 5.0 |
+| Buffer Capacity | 2,048 |
+| Save Capacity | 256 |
+| Minimum Data Before Training | 500 |
+
+### Reward Structure
 
 | Event | Reward |
 |-------|--------|
-| Valid click (board changes) | +3 |
-| Invalid click (already revealed/flagged) | -2 to -2.95 |
-| Click outside grid bounds | -3 (Stage1 only) |
-| Hit mine (lose) | -3 |
-| Win | +20 |
+| Valid click (board changes) | +0.5 |
+| Invalid click (already revealed/flagged) | -0.25 |
+| Hit mine (lose) | -0.7 |
+| Win | +1.0 |
 
-### Checkpoint & Resume
+Reward values centralized in `model_structure/reward_settings.py` (`MINESWEEPER_REWARD_CONFIG`).
 
-Both agents save on every episode end (`_save_model()`) and periodically save replay buffer (`save_persistent()`). Full resume on restart via `try_load_model()`.
+### Replay Buffer
+
+`CategorizedReplayBuffer` with PER:
+
+| Parameter | Value |
+|-----------|-------|
+| Capacity | 2,048 |
+| Overflow buffer | 256 |
+| PER alpha | 0.6 |
+| Uniform mix ratio | 0.2 |
+| Priority min / max | 0.05 / 5.0 |
+| Age decay | 0.002 |
+
+Persistent save: 256 entries to disk every 50 episodes + on exit.
+
+### Checkpoint Files (`models/visual_transformer_v3_6x6/`)
+
+| File | Content |
+|------|---------|
+| `decoder.pth` | TransformerDecoder weights + query token parameters |
+| `fqf_head.pth` | FQFQNetwork weights |
+| `target_decoder.pth` | Target network decoder |
+| `target_fqf_head.pth` | Target network FQF head |
+| `training_state.pth` | Optimizer states, step counter, episode count |
+| `replay_buffer/` | Runtime PER buffer |
+| `replay_buffer_save/` | Persistent saved buffer |
+
+---
+
+## Shared Components
+
+### `model_structure/yolo_encoder_base.py` — `YOLOEncoderBase`
+
+Shared between `YOLOGridStatePredictor` (supervised) and `VisualDiscreteAgentV3` (RL).  
+Subclasses call `encode(screenshot)` to get memory tokens `(B, 1600, 32)` ready for cross-attention.
+
+### `model_structure/transformer_shared.py`
+
+| Class | Role |
+|-------|------|
+| `TwoDimensionalPositionEmbedding` | Learned 2D pos embedding (row + col embed concat) |
+| `FixedSinusoidalPositionEmbedding` | Fixed 2D sinusoidal encoding — cached by (H, W, device, dtype) |
+| `EncoderDecoderTransformer` | Pre-LN encoder + decoder used by Stage 1 |
+| `FQFQNetwork` | FQF head: learned quantile fractions + cosine embedding → per-action Q-values |
+| `DuelingQNetwork` | Legacy dueling head (not used in current active agents) |
+
+### `model_structure/CategorizedReplayBuffer.py`
+
+Prioritized replay buffer used by both agents. Supports stratified persistent save/load.
+
+---
 
 ## Recent Iteration History
 
-1. **Initial**: SpatialAttentionHead (weighted pooling) — destroyed spatial info, policy collapsed after ~1200 episodes
-2. **Changed to**: HierarchicalAttentionHead (local + global attention) — preserves spatial reasoning
-3. **Added**: ScaledSigmoid activation for direct [0, 1] grid coordinate mapping
-4. **Added**: Per-class replay buffer for balanced training data
-5. **Added**: Simple MLP experiment to diagnose whether failure is in architecture vs RL pipeline
-6. **Current branch**: `_test_replace_attention` — testing discrete I/O to check if RL can learn at all
-7. **Latest fix**: Protect positive experiences in replay buffer from overwrite
+1. **SAC + continuous (x, y)** — abandoned; no convergence signal
+2. **SAC-Discrete + MLP** — diagnostic baseline
+3. **SAC + HierarchicalAttentionHead** — attention architecture experiments
+4. **FQF + Transformer encoder-decoder** — current approach; discrete 10×10 (Stage 1) and 6×6 (Stage 2) grids
+5. **pre-LN layers** — switched from post-LN for training stability
+6. **Cross-attention decoder (5 layers)** — added to compress 1600 memory tokens into 36 action-specific embeddings
+7. **Removed query positional encoding** — simplified; position info already in memory tokens
+8. **Gamma moved to `reward_settings.py`** — single source of truth for all agents
+9. **Removed Minesweeper bind with torch** — `MinesweeperLogic` no longer imports torch directly

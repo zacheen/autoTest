@@ -2,12 +2,12 @@
 
 ## Purpose
 
-A visual RL agent that learns to play turn-based, mouse-driven games by observing screen captures and outputting click coordinates. The system is designed to be **game-agnostic** — the same pipeline handles any game that can be played through mouse clicks. Currently targeting Minesweeper.
+A visual RL agent that learns to play turn-based, mouse-driven games by observing screen captures and outputting discrete grid-cell click actions. Currently targeting Minesweeper. The architecture is designed to be **game-agnostic** — any game reducible to a fixed-size discrete cell grid can reuse the same pipeline.
 
 ## High-Level Pipeline
 
 ```
-Screen Capture → Feature Extraction → RL Policy → (x, y) Coordinates → Mouse Click → Reward Signal
+Screen Capture → YOLO Feature Extraction → Encoder → Decoder → FQF Q-Network → Grid Cell → Click
 ```
 
 ### Component Breakdown
@@ -23,34 +23,36 @@ Screen Capture → Feature Extraction → RL Policy → (x, y) Coordinates → M
                  │ Screen Capture (pyautogui) or Logic API
                  ▼
 ┌─────────────────────────────────────────────────────────┐
-│                 Perception Layer                         │
-│  Stage 1: GridEncoder (ConvTranspose2d, 10→80)          │
-│  Stage 2: YOLO11n backbone (mid+last layer fusion)      │
-│  Output: (B, 128, 80, 80) feature maps                 │
+│                 Perception Layer (frozen)                │
+│  YOLO11n backbone → (B, 128, 40, 40)                   │
+│  token_adapter (LayerNorm + Linear) → (B, 1600, 128)   │
+│  + fixed 2D sinusoidal positional encoding              │
+│  HierarchicalEncoder [128→64→32] → (B, 1600, 32)       │
 └────────────────┬────────────────────────────────────────┘
-                 │ Feature Maps
+                 │ Memory tokens (B, 1600, 32)
                  ▼
 ┌─────────────────────────────────────────────────────────┐
-│           Spatial Reasoning (HierarchicalAttention)      │
-│  3× Local Attention (8×8 window) — neighbor reasoning   │
-│  1× Global Self-Attention (Flash Attn) — board strategy │
-│  Conv Downsample → FC → 256-dim embedding               │
+│           Spatial Reasoning (TransformerDecoder)         │
+│  5× pre-LN cross-attention layers                       │
+│  36 learned query tokens (one per 6×6 grid cell)        │
+│  Query tokens attend to 1600 memory tokens              │
+│  Output: per-cell embeddings (B, 36, 32)                │
 └────────────────┬────────────────────────────────────────┘
-                 │ Embedding Vector (256-d)
+                 │ Per-cell embeddings
                  ▼
 ┌─────────────────────────────────────────────────────────┐
-│                 Decision Engine (SAC Agent)               │
-│  Actor: embedding → Gaussian(mean, std) → action        │
-│  Critic: (embedding, action) → Q-value (twin)           │
-│  Replay Buffer (per-class balanced / disk-backed)        │
-│  Auto-alpha with clamp for entropy tuning               │
+│             Decision Engine (FQF Q-Network)              │
+│  FQFQNetwork: quantile fraction proposal + cosine embed  │
+│  Per-action distributional Q-values (B, 36)             │
+│  Action masking: only unrevealed cells eligible          │
+│  argmax over masked Q-values → cell index               │
 └────────────────┬────────────────────────────────────────┘
-                 │ Action (x, y)
+                 │ Action (grid cell index, 0–35)
                  ▼
 ┌─────────────────────────────────────────────────────────┐
 │                 Action Execution                         │
-│  Stage 1: ScaledSigmoid → grid coords via logic API     │
-│  Stage 2: Tanh → pixel coords → pyautogui mouse click   │
+│  Stage 1: cell index → MinesweeperLogic.click(row, col) │
+│  Stage 2: cell index → pixel coords → pyautogui click   │
 └────────────────┬────────────────────────────────────────┘
                  │ Game state changes
                  ▼
@@ -58,21 +60,35 @@ Screen Capture → Feature Extraction → RL Policy → (x, y) Coordinates → M
 │                 Reward Evaluation                        │
 │  Stage 1: MinesweeperLogic.ClickResult → reward         │
 │  Stage 2: Screenshot comparison + win/lose detection    │
+│  Config: MINESWEEPER_REWARD_CONFIG in reward_settings.py│
 └─────────────────────────────────────────────────────────┘
 ```
 
 ## Two-Stage Training Architecture
 
-| Stage | Input | Perception | Environment | Purpose |
-|-------|-------|-----------|-------------|---------|
-| Stage 1 | Grid state (12, 10, 10) | GridEncoder | MinesweeperLogic API | Validate SAC learns Minesweeper; pre-train attention + SAC heads |
-| Stage 2 | Screenshot (3, 640, 640) | YOLO11n | GUI + pyautogui | Visual policy with transfer weights from Stage 1 |
+| Stage | Input | Perception | Environment | Action Space | Purpose |
+|-------|-------|-----------|-------------|-------------|---------|
+| Stage 1 | Grid state (12, 10, 10) | Learned TokenEmbed + EncoderDecoderTransformer | MinesweeperLogic API | Discrete 10×10 = 100 | Validate FQF learns Minesweeper; fast headless iteration |
+| Stage 2 | Screenshot (3, 640, 640) | YOLO11n (frozen) + HierarchicalEncoder | GUI + pyautogui | Discrete 6×6 = 36 | Visual policy; encoder frozen, only decoder + FQF head trained |
 
-Weight transfer: HierarchicalAttentionHead + SAC heads transfer from Stage 1 → Stage 2. GridEncoder is discarded (replaced by YOLO11n).
+**Note**: Both stages use **discrete** action spaces and **FQF distributional Q-learning**. The earlier SAC + continuous (x, y) approach was abandoned due to lack of convergence signal.
 
-## Additional Experiment: Simple MLP
+### Stage 2 Frozen vs. Trainable
 
-A diagnostic agent (`SimpleDiscreteAgent`) uses a flat MLP with 100 discrete actions to validate the RL pipeline independent of the attention architecture. If MLP learns but attention doesn't, the problem is in the network architecture.
+The YOLO backbone, token adapter, and HierarchicalEncoder are loaded from the `YOLOGridStatePredictor` supervised pre-training checkpoint and kept frozen (BN in eval mode). Only the TransformerDecoder + query tokens + FQFQNetwork head are trained online via RL.
+
+## Key Design Decisions
+
+- **Discrete action space**: Agent selects from a fixed grid of cells (6×6 = 36 for Stage 2), not raw (x, y) coordinates. Enables action masking and clear reward attribution.
+- **Action masking**: Only unrevealed cells are eligible — prevents the agent from repeatedly clicking already-known cells. Uses `-1e8` (not `-inf`) to avoid `0 × -inf = NaN` in loss.
+- **Distributional RL (FQF)**: Quantile regression instead of scalar Q-values. Better handles the bimodal reward distribution (most clicks are +0.5 or -0.25; rare mines are -0.7, rare wins are +1.0).
+- **Frozen encoder**: YOLO + HierarchicalEncoder pre-trained via supervised grid-state prediction. Freezing them lets RL focus entirely on decoder + decision head, dramatically reducing sample complexity.
+- **Cross-attention decoder**: 1600 memory tokens compressed into 36 action-specific embeddings via cross-attention. Each query token specializes in one grid cell.
+- **Pre-LN transformer layers**: `norm_first=True` throughout for training stability.
+- **Fixed sinusoidal positional encoding**: Used in the encoder (YOLO feature tokens) for position information. Query tokens carry no positional encoding — position is implicit from the cell index.
+- **Game logic separation**: `MinesweeperLogic` enables headless training without GUI for Stage 1. No torch dependency in game logic.
+- **On-screen interaction**: Stage 2 uses `pyautogui` for real mouse clicks on a visible game window.
+- **Centralized reward config**: `model_structure/reward_settings.py` (`MINESWEEPER_REWARD_CONFIG`) is the single source of truth for all reward values and gamma.
 
 ## Test Harness
 
@@ -86,12 +102,3 @@ The system uses Python's `unittest` framework as an orchestration layer. Each ga
 6. `test_new_game` — Reset for next round
 
 Results are logged as HTML test reports via `HTMLTestRun`.
-
-## Key Design Decisions
-
-- **Continuous action space** (Stage 2): Agent outputs raw (x, y) coordinates, not discrete cell IDs. This makes the system game-agnostic.
-- **Discrete action space** (Simple MLP): 100 actions mapped to 10×10 grid cells with action masking. Used for pipeline validation only.
-- **On-screen interaction**: Uses `pyautogui` for real mouse clicks on a visible game window, not API-level game control.
-- **Screenshot-based state** (Stage 2): The agent sees exactly what a human would see — raw pixels.
-- **Game logic separation**: `MinesweeperLogic` enables headless training without GUI for Stage 1.
-- **Hierarchical attention**: Local attention (8×8 window) for Minesweeper neighbor reasoning + global attention for board-level strategy. Replaces earlier SpatialAttentionHead (weighted pooling) which destroyed spatial information.
