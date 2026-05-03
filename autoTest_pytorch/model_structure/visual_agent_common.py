@@ -388,6 +388,14 @@ class VisualAgentCommonMixin:
             ]
             if log_info.get("selected_q") is not None:
                 lines.append(f"Q: {log_info['selected_q']:.4f}")
+            top_actions = log_info.get("top_actions") or []
+            if top_actions:
+                lines.append("Top5 Q:")
+                for rank, item in enumerate(top_actions[:5], start=1):
+                    action_id, top_row, top_col, top_q = item
+                    lines.append(
+                        f"{rank}: {int(action_id)} ({int(top_row)},{int(top_col)}) {float(top_q):.4f}"
+                    )
             if reward is not None:
                 lines.append(f"Reward: {reward:.1f}")
 

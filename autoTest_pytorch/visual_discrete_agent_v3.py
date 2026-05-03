@@ -437,7 +437,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
                 "blocked_actions": sorted(blocked),
             }
 
-        self._set_runtime_modes()
+        self.backbone.eval()
+        self.backbone.set_bn_eval()
+        self.q_network.eval()
+        self.q_target.eval()
         _dbg(f"[select_action] ENTER total_it={self.total_it} blocked_size={len(blocked)} available_size={len(available)}")
         _dbg_mem("select_action ENTER")
         _dbg_tensor("select_action.state(input)", state)
