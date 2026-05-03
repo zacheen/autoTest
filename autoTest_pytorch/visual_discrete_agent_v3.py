@@ -59,13 +59,13 @@ if not _dbg_logger.handlers:
     _dbg_logger.addHandler(_fh)
 
 def _dbg(msg: str) -> None:
-    """sync GPU then log — error surfaces at the exact op that caused it."""
-    if device.type == "cuda":
-        torch.cuda.synchronize()
+    """log+flush first, then sync — last entry on disk = op about to be sync'd."""
     _dbg_logger.debug(msg)
     for _h in _dbg_logger.handlers:
         try: _h.flush()
         except Exception: pass
+    if device.type == "cuda":
+        torch.cuda.synchronize()
 
 def _dbg_mem(tag: str) -> None:
     """log GPU memory usage."""
@@ -84,12 +84,18 @@ def _dbg_tensor(name: str, t, *, expect_max=None, expect_min=None, check_finite:
 
     expect_max/expect_min: hard bounds; logs FATAL if violated (likely bad index).
     """
+    # write an enter marker first (and flush) so we can see exactly which tensor
+    # was about to be checked when sync raised.
+    _dbg_logger.debug(f"[TENSOR {name}] entering")
+    for _h in _dbg_logger.handlers:
+        try: _h.flush()
+        except Exception: pass
     try:
         if t is None:
             _dbg_logger.debug(f"[TENSOR {name}] is None"); return
         if not torch.is_tensor(t):
             _dbg_logger.debug(f"[TENSOR {name}] type={type(t).__name__}"); return
-        # sync first so any pending error surfaces here, not later
+        # sync so any pending error surfaces here, not later
         if t.is_cuda:
             torch.cuda.synchronize()
         info = f"shape={tuple(t.shape)} dtype={t.dtype} dev={t.device}"
@@ -117,6 +123,9 @@ def _dbg_tensor(name: str, t, *, expect_max=None, expect_min=None, check_finite:
             except Exception: pass
     except Exception as e:
         _dbg_logger.debug(f"[TENSOR {name}] CHECK FAILED: {e!r}")
+        for _h in _dbg_logger.handlers:
+            try: _h.flush()
+            except Exception: pass
 
 # ── paths ────────────────────────────────────────────────────────────
 YOLO_PREDICTOR_PATH = Path("./models/yolo_grid_predictor/best.pth")
