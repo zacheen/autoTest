@@ -141,8 +141,8 @@ IMAGE_SIZE = (640, 640)
 GRID_H = 6
 GRID_W = 6
 NUM_ACTIONS = GRID_H * GRID_W
-VISUAL_BATCH_SIZE   = 32
-MINIMUM_DATA_SIZE = 500 # below this amount, won't start training
+VISUAL_BATCH_SIZE = 32
+MINIMUM_DATA_SIZE = 1000 # below this amount, won't start training
 
 # ── Encoder dims（與 YOLOGridStatePredictor 共用 DEFAULT_ENCODER_DIMS = [128,64,32]）──
 ENCODER_DIMS = DEFAULT_ENCODER_DIMS
@@ -159,7 +159,7 @@ VISUAL_N_STEP = 1
 VISUAL_GRAD_CLIP_NORM = 5.0   # 1600-token encoder, allow larger grad room early
 TRAIN_EVERY_N_STEPS = 1
 TARGET_UPDATE_FREQ = 1000
-SAVE_EVERY_N_EPISODES = 50
+SAVE_EVERY_N_EPISODES = 100
 VISUAL_HISTOGRAM_EVERY = 20
 WEIGHT_DISTANCE_LOG_EVERY = 100
 USE_AMP = False
@@ -169,12 +169,13 @@ LR_VISUAL_BACKBONE = 5e-5   # adapter + encoder + decoder + queries (random init
 LR_VISUAL_HEAD     = 5e-5
 # Linear LR warmup over the first N optimizer steps (transformer 早期穩定)
 # 從 base_lr * LR_WARMUP_START_FACTOR 線性增加到 base_lr
-LR_WARMUP_STEPS         = 2000
+LR_WARMUP_STEPS         = 2000   # 第一次從頭訓練的 warmup 長度
 LR_WARMUP_START_FACTOR  = 0.0
+LR_RESUME_WARMUP_STEPS  = 2000   # 每次重啟（包含第一次）的額外 warmup 長度
 
 # ── replay buffer ────────────────────────────────────────────────────
 VISUAL_BUFFER_CAPACITY = 2048
-VISUAL_SAVE_CAPACITY   = 256
+VISUAL_SAVE_CAPACITY   = 512
 VISUAL_BUFFER_OVERFLOW = 256
 VISUAL_PER_ALPHA       = 0.6
 VISUAL_PER_UNIFORM_MIX = 0.2
@@ -327,6 +328,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
         # ── episode / step bookkeeping ──
         self.total_it = 0
+        self.steps_since_resume = 0  # 每次啟動重置；用於 resume LR warmup（不存檔）
         self.episode_count = 0
         self.train_every_n_steps = TRAIN_EVERY_N_STEPS
         self.pending_train_steps = 0
@@ -368,9 +370,11 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self._rolling_weight_reference = self._capture_trainable_weight_snapshot()
         self._rolling_weight_reference_step = self.total_it
         self._set_runtime_modes()
-        atexit.register(self.save_persistent)
-        atexit.register(self._close_tb_writer)
+        # 註冊順序 = LIFO：close 最先註冊 → 最後執行；存檔最後註冊 → 最先執行
         atexit.register(self._close_io_log)
+        atexit.register(self._close_tb_writer)
+        atexit.register(self.save_persistent)
+        atexit.register(self._save_model)
 
     # ──────────────────────────── runtime modes ──────────────────────────
 
@@ -554,6 +558,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
             return None
 
         self.total_it += 1
+        self.steps_since_resume += 1
         self._apply_lr_warmup()
         _dbg(f"[train_step] ENTER total_it={self.total_it} buf_size={buf_size}")
         _dbg_mem("train_step ENTER")
@@ -1027,13 +1032,21 @@ class VisualAgentV3(VisualAgentCommonMixin):
     # ──────────────────────────── lr warmup ────────────────────────────
 
     def _apply_lr_warmup(self) -> None:
-        """Linear LR warmup: scale every param group's lr from
-        (LR_WARMUP_START_FACTOR × base_lr) up to base_lr over LR_WARMUP_STEPS
-        optimizer steps. After warmup, lr stays at base_lr."""
-        if LR_WARMUP_STEPS <= 0:
-            return
-        progress = min(1.0, self.total_it / LR_WARMUP_STEPS)
-        factor = LR_WARMUP_START_FACTOR + (1.0 - LR_WARMUP_START_FACTOR) * progress
+        """Linear LR warmup，兩個 warmup 取較嚴格者：
+        - init warmup：以 total_it 為進度，第一次從頭訓練時生效
+        - resume warmup：以 steps_since_resume 為進度，每次啟動（含重啟）都會生效
+        最終 factor = min(init_factor, resume_factor)，所以重啟後雖然 total_it 已大，
+        resume warmup 仍會把 LR 從 LR_WARMUP_START_FACTOR×base_lr 線性拉回 base_lr。"""
+
+        def _factor_from(step: int, total: int) -> float:
+            if total <= 0:
+                return 1.0
+            progress = min(1.0, step / total)
+            return LR_WARMUP_START_FACTOR + (1.0 - LR_WARMUP_START_FACTOR) * progress
+
+        init_factor   = _factor_from(self.total_it,           LR_WARMUP_STEPS)
+        resume_factor = _factor_from(self.steps_since_resume, LR_RESUME_WARMUP_STEPS)
+        factor = min(init_factor, resume_factor)
         for group, base_lr in zip(self.optimizer.param_groups, self._base_lrs):
             group["lr"] = base_lr * factor
 
