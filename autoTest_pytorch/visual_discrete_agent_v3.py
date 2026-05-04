@@ -381,6 +381,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
     def _set_runtime_modes(self) -> None:
         self.backbone.train()          # decoder + queries → train mode
         self.backbone.set_bn_eval()    # YOLO BN layers 保持 eval（凍結 running stats）
+        self.backbone.feature_extractor.eval()
+        self.backbone.token_adapter.eval()
+        self.backbone.encoder.eval()
+        self.backbone.decoder.train()
         self.q_network.train()
         self.q_target.eval()
 
