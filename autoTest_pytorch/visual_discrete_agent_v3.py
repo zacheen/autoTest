@@ -141,7 +141,7 @@ IMAGE_SIZE = (640, 640)
 GRID_H = 6
 GRID_W = 6
 NUM_ACTIONS = GRID_H * GRID_W
-VISUAL_BATCH_SIZE = 32
+VISUAL_BATCH_SIZE = 48
 MINIMUM_DATA_SIZE = 1000 # below this amount, won't start training
 
 # ── Encoder dims（與 YOLOGridStatePredictor 共用 DEFAULT_ENCODER_DIMS = [128,64,32]）──
