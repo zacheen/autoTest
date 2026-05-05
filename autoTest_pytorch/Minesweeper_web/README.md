@@ -21,7 +21,7 @@ http://127.0.0.1:8000
 If you prefer calling miniconda Python directly:
 
 ```bash
-C:\Users\User\miniconda3\python.exe autoTest_pytorch/Minesweeper_web/server.py
+C:\Users\User\miniconda3\python.exe autoTest_pytorch\Minesweeper_web\server.py
 ```
 
 ## API
