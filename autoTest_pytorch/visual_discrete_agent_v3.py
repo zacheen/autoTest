@@ -46,6 +46,8 @@ from model_structure.visual_agent_common import VisualAgentCommonMixin
 from model_structure.yolo_encoder_base import YOLOEncoderBase, DEFAULT_ENCODER_DIMS
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+CHECKPOINT_RED = "\033[91;1m"
+CHECKPOINT_RESET = "\033[0m"
 
 if device.type == "cuda":
     # PyTorch 2.1 may route Transformer attention through fast SDP kernels.
@@ -954,34 +956,85 @@ class VisualAgentV3(VisualAgentCommonMixin):
         )
         print(f"[V3] Persistent save: {len(persistent_index)} entries")
 
+    def _log_checkpoint_message(self, message: str, *, warning: bool = False) -> None:
+        prefix = "[V3 CHECKPOINT]"
+        line = f"{prefix} {message}"
+        if warning:
+            print(f"{CHECKPOINT_RED}{line}{CHECKPOINT_RESET}")
+        else:
+            print(line)
+        try:
+            self._io_log.write(f"{datetime.datetime.now().isoformat()} {line}\n")
+            self._io_log.flush()
+        except Exception:
+            pass
+
     def try_load_model(self) -> None:
         bb_path = VISUAL_V3_MODEL_PATH / "backbone.pth"
         if bb_path.exists():
             try:
                 self.backbone.load_state_dict(torch.load(bb_path, map_location=device))
-                print("[V3] Loaded backbone from previous run")
+                self._log_checkpoint_message(f"Loaded backbone: {bb_path}")
             except Exception as exc:
-                print(f"[V3] Failed to load backbone: {exc}")
+                self._log_checkpoint_message(
+                    f"MISSING/FAILED backbone checkpoint: {bb_path} | using initialized backbone | error={exc}",
+                    warning=True,
+                )
+        else:
+            self._log_checkpoint_message(
+                f"MISSING backbone checkpoint: {bb_path} | using initialized backbone",
+                warning=True,
+            )
 
         q_path = VISUAL_V3_MODEL_PATH / "fqf_network.pth"
         if q_path.exists():
             try:
                 self.q_network.load_state_dict(torch.load(q_path, map_location=device))
-                print("[V3] Loaded FQF-Network from previous run")
+                self._log_checkpoint_message(f"Loaded FQF-Network: {q_path}")
             except Exception as exc:
-                print(f"[V3] Failed to load FQF-Network: {exc}")
+                self._log_checkpoint_message(
+                    f"MISSING/FAILED FQF-Network checkpoint: {q_path} | using initialized q_network | error={exc}",
+                    warning=True,
+                )
+        else:
+            self._log_checkpoint_message(
+                f"MISSING FQF-Network checkpoint: {q_path} | using initialized q_network",
+                warning=True,
+            )
 
         qt_path = VISUAL_V3_MODEL_PATH / "fqf_target.pth"
         if qt_path.exists():
             try:
                 self.q_target.load_state_dict(torch.load(qt_path, map_location=device))
-                print("[V3] Loaded FQF-Target from previous run")
+                self._log_checkpoint_message(f"Loaded FQF-Target: {qt_path}")
             except Exception as exc:
-                print(f"[V3] Failed to load FQF-Target: {exc}")
+                self._log_checkpoint_message(
+                    f"MISSING/FAILED FQF-Target checkpoint: {qt_path} | copying q_network if available | error={exc}",
+                    warning=True,
+                )
         elif q_path.exists():
+            self._log_checkpoint_message(
+                f"MISSING FQF-Target checkpoint: {qt_path} | copying q_network weights",
+                warning=True,
+            )
             self.q_target.load_state_dict(self.q_network.state_dict())
+        else:
+            self._log_checkpoint_message(
+                f"MISSING FQF-Target checkpoint: {qt_path} | using initialized q_target",
+                warning=True,
+            )
 
+        if not self._optimizer_state_path().exists():
+            self._log_checkpoint_message(
+                f"MISSING optimizer checkpoint: {self._optimizer_state_path()} | total_it stays at {self.total_it}",
+                warning=True,
+            )
         self._load_optimizer_state()
+        if not self._training_state_path().exists():
+            self._log_checkpoint_message(
+                f"MISSING replay/training checkpoint: {self._training_state_path()} | replay buffer starts empty",
+                warning=True,
+            )
         self._load_persistent_training_state()
 
     def _load_persistent_buffer(self, persistent_index) -> None:

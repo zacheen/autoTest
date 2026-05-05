@@ -126,7 +126,11 @@ class VisualAgentCommonMixin:
                 except Exception as scaler_exc:
                     print(f"{self.log_prefix} Failed to load GradScaler state: {scaler_exc}")
         except Exception as exc:
-            print(f"{self.log_prefix} Failed to load optimizer state: {exc}")
+            message = f"MISSING/FAILED optimizer checkpoint: {opt_path} | error={exc}"
+            if hasattr(self, "_log_checkpoint_message"):
+                self._log_checkpoint_message(message, warning=True)
+            else:
+                print(f"{self.log_prefix} {message}")
 
     def save_persistent(self) -> None:
         buf = self.replay_buffer
@@ -217,7 +221,11 @@ class VisualAgentCommonMixin:
             if persistent_index:
                 self._load_persistent_buffer(persistent_index)
         except Exception as exc:
-            print(f"{self.log_prefix} Failed to load replay buffer: {exc}")
+            message = f"MISSING/FAILED replay/training checkpoint: {ts_path} | error={exc}"
+            if hasattr(self, "_log_checkpoint_message"):
+                self._log_checkpoint_message(message, warning=True)
+            else:
+                print(f"{self.log_prefix} {message}")
 
     def _load_persistent_buffer(self, persistent_index) -> None:
         self.replay_path.mkdir(parents=True, exist_ok=True)
