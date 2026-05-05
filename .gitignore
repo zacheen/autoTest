@@ -2,6 +2,8 @@
 runs*
 rl_models*
 models*
+.ultralytics/
+Ultralytics/
 
 # data
 datasets*
