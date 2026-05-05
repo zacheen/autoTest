@@ -47,6 +47,20 @@ from model_structure.yolo_encoder_base import YOLOEncoderBase, DEFAULT_ENCODER_D
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+if device.type == "cuda":
+    # PyTorch 2.1 may route Transformer attention through fast SDP kernels.
+    # On some CUDA 11.8 / GPU combinations those kernels can raise
+    # "illegal instruction"; the math backend is slower but more stable.
+    try:
+        if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+            torch.backends.cuda.enable_flash_sdp(False)
+        if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+        if hasattr(torch.backends.cuda, "enable_math_sdp"):
+            torch.backends.cuda.enable_math_sdp(True)
+    except Exception as exc:
+        print(f"[V3] Failed to configure CUDA SDP backends: {exc}")
+
 # ── debug logger (寫到檔案，CMD 刷掉也能看) ──────────────────────────
 import logging as _logging
 _dbg_log_path = Path("./models/visual_transformer_v3_6x6/cuda_debug.log")
@@ -141,7 +155,7 @@ IMAGE_SIZE = (640, 640)
 GRID_H = 6
 GRID_W = 6
 NUM_ACTIONS = GRID_H * GRID_W
-VISUAL_BATCH_SIZE = 48
+VISUAL_BATCH_SIZE = 40
 MINIMUM_DATA_SIZE = 1000 # below this amount, won't start training
 
 # ── Encoder dims（與 YOLOGridStatePredictor 共用 DEFAULT_ENCODER_DIMS = [128,64,32]）──
@@ -296,7 +310,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.optimizer = optim.AdamW([
             {"params": backbone_trainable,          "lr": LR_VISUAL_BACKBONE},
             {"params": self.q_network.parameters(), "lr": LR_VISUAL_HEAD},
-        ])
+        ], foreach=False, fused=False)
         # 紀錄每個 param group 的 base lr，warmup 期間根據 total_it 動態縮放
         self._base_lrs = [group["lr"] for group in self.optimizer.param_groups]
         self.scaler = torch.cuda.amp.GradScaler(enabled=(USE_AMP and device.type == "cuda"))
@@ -620,6 +634,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # ── current branch (gradients flow through decoder + FQF；YOLO+encoder 已凍結）──
         with torch.autocast(device_type=device.type, dtype=torch.float16,
                             enabled=(USE_AMP and device.type == "cuda")):
+            _dbg("[train_step] before current backbone")
             features  = self.backbone.get_features(state)
             _dbg_tensor("train_step.features", features)
             _dbg("[train_step] after current backbone")

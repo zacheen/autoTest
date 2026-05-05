@@ -351,7 +351,15 @@ class CategorizedReplayBuffer:
 
         # ---- DBG: sanity-check stored actions before they get used to index Q tensor ----
         try:
-            _bad_acts = [(i, a) for i, a in enumerate(actions) if not (isinstance(a, (int, np.integer)) and 0 <= int(a) < 36)]
+            _bad_acts = []
+            for i, action_value in enumerate(actions):
+                try:
+                    action_int = int(np.asarray(action_value).reshape(-1)[0])
+                except Exception:
+                    _bad_acts.append((i, action_value))
+                    continue
+                if not (0 <= action_int < 36):
+                    _bad_acts.append((i, action_value))
             if _bad_acts:
                 with open("./models/visual_transformer_v3_6x6/cuda_debug.log", "a", encoding="utf-8") as _lf:
                     _lf.write(f"[REPLAY sample] !!BAD ACTIONS in batch!! {_bad_acts[:10]} (showing up to 10)\n")
