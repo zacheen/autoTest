@@ -183,6 +183,7 @@ USE_AMP = False
 # ── learning rates ───────────────────────────────────────────────────
 LR_VISUAL_BACKBONE = 5e-5   # adapter + encoder + decoder + queries (random init → larger LR)
 LR_VISUAL_HEAD     = 5e-5
+WEIGHT_DECAY_VISUAL_V3 = 1e-4
 # Linear LR warmup over the first N optimizer steps (transformer 早期穩定)
 # 從 base_lr * LR_WARMUP_START_FACTOR 線性增加到 base_lr
 LR_WARMUP_STEPS         = 2000   # 第一次從頭訓練的 warmup 長度
@@ -312,7 +313,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.optimizer = optim.AdamW([
             {"params": backbone_trainable,          "lr": LR_VISUAL_BACKBONE},
             {"params": self.q_network.parameters(), "lr": LR_VISUAL_HEAD},
-        ], foreach=False, fused=False)
+        ], weight_decay=WEIGHT_DECAY_VISUAL_V3, foreach=False, fused=False)
         # 紀錄每個 param group 的 base lr，warmup 期間根據 total_it 動態縮放
         self._base_lrs = [group["lr"] for group in self.optimizer.param_groups]
         self.scaler = torch.cuda.amp.GradScaler(enabled=(USE_AMP and device.type == "cuda"))

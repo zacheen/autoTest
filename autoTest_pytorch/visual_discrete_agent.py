@@ -51,6 +51,7 @@ LR_VISUAL_YOLO = 2e-5
 LR_VISUAL_ADAPTER = 3e-5
 LR_VISUAL_DECODER = 2e-5
 LR_VISUAL_HEAD = 1.5e-5
+WEIGHT_DECAY_VISUAL = 1e-4
 VISUAL_BUFFER_CAPACITY = 2048
 VISUAL_SAVE_CAPACITY = 256
 VISUAL_BUFFER_OVERFLOW = 256
@@ -232,7 +233,7 @@ class VisualDiscreteAgent:
             {"params": self.backbone.adapter_parameters(), "lr": LR_VISUAL_ADAPTER},
             {"params": self.backbone.core.decoder.parameters(), "lr": LR_VISUAL_DECODER},
             {"params": self.q_network.parameters(), "lr": LR_VISUAL_HEAD},
-        ])
+        ], weight_decay=WEIGHT_DECAY_VISUAL)
         self.scaler = torch.cuda.amp.GradScaler(enabled=(USE_AMP and device.type == "cuda"))
 
         from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer

@@ -90,6 +90,7 @@ YOLO_UPDATE_ENABLED = False
 LR_VISUAL_YOLO     = 2e-5
 LR_VISUAL_BACKBONE = 3e-5
 LR_VISUAL_HEAD     = 1.5e-5
+WEIGHT_DECAY_VISUAL_V2 = 1e-4
 
 # ── replay buffer ────────────────────────────────────────────────────
 VISUAL_BUFFER_CAPACITY = 2048
@@ -155,7 +156,8 @@ class VisualAgentV2(VisualAgentCommonMixin):
                 {"params": self.yolo_predictor.parameters(), "lr": LR_VISUAL_YOLO},
                 {"params": self.backbone.parameters(),       "lr": LR_VISUAL_BACKBONE},
                 {"params": self.q_network.parameters(),      "lr": LR_VISUAL_HEAD},
-            ]
+            ],
+            weight_decay=WEIGHT_DECAY_VISUAL_V2,
         )
         # Keep stage1.optimizer in sync so anything still pointing at it works
         self.stage1.optimizer = self.optimizer

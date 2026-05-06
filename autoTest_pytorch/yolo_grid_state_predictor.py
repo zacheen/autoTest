@@ -650,6 +650,7 @@ class YOLOGridStateTrainer:
     ORIGINAL_BATCH_PROB = 0.20
     LR_YOLO       = 1e-5   # YOLO backbone LR
     LR_OTHER      = 5e-4   # adapter / encoder / learned queries / cross-attn / head
+    WEIGHT_DECAY  = 1e-4
     TOTAL_EPOCHS  = 50
     VAL_RATIO     = 0.15
     SEED          = 42
@@ -776,7 +777,7 @@ class YOLOGridStateTrainer:
             {"params": self.model.yolo_parameters(),     "lr": self.LR_YOLO},
             {"params": self.model.non_yolo_parameters(), "lr": self.LR_OTHER},
         ]
-        self.optimizer = optim.AdamW(param_groups, weight_decay=1e-4)
+        self.optimizer = optim.AdamW(param_groups, weight_decay=self.WEIGHT_DECAY)
 
     @staticmethod
     def _next_batch(loader, iterator):
