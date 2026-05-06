@@ -707,10 +707,23 @@ class VisualAgentV3(VisualAgentCommonMixin):
             + list(self.q_network.parameters())
         )
         grad_norm_total = torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=VISUAL_GRAD_CLIP_NORM)
-        _dbg(f"[train_step] after clip grad_norm_total={float(grad_norm_total):.4g}")
+        grad_norm_total_value = float(grad_norm_total)
+        grad_clip_threshold = float(VISUAL_GRAD_CLIP_NORM)
+        grad_clip_scale = min(1.0, grad_clip_threshold / (grad_norm_total_value + 1e-12))
+        grad_clip_percent = 1.0 - grad_clip_scale
+        grad_clip_excess_norm = max(0.0, grad_norm_total_value - grad_clip_threshold)
+        grad_clip_excess_ratio = grad_clip_excess_norm / (grad_clip_threshold + 1e-12)
+        grad_is_clipped = float(grad_norm_total_value > grad_clip_threshold)
+        _dbg(
+            "[train_step] after clip "
+            f"grad_norm_total={grad_norm_total_value:.4g} "
+            f"clip_scale={grad_clip_scale:.4g} "
+            f"clip_percent={grad_clip_percent:.2%}"
+        )
 
         backbone_post = self._module_grad_norm(self.backbone)
         head_post     = self._module_grad_norm(self.q_network)
+        grad_post_total = (backbone_post ** 2 + head_post ** 2) ** 0.5
 
         _dbg("[train_step] before optimizer.step")
         self.scaler.step(self.optimizer)
@@ -768,7 +781,9 @@ class VisualAgentV3(VisualAgentCommonMixin):
             f"  Q_loss={loss.item():.6f} | q_mean={q_mean:.6f} | epsilon={self.epsilon:.4f}\n"
             f"  td_error_mean={td_error.mean().item():.6f} | frac_clipped={frac_clipped:.3f}\n"
             f"  fpn_norm_entropy={fpn_norm_entropy:.4f} | fpn_tau_std={fpn_tau_std:.4f}\n"
-            f"  grad_total={float(grad_norm_total):.6f} | "
+            f"  grad_total_pre={grad_norm_total_value:.6f} | grad_total_post={grad_post_total:.6f} | "
+            f"clip_scale={grad_clip_scale:.6f} clip_percent={grad_clip_percent:.2%}\n"
+            f"  grad_clip_threshold={grad_clip_threshold:.6f} | "
             f"backbone_pre={backbone_pre:.6f} head_pre={head_pre:.6f}\n"
             f"{weight_delta_line}"
             f"---\n"
@@ -785,7 +800,14 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.tb_writer.add_scalar("train/td_error_mean",     td_error.mean().item(),       self.total_it)
         self.tb_writer.add_scalar("train/td_error_max",      td_error.max().item(),        self.total_it)
         self.tb_writer.add_scalar("train/target_q_mean",     target_quantiles.float().mean().item(), self.total_it)
-        self.tb_writer.add_scalar("grad/total_norm",         float(grad_norm_total),       self.total_it)
+        self.tb_writer.add_scalar("grad/total_norm",         grad_norm_total_value,        self.total_it)
+        self.tb_writer.add_scalar("grad/post_total_norm",    grad_post_total,             self.total_it)
+        self.tb_writer.add_scalar("grad/clip_threshold",     grad_clip_threshold,         self.total_it)
+        self.tb_writer.add_scalar("grad/clip_scale",         grad_clip_scale,             self.total_it)
+        self.tb_writer.add_scalar("grad/clip_percent",       grad_clip_percent,           self.total_it)
+        self.tb_writer.add_scalar("grad/clip_excess_norm",   grad_clip_excess_norm,       self.total_it)
+        self.tb_writer.add_scalar("grad/clip_excess_ratio",  grad_clip_excess_ratio,      self.total_it)
+        self.tb_writer.add_scalar("grad/is_clipped",         grad_is_clipped,             self.total_it)
         self.tb_writer.add_scalar("grad_pre/backbone",       backbone_pre,                 self.total_it)
         self.tb_writer.add_scalar("grad_pre/head",           head_pre,                     self.total_it)
         self.tb_writer.add_scalar("grad_post/backbone",      backbone_post,                self.total_it)
