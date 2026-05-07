@@ -713,7 +713,6 @@ class VisualAgentV3(VisualAgentCommonMixin):
         grad_clip_percent = 1.0 - grad_clip_scale
         grad_clip_excess_norm = max(0.0, grad_norm_total_value - grad_clip_threshold)
         grad_clip_excess_ratio = grad_clip_excess_norm / (grad_clip_threshold + 1e-12)
-        grad_is_clipped = float(grad_norm_total_value > grad_clip_threshold)
         _dbg(
             "[train_step] after clip "
             f"grad_norm_total={grad_norm_total_value:.4g} "
@@ -803,11 +802,9 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.tb_writer.add_scalar("grad/total_norm",         grad_norm_total_value,        self.total_it)
         self.tb_writer.add_scalar("grad/post_total_norm",    grad_post_total,             self.total_it)
         self.tb_writer.add_scalar("grad/clip_threshold",     grad_clip_threshold,         self.total_it)
-        self.tb_writer.add_scalar("grad/clip_scale",         grad_clip_scale,             self.total_it)
         self.tb_writer.add_scalar("grad/clip_percent",       grad_clip_percent,           self.total_it)
         self.tb_writer.add_scalar("grad/clip_excess_norm",   grad_clip_excess_norm,       self.total_it)
         self.tb_writer.add_scalar("grad/clip_excess_ratio",  grad_clip_excess_ratio,      self.total_it)
-        self.tb_writer.add_scalar("grad/is_clipped",         grad_is_clipped,             self.total_it)
         self.tb_writer.add_scalar("grad_pre/backbone",       backbone_pre,                 self.total_it)
         self.tb_writer.add_scalar("grad_pre/head",           head_pre,                     self.total_it)
         self.tb_writer.add_scalar("grad_post/backbone",      backbone_post,                self.total_it)
