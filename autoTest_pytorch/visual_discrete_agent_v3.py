@@ -183,7 +183,7 @@ USE_AMP = False
 # ── learning rates ───────────────────────────────────────────────────
 LR_VISUAL_BACKBONE = 5e-5   # adapter + encoder + decoder + queries (random init → larger LR)
 LR_VISUAL_HEAD     = 5e-5
-WEIGHT_DECAY_VISUAL_V3 = 1e-4
+WEIGHT_DECAY_VISUAL_V3 = 1e-3
 # Linear LR warmup over the first N optimizer steps (transformer 早期穩定)
 # 從 base_lr * LR_WARMUP_START_FACTOR 線性增加到 base_lr
 LR_WARMUP_STEPS         = 2000   # 第一次從頭訓練的 warmup 長度
