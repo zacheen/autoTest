@@ -7,6 +7,9 @@ import torch
 
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 
+# True 時印 [DBG sample] log（含 cuda.synchronize，會拖慢訓練）；除錯 CUDA error 才開
+DEBUG_CUDA_SAMPLE = False
+
 class CategorizedReplayBuffer:
     """A generic Categorized Replay Buffer.
     
@@ -375,7 +378,7 @@ class CategorizedReplayBuffer:
         # weights formulation: (1/N * 1/P_i) ^ beta
         weights = (N * probabilities + 1e-10) ** (-use_beta)
         weights = weights / weights.max()
-        _dbg_cuda = (device.type == "cuda") if hasattr(device, "type") else (str(device).startswith("cuda"))
+        _dbg_cuda = DEBUG_CUDA_SAMPLE and ((device.type == "cuda") if hasattr(device, "type") else (str(device).startswith("cuda")))
         if _dbg_cuda: import torch as _t; _t.cuda.synchronize(); print("[DBG sample] before weights.to(device)")
         weights = torch.tensor(weights, dtype=torch.float32).unsqueeze(1).to(device)
         if _dbg_cuda: _t.cuda.synchronize(); print("[DBG sample] after weights.to(device)")

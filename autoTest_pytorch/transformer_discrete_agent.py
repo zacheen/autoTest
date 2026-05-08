@@ -8,23 +8,22 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 
 from model_structure.transformer_shared import EncoderDecoderTransformer, FQFQNetwork, FixedSinusoidalPositionEmbedding
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
+from model_structure.optimizer_factory import build_fqf_optimizer
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = 128
+BATCH_SIZE = 40
 GRID_STATE_CHANNELS = 12
-LR_DDQN = 5e-5
-PER_CAPACITY = 10000
+PER_CAPACITY = 2048
 PER_ALPHA = 0.6
 PER_BETA_START = 0.4
 PER_BETA_END = 1.0
-SAVE_CAPACITY = 2000
-SAVE_EVERY_N_EPISODES = 50
-TARGET_UPDATE_FREQ = 50
+SAVE_CAPACITY = 512
+SAVE_EVERY_N_EPISODES = 200
+TARGET_UPDATE_FREQ = 1000
 N_STEP = 1
 NUM_FQF_FRACTIONS = 8
 FQF_ENTROPY_COEF = 1e-3
@@ -142,12 +141,7 @@ class TransformerDiscreteAgent:
 
         from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 
-        self.optimizer = optim.Adam(
-            list(self.backbone.parameters()) + list(self.q_network.parameters()),
-            lr=LR_DDQN,
-            foreach=False,
-            fused=False,
-        )
+        self.optimizer = build_fqf_optimizer(self.backbone, self.q_network)
 
         self.replay_buffer = CategorizedReplayBuffer(
             max_size=PER_CAPACITY,
