@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from model_structure.transformer_shared import EncoderDecoderTransformer, FQFQNetwork, TwoDimensionalPositionEmbedding
+from model_structure.transformer_shared import EncoderDecoderTransformer, FQFQNetwork, FixedSinusoidalPositionEmbedding
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 
 
@@ -57,7 +57,7 @@ class TransformerActorNetwork(nn.Module):
         self.num_tokens = grid_h * grid_w
 
         self.token_embed = nn.Linear(grid_channels, d_model)
-        self.position = TwoDimensionalPositionEmbedding(grid_h, grid_w, d_model)
+        self.position = FixedSinusoidalPositionEmbedding(d_model=d_model)
         self.query_tokens = nn.Parameter(torch.randn(1, self.num_tokens, d_model) * 0.02)
         self.core = EncoderDecoderTransformer(
             d_model=d_model,
@@ -71,10 +71,10 @@ class TransformerActorNetwork(nn.Module):
     def _embed(self, state):
         tokens = state.permute(0, 2, 3, 1).reshape(state.size(0), self.num_tokens, -1)
         x = self.token_embed(tokens)
-        return x + self.position().unsqueeze(0)
+        return x + self.position(self.grid_h, self.grid_w).unsqueeze(0)
 
     def _build_queries(self, batch_size):
-        return self.query_tokens.expand(batch_size, -1, -1) + self.position().unsqueeze(0)
+        return self.query_tokens.expand(batch_size, -1, -1)
 
     def get_memory(self, state):
         return self.core.encode(self._embed(state))
@@ -93,18 +93,12 @@ class TransformerActorNetwork(nn.Module):
     def load_backbone_state(self, state_dict, strict=False):
         normalized = {}
         for key, value in state_dict.items():
-            if key.startswith("core.") or key.startswith("position.") or key.startswith("token_embed.") or key.startswith("output_head.") or key == "query_tokens":
+            if key.startswith("core.") or key.startswith("token_embed.") or key.startswith("output_head.") or key == "query_tokens":
                 normalized[key] = value
             elif key.startswith("transformer."):
                 normalized[f"core.transformer.{key[len('transformer.') :]}"] = value
             elif key.startswith("decoder."):
                 normalized[f"core.decoder.{key[len('decoder.') :]}"] = value
-            elif key.startswith("row_embed."):
-                normalized[f"position.{key}"] = value
-            elif key.startswith("col_embed."):
-                normalized[f"position.{key}"] = value
-            elif key in {"row_indices", "col_indices"}:
-                normalized[f"position.{key}"] = value
 
         return self.load_state_dict(normalized, strict=strict)
 
