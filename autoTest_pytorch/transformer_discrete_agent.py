@@ -1,5 +1,6 @@
 import atexit
 import datetime
+import logging as _logging
 import random
 from collections import defaultdict, deque
 from pathlib import Path
@@ -12,6 +13,7 @@ import torch.nn.functional as F
 from model_structure.transformer_shared import EncoderDecoderTransformer, FQFQNetwork, FixedSinusoidalPositionEmbedding
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from model_structure.optimizer_factory import build_fqf_optimizer
+import model_structure.CategorizedReplayBuffer as _crb_module
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -34,6 +36,143 @@ TRANSFORMER_NHEAD = 4
 TRANSFORMER_NUM_LAYERS = 4
 TRANSFORMER_FF_DIM = 128
 TRANSFORMER_DROPOUT = 0.1
+
+# ── CUDA SDP backend (v3 經驗) ──────────────────────────────────────────
+# PyTorch 2.x 在某些 CUDA / GPU 組合上，nn.TransformerEncoderLayer 走 flash 或
+# mem-efficient SDP kernel 會丟 "illegal instruction"。math backend 慢但穩。
+if device.type == "cuda":
+    try:
+        if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+            torch.backends.cuda.enable_flash_sdp(False)
+        if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+        if hasattr(torch.backends.cuda, "enable_math_sdp"):
+            torch.backends.cuda.enable_math_sdp(True)
+    except Exception:
+        pass  # 失敗就讓 PyTorch 用預設值，不噴 CMD（之後若有 logger 會記錄訓練錯誤）
+
+# ── debug logger (寫到檔案，不噴 CMD；DEBUG_CUDA_SAMPLE=True 才會啟用) ──
+# True 時會插入 cuda.synchronize + 寫 log，會拖慢訓練；只在除錯 CUDA error 時開。
+DEBUG_CUDA_SAMPLE = True
+
+_DBG_LOG_PATH = TRANSFORMER_MODEL_PATH / "cuda_debug.log"
+_DBG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+_dbg_logger = _logging.getLogger("cuda_dbg.stage1")
+_dbg_logger.setLevel(_logging.DEBUG)
+_dbg_logger.propagate = False  # 不往 root logger 傳，避免 CMD 也印
+if not _dbg_logger.handlers:
+    _fh = _logging.FileHandler(_DBG_LOG_PATH, mode="a", encoding="utf-8")
+    _fh.setFormatter(_logging.Formatter("%(asctime)s %(message)s"))
+    _dbg_logger.addHandler(_fh)
+
+# 把 ReplayBuffer 的 [DBG sample] log 也導到同一個檔（取代它原本的 print）。
+_crb_module.DEBUG_CUDA_SAMPLE_LOG_PATH = _DBG_LOG_PATH
+
+
+def _dbg(msg: str) -> None:
+    """log+flush first, then sync — 最後寫到磁碟的那一行 = 即將同步的 op。"""
+    if not DEBUG_CUDA_SAMPLE:
+        return
+    _dbg_logger.debug(msg)
+    for _h in _dbg_logger.handlers:
+        try:
+            _h.flush()
+        except Exception:
+            pass
+    if device.type == "cuda":
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+
+
+def _dbg_mem(tag: str) -> None:
+    """記錄 GPU memory 使用量。"""
+    if not DEBUG_CUDA_SAMPLE or device.type != "cuda":
+        return
+    try:
+        alloc = torch.cuda.memory_allocated() / 1024 ** 2
+        reserved = torch.cuda.memory_reserved() / 1024 ** 2
+        peak = torch.cuda.max_memory_allocated() / 1024 ** 2
+        _dbg_logger.debug(f"[MEM {tag}] alloc={alloc:.1f}MB reserved={reserved:.1f}MB peak={peak:.1f}MB")
+    except Exception as e:
+        _dbg_logger.debug(f"[MEM {tag}] failed: {e}")
+
+
+def _dbg_tensor(name: str, t, *, expect_max=None, expect_min=None, check_finite: bool = True) -> None:
+    """檢查 tensor 的 NaN/Inf 與超界，記錄 shape/dtype/range。
+
+    expect_max / expect_min: 整數 tensor 的硬界，超出記為 OOB（很可能是壞 index）。
+    """
+    if not DEBUG_CUDA_SAMPLE:
+        return
+    _dbg_logger.debug(f"[TENSOR {name}] entering")
+    for _h in _dbg_logger.handlers:
+        try:
+            _h.flush()
+        except Exception:
+            pass
+    try:
+        if t is None:
+            _dbg_logger.debug(f"[TENSOR {name}] is None")
+            return
+        if not torch.is_tensor(t):
+            _dbg_logger.debug(f"[TENSOR {name}] type={type(t).__name__}")
+            return
+        if t.is_cuda:
+            torch.cuda.synchronize()
+        info = f"shape={tuple(t.shape)} dtype={t.dtype} dev={t.device}"
+        if t.numel() == 0:
+            _dbg_logger.debug(f"[TENSOR {name}] {info} EMPTY")
+            return
+        if t.dtype.is_floating_point:
+            tmin = t.min().item()
+            tmax = t.max().item()
+            tnan = bool(torch.isnan(t).any().item()) if check_finite else False
+            tinf = bool(torch.isinf(t).any().item()) if check_finite else False
+            tag = ""
+            if tnan:
+                tag += " !!NAN!!"
+            if tinf:
+                tag += " !!INF!!"
+            _dbg_logger.debug(f"[TENSOR {name}] {info} min={tmin:.4g} max={tmax:.4g}{tag}")
+        else:
+            tmin = t.min().item()
+            tmax = t.max().item()
+            tag = ""
+            if expect_max is not None and tmax >= expect_max:
+                tag += f" !!OOB max>={expect_max}!!"
+            if expect_min is not None and tmin < expect_min:
+                tag += f" !!OOB min<{expect_min}!!"
+            _dbg_logger.debug(f"[TENSOR {name}] {info} min={tmin} max={tmax}{tag}")
+        for _h in _dbg_logger.handlers:
+            try:
+                _h.flush()
+            except Exception:
+                pass
+    except Exception as e:
+        _dbg_logger.debug(f"[TENSOR {name}] CHECK FAILED: {e!r}")
+        for _h in _dbg_logger.handlers:
+            try:
+                _h.flush()
+            except Exception:
+                pass
+
+
+def log_unhandled_exception(context: str = "") -> None:
+    """供呼叫端在最外層 except 用，把 traceback 寫進 cuda_debug.log。
+
+    無視 DEBUG_CUDA_SAMPLE 開關 — exception 一律要落地。
+    """
+    try:
+        _dbg_logger.error(f"[UNHANDLED]{(' ' + context) if context else ''}", exc_info=True)
+        for _h in _dbg_logger.handlers:
+            try:
+                _h.flush()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 class TransformerActorNetwork(nn.Module):
@@ -259,81 +398,135 @@ class TransformerDiscreteAgent:
 
         self.total_it += 1
 
-        state, action, next_state, reward, done, per_indices, is_weights, discounts, n_steps = self.replay_buffer.sample(
-            BATCH_SIZE,
-            beta=PER_BETA_START + (PER_BETA_END - PER_BETA_START) * min(self.episode_count / 5000.0, 1.0),
-            device=device,
-            include_extra=True,
-        )
-
-        action = action.long()
-        row_idx = action[:, 0]
-        col_idx = action[:, 1]
-        action_flat = row_idx * self.grid_w + col_idx
-        batch_size = state.size(0)
-
-        # Preprocess current state WITH gradients so end-to-end training flows back
-        if preprocessor is not None:
-            state = preprocessor(state)
-
-        with torch.no_grad():
-            next_proc = preprocessor(next_state) if preprocessor is not None else next_state
-            next_features = self.backbone.get_features(next_proc)
-            next_online = self.q_network(next_features)
-            next_q_2d = next_online["q_values"]
-            next_q_flat = next_q_2d.view(batch_size, -1)
-            best_flat = next_q_flat.argmax(dim=1)
-            best_rows = best_flat // self.grid_w
-            best_cols = best_flat % self.grid_w
-
-            next_target = self.q_target(next_features)
-            next_target_quantiles = next_target["quantiles"][
-                torch.arange(batch_size, device=device), best_flat
-            ]
-            target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
-
-        features = self.backbone.get_features(state)
-        q_output = self.q_network(features)
-        q_2d = q_output["q_values"]
-        q_quantiles = q_output["quantiles"]
-        tau_hats = q_output["tau_hats"]
-        fraction_probs = q_output["fraction_probs"]
-        q_taken = q_2d[
-            torch.arange(batch_size, device=device), row_idx, col_idx
-        ].unsqueeze(1)
-        chosen_quantiles = q_quantiles[
-            torch.arange(batch_size, device=device), action_flat
-        ]
-
-        with torch.no_grad():
-            target_mean = target_quantiles.mean(dim=1, keepdim=True)
-            td_error = (q_taken - target_mean).abs().detach()
-
-        per_sample_quantile_loss = _quantile_huber_loss(
-            current_quantiles=chosen_quantiles,
-            target_quantiles=target_quantiles.detach(),
-            tau_hats=tau_hats.detach(),
-        )
-        entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
-        per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy
-        loss = (is_weights * per_sample_loss).mean()
-
-        if not torch.isfinite(loss):
-            raise RuntimeError(
-                f"Non-finite loss detected before backward: {loss.item()} "
-                f"(quantile={per_sample_quantile_loss.mean().item()}, entropy={entropy.mean().item()})"
+        try:
+            _dbg(f"[train_step] ENTER total_it={self.total_it} buf_size={self.replay_buffer.size()}")
+            _dbg_mem("train_step ENTER")
+            _dbg("[train_step] before replay_buffer.sample")
+            state, action, next_state, reward, done, per_indices, is_weights, discounts, n_steps = self.replay_buffer.sample(
+                BATCH_SIZE,
+                beta=PER_BETA_START + (PER_BETA_END - PER_BETA_START) * min(self.episode_count / 5000.0, 1.0),
+                device=device,
+                include_extra=True,
             )
+            _dbg("[train_step] after replay_buffer.sample")
+            _dbg_tensor("train_step.state",      state)
+            _dbg_tensor("train_step.next_state", next_state)
+            _dbg_tensor("train_step.action",     action,
+                        expect_min=0, expect_max=max(self.grid_h, self.grid_w))
+            _dbg_tensor("train_step.reward",     reward)
+            _dbg_tensor("train_step.done",       done)
+            _dbg_tensor("train_step.is_weights", is_weights)
+            _dbg_tensor("train_step.discounts",  discounts)
 
-        self.optimizer.zero_grad()
-        loss.backward()
-        all_params = list(self.backbone.parameters()) + list(self.q_network.parameters())
-        if extra_params_to_clip is not None:
-            all_params += list(extra_params_to_clip)
-        for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
-            if param.grad is not None and not torch.isfinite(param.grad).all():
-                raise RuntimeError(f"Non-finite gradient detected in parameter: {name}")
-        torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
-        self.optimizer.step()
+            action = action.long()
+            row_idx = action[:, 0]
+            col_idx = action[:, 1]
+            action_flat = row_idx * self.grid_w + col_idx
+            batch_size = state.size(0)
+            _dbg_tensor("train_step.row_idx", row_idx, expect_min=0, expect_max=self.grid_h)
+            _dbg_tensor("train_step.col_idx", col_idx, expect_min=0, expect_max=self.grid_w)
+            _dbg_tensor("train_step.action_flat", action_flat,
+                        expect_min=0, expect_max=self.num_actions)
+            _dbg(f"[train_step] batch_size={batch_size} num_actions={self.num_actions} grid={self.grid_h}x{self.grid_w}")
+
+            # Preprocess current state WITH gradients so end-to-end training flows back
+            if preprocessor is not None:
+                state = preprocessor(state)
+                _dbg_tensor("train_step.state(after preprocessor)", state)
+
+            with torch.no_grad():
+                next_proc = preprocessor(next_state) if preprocessor is not None else next_state
+                _dbg("[train_step] before next backbone")
+                next_features = self.backbone.get_features(next_proc)
+                _dbg_tensor("train_step.next_features", next_features)
+                _dbg("[train_step] after next backbone")
+                next_online = self.q_network(next_features)
+                next_q_2d = next_online["q_values"]
+                _dbg_tensor("train_step.next_online.q_values", next_q_2d)
+                next_q_flat = next_q_2d.view(batch_size, -1)
+                best_flat = next_q_flat.argmax(dim=1)
+                _dbg_tensor("train_step.next_best_flat", best_flat,
+                            expect_min=0, expect_max=self.num_actions)
+                best_rows = best_flat // self.grid_w
+                best_cols = best_flat % self.grid_w
+
+                next_target = self.q_target(next_features)
+                _dbg_tensor("train_step.next_target.quantiles", next_target["quantiles"])
+                _dbg("[train_step] after q_target")
+                next_target_quantiles = next_target["quantiles"][
+                    torch.arange(batch_size, device=device), best_flat
+                ]
+                _dbg_tensor("train_step.next_target_quantiles", next_target_quantiles)
+                target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
+                _dbg_tensor("train_step.target_quantiles", target_quantiles)
+            _dbg("[train_step] target branch done")
+
+            _dbg("[train_step] before current backbone")
+            features = self.backbone.get_features(state)
+            _dbg_tensor("train_step.features", features)
+            _dbg("[train_step] after current backbone")
+            q_output = self.q_network(features)
+            q_2d = q_output["q_values"]
+            q_quantiles = q_output["quantiles"]
+            tau_hats = q_output["tau_hats"]
+            fraction_probs = q_output["fraction_probs"]
+            _dbg_tensor("train_step.q_2d", q_2d)
+            _dbg_tensor("train_step.q_quantiles", q_quantiles)
+            _dbg_tensor("train_step.tau_hats", tau_hats)
+            _dbg_tensor("train_step.fraction_probs", fraction_probs)
+            _dbg(f"[train_step] q_2d.shape={tuple(q_2d.shape)} q_quantiles.shape={tuple(q_quantiles.shape)}")
+            q_taken = q_2d[
+                torch.arange(batch_size, device=device), row_idx, col_idx
+            ].unsqueeze(1)
+            _dbg("[train_step] after q_taken gather")
+            chosen_quantiles = q_quantiles[
+                torch.arange(batch_size, device=device), action_flat
+            ]
+            _dbg("[train_step] after chosen_quantiles gather")
+
+            with torch.no_grad():
+                target_mean = target_quantiles.mean(dim=1, keepdim=True)
+                td_error = (q_taken - target_mean).abs().detach()
+
+            per_sample_quantile_loss = _quantile_huber_loss(
+                current_quantiles=chosen_quantiles,
+                target_quantiles=target_quantiles.detach(),
+                tau_hats=tau_hats.detach(),
+            )
+            entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
+            per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy
+            loss = (is_weights * per_sample_loss).mean()
+            _dbg_tensor("train_step.loss", loss)
+            _dbg_tensor("train_step.td_error", td_error)
+
+            if not torch.isfinite(loss):
+                raise RuntimeError(
+                    f"Non-finite loss detected before backward: {loss.item()} "
+                    f"(quantile={per_sample_quantile_loss.mean().item()}, entropy={entropy.mean().item()})"
+                )
+
+            self.optimizer.zero_grad()
+            _dbg("[train_step] before backward")
+            loss.backward()
+            _dbg("[train_step] after backward")
+            _dbg_mem("train_step after backward")
+            all_params = list(self.backbone.parameters()) + list(self.q_network.parameters())
+            if extra_params_to_clip is not None:
+                all_params += list(extra_params_to_clip)
+            _dbg("[train_step] before grad-finite check")
+            for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
+                if param.grad is not None and not torch.isfinite(param.grad).all():
+                    raise RuntimeError(f"Non-finite gradient detected in parameter: {name}")
+            _dbg("[train_step] after grad-finite check")
+            torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
+            _dbg("[train_step] after clip_grad_norm_")
+            _dbg("[train_step] before optimizer.step")
+            self.optimizer.step()
+            _dbg("[train_step] after optimizer.step")
+            _dbg_mem("train_step after optimizer.step")
+        except Exception:
+            log_unhandled_exception(f"train_step total_it={self.total_it}")
+            raise
 
         self.replay_buffer.update_priorities(per_indices, td_error.squeeze(-1).cpu().numpy())
 

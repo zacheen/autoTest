@@ -10,6 +10,21 @@ from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 # True 時印 [DBG sample] log（含 cuda.synchronize，會拖慢訓練）；除錯 CUDA error 才開
 DEBUG_CUDA_SAMPLE = False
 
+# 由 agent 模組（visual_discrete_agent_v3 / transformer_discrete_agent）在 import 後設定。
+# 設成 Path 之後 _dbg_log() 會寫到該檔，不再噴 CMD；保持 None 則完全靜默。
+DEBUG_CUDA_SAMPLE_LOG_PATH = None
+
+
+def _dbg_log(msg: str) -> None:
+    """把 [DBG sample] 訊息寫到 DEBUG_CUDA_SAMPLE_LOG_PATH（TXT 檔），不噴 CMD。"""
+    if DEBUG_CUDA_SAMPLE_LOG_PATH is None:
+        return
+    try:
+        with open(DEBUG_CUDA_SAMPLE_LOG_PATH, "a", encoding="utf-8") as _f:
+            _f.write(f"{msg}\n")
+    except Exception:
+        pass
+
 class CategorizedReplayBuffer:
     """A generic Categorized Replay Buffer.
     
@@ -353,21 +368,22 @@ class CategorizedReplayBuffer:
             n_steps.append(int(entry.get("n_steps", 1)))
 
         # ---- DBG: sanity-check stored actions before they get used to index Q tensor ----
-        try:
-            _bad_acts = []
-            for i, action_value in enumerate(actions):
-                try:
-                    action_int = int(np.asarray(action_value).reshape(-1)[0])
-                except Exception:
-                    _bad_acts.append((i, action_value))
-                    continue
-                if not (0 <= action_int < 36):
-                    _bad_acts.append((i, action_value))
-            if _bad_acts:
-                with open("./models/visual_transformer_v3_6x6/cuda_debug.log", "a", encoding="utf-8") as _lf:
-                    _lf.write(f"[REPLAY sample] !!BAD ACTIONS in batch!! {_bad_acts[:10]} (showing up to 10)\n")
-        except Exception:
-            pass
+        # 只有 DEBUG_CUDA_SAMPLE 開且 LOG_PATH 有設時才寫；不再 hard-code 到 v3 路徑、不噴 CMD。
+        if DEBUG_CUDA_SAMPLE and DEBUG_CUDA_SAMPLE_LOG_PATH is not None:
+            try:
+                _bad_acts = []
+                for i, action_value in enumerate(actions):
+                    try:
+                        action_int = int(np.asarray(action_value).reshape(-1)[0])
+                    except Exception:
+                        _bad_acts.append((i, action_value))
+                        continue
+                    # 用 storage 裡實際存的 action 值是否能被解析為整數來判斷；上界由呼叫端的
+                    # _dbg_tensor(expect_max=...) 在 GPU 端做更精確的 OOB 檢查。
+                if _bad_acts:
+                    _dbg_log(f"[REPLAY sample] !!BAD ACTIONS in batch!! {_bad_acts[:10]} (showing up to 10)")
+            except Exception:
+                pass
 
         # Important Sampling
         N = self.size_count
@@ -379,24 +395,24 @@ class CategorizedReplayBuffer:
         weights = (N * probabilities + 1e-10) ** (-use_beta)
         weights = weights / weights.max()
         _dbg_cuda = DEBUG_CUDA_SAMPLE and ((device.type == "cuda") if hasattr(device, "type") else (str(device).startswith("cuda")))
-        if _dbg_cuda: import torch as _t; _t.cuda.synchronize(); print("[DBG sample] before weights.to(device)")
+        if _dbg_cuda: import torch as _t; _t.cuda.synchronize(); _dbg_log("[DBG sample] before weights.to(device)")
         weights = torch.tensor(weights, dtype=torch.float32).unsqueeze(1).to(device)
-        if _dbg_cuda: _t.cuda.synchronize(); print("[DBG sample] after weights.to(device)")
+        if _dbg_cuda: _t.cuda.synchronize(); _dbg_log("[DBG sample] after weights.to(device)")
 
         # Stacking tensors manually depends heavily on the model requirements:
         # Returning lists or direct tensors:
-        if _dbg_cuda: _t.cuda.synchronize(); print("[DBG sample] before stack states")
+        if _dbg_cuda: _t.cuda.synchronize(); _dbg_log("[DBG sample] before stack states")
         tensor_states = torch.stack(states).to(device) if torch.is_tensor(states[0]) else states
-        if _dbg_cuda: _t.cuda.synchronize(); print("[DBG sample] after stack states")
+        if _dbg_cuda: _t.cuda.synchronize(); _dbg_log("[DBG sample] after stack states")
         tensor_next_states = torch.stack(next_states).to(device) if torch.is_tensor(next_states[0]) else next_states
-        if _dbg_cuda: _t.cuda.synchronize(); print("[DBG sample] after stack next_states")
+        if _dbg_cuda: _t.cuda.synchronize(); _dbg_log("[DBG sample] after stack next_states")
 
         tensor_actions = torch.tensor(np.array(actions), dtype=torch.long, device=device)
         tensor_rewards = torch.tensor(rewards, dtype=torch.float32, device=device).unsqueeze(1)
         tensor_dones = torch.tensor(dones, dtype=torch.float32, device=device).unsqueeze(1)
         tensor_discounts = torch.tensor(discounts, dtype=torch.float32, device=device).unsqueeze(1)
         tensor_n_steps = torch.tensor(n_steps, dtype=torch.long, device=device).unsqueeze(1)
-        if _dbg_cuda: _t.cuda.synchronize(); print("[DBG sample] all tensors created")
+        if _dbg_cuda: _t.cuda.synchronize(); _dbg_log("[DBG sample] all tensors created")
 
         result = (
             tensor_states,

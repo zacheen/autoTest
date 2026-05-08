@@ -23,7 +23,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from Minesweeper.MinesweeperLogic import MinesweeperLogic
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
-from transformer_discrete_agent import TransformerDiscreteAgent
+from transformer_discrete_agent import TransformerDiscreteAgent, log_unhandled_exception
 
 # ---------- 訓練參數 ----------
 GRID_ROWS = 6
@@ -443,4 +443,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        # 使用者主動中斷，不算錯誤，也不寫進 cuda_debug.log
+        raise
+    except Exception:
+        # 任何未處理的例外（含 CUDA error）都寫進 cuda_debug.log，避免 CMD 被刷掉就遺失
+        log_unhandled_exception("train_stage1_simple.main()")
+        raise

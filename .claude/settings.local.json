@@ -37,7 +37,9 @@
       "Bash(conda run *)",
       "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import ast; ast.parse\\(open\\(r'D:/dont_move/git_save/all_autoTest/autoTest_clau/autoTest_pytorch/visual_discrete_agent_v3.py', encoding='utf-8'\\).read\\(\\)\\); print\\('SYNTAX OK'\\)\")",
       "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import ast; ast.parse\\(open\\(r'D:/dont_move/git_save/all_autoTest/autoTest_clau/autoTest_pytorch/Demo_test_Minesweeper.py', encoding='utf-8'\\).read\\(\\)\\); print\\('SYNTAX OK'\\)\")",
-      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import py_compile; py_compile.compile\\(r'D:/dont_move/git_save/all_autoTest/autoTest_clau/autoTest_pytorch/Demo_test_Minesweeper.py', doraise=True\\); print\\('SYNTAX OK'\\)\")"
+      "Bash(/c/Users/User/miniconda3/envs/py310_torch210_cuda118/python.exe -c \"import py_compile; py_compile.compile\\(r'D:/dont_move/git_save/all_autoTest/autoTest_clau/autoTest_pytorch/Demo_test_Minesweeper.py', doraise=True\\); print\\('SYNTAX OK'\\)\")",
+      "Bash(python -m py_compile autoTest_pytorch/train_stage1_simple.py)",
+      "Bash(echo \"exit=$?\")"
     ]
   }
 }

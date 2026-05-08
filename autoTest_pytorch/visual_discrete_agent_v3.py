@@ -41,6 +41,7 @@ from transformer_discrete_agent import FQF_ENTROPY_COEF, NUM_FQF_FRACTIONS, _qua
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from model_structure.transformer_shared import FQFQNetwork
 from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
+import model_structure.CategorizedReplayBuffer as _crb_module
 from model_structure.visual_agent_common import VisualAgentCommonMixin
 from model_structure.yolo_encoder_base import YOLOEncoderBase, DEFAULT_ENCODER_DIMS
 from model_structure.optimizer_factory import build_fqf_optimizer
@@ -69,10 +70,15 @@ _dbg_log_path = Path("./models/visual_transformer_v3_6x6/cuda_debug.log")
 _dbg_log_path.parent.mkdir(parents=True, exist_ok=True)
 _dbg_logger = _logging.getLogger("cuda_dbg")
 _dbg_logger.setLevel(_logging.DEBUG)
+_dbg_logger.propagate = False  # 不往 root logger 傳，避免 CMD 也被印
 if not _dbg_logger.handlers:
     _fh = _logging.FileHandler(_dbg_log_path, mode="a", encoding="utf-8")
     _fh.setFormatter(_logging.Formatter("%(asctime)s %(message)s"))
     _dbg_logger.addHandler(_fh)
+
+# 把 CategorizedReplayBuffer 的 [DBG sample] / !!BAD ACTIONS!! 也導到同一個檔
+# （取代原本 hard-coded 的 print 與 open(...) 寫法）。
+_crb_module.DEBUG_CUDA_SAMPLE_LOG_PATH = _dbg_log_path
 
 def _dbg(msg: str) -> None:
     """log+flush first, then sync — last entry on disk = op about to be sync'd."""
