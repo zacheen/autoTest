@@ -172,7 +172,7 @@ DECODER_DROPOUT    = 0.1
 
 # ── training hyper-params ────────────────────────────────────────────
 VISUAL_N_STEP = 1
-VISUAL_GRAD_CLIP_NORM = 5.0   # 1600-token encoder, allow larger grad room early
+VISUAL_GRAD_CLIP_NORM = 1.0   # 與 TransformerDiscreteAgent 對齊；encoder 已凍結，不需要 5.0 的寬鬆 room
 TRAIN_EVERY_N_STEPS = 1
 TARGET_UPDATE_FREQ = 1000
 SAVE_EVERY_N_EPISODES = 100
