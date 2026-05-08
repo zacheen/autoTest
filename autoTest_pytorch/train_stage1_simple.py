@@ -284,7 +284,7 @@ def main():
     print(f"  Stage 1 DDQN: Grid State → Transformer → Dueling Q → {num_actions} actions")
     print("=" * 60)
     print(f"Grid: {GRID_ROWS}x{GRID_COLS}, Mines: {GRID_MINES}")
-    print(f"Architecture: 100 tokens × 12-d → Transformer(d=64, h=4, L=4) → per-token logit")
+    print(f"Architecture: 100 tokens × 12-d → Transformer(d=32, h=4, L=4) → per-token logit")
     print(f"Max episodes: {MAX_EPISODES}")
     print()
 
