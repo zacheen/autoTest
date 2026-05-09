@@ -53,7 +53,7 @@ if device.type == "cuda":
 
 # ── debug logger (寫到檔案，不噴 CMD；DEBUG_CUDA_SAMPLE=True 才會啟用) ──
 # True 時會插入 cuda.synchronize + 寫 log，會拖慢訓練；只在除錯 CUDA error 時開。
-DEBUG_CUDA_SAMPLE = True
+DEBUG_CUDA_SAMPLE = False
 
 _DBG_LOG_PATH = TRANSFORMER_MODEL_PATH / "cuda_debug.log"
 _DBG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
