@@ -301,6 +301,9 @@ class TransformerDiscreteAgent:
         self.epsilon_min = 0.05
         self.epsilon_decay_episodes = 5000
 
+        # episode-scoped blocked actions (v3 風格)：點過的格子在本 episode 內 mask 掉
+        self.blocked_actions: set[int] = set()
+
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
         self._io_log = open(TRANSFORMER_MODEL_PATH / "train_io_log.txt", "a", encoding="utf-8")
         self._io_log.write(f"\n{'=' * 60}\n")
@@ -312,11 +315,23 @@ class TransformerDiscreteAgent:
         atexit.register(self.save_persistent)
         atexit.register(self._close_io_log)
 
+    def clear_blocked_actions(self):
+        self.blocked_actions.clear()
+
+    def block_action_for_state(self, state, action_id: int):
+        self.blocked_actions.add(int(action_id))
+
     def select_action(self, state, add_noise=True):
+        blocked = set(self.blocked_actions)
+        available = [i for i in range(self.num_actions) if i not in blocked]
+        if not available:
+            self.clear_blocked_actions()
+            blocked = set()
+            available = list(range(self.num_actions))
+
         if add_noise and random.random() < self.epsilon:
-            row = random.randint(0, self.grid_h - 1)
-            col = random.randint(0, self.grid_w - 1)
-            return (row, col)
+            action_id = random.choice(available)
+            return (action_id // self.grid_w, action_id % self.grid_w)
 
         state_batch = state.unsqueeze(0).to(device)
 
@@ -325,13 +340,15 @@ class TransformerDiscreteAgent:
         with torch.no_grad():
             features = self.backbone.get_features(state_batch)
             q_2d = self.q_network(features)["q_values"].squeeze(0)
-            row_q = q_2d.max(dim=1).values
-            row = row_q.argmax().item()
-            col = q_2d[row].argmax().item()
+            q_flat = q_2d.view(-1).clone()
+            if blocked:
+                blocked_idx = torch.tensor(sorted(blocked), dtype=torch.long, device=q_flat.device)
+                q_flat[blocked_idx] = float("-inf")
+            action_id = int(q_flat.argmax().item())
         self.backbone.train()
         self.q_network.train()
 
-        return (row, col)
+        return (action_id // self.grid_w, action_id % self.grid_w)
 
     def store_transition(self, state, action, next_state, reward, done):
         transition = {
@@ -586,6 +603,7 @@ class TransformerDiscreteAgent:
 
     def reset_episode(self):
         self._flush_n_step_buffer()
+        self.clear_blocked_actions()
 
     def _close_io_log(self):
         if self._io_log and not self._io_log.closed:

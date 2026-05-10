@@ -110,6 +110,7 @@ def run_demo_episode(f, logic, agent, mode="validation"):
     """
     add_noise = (mode == "training")
     logic.reset()
+    agent.reset_episode()
     done = False
     step = 0
     total_reward = 0.0
@@ -124,6 +125,9 @@ def run_demo_episode(f, logic, agent, mode="validation"):
         result = logic.click(row, col)
         reward = compute_reward(result)
         total_reward += reward
+
+        if not result.changed:
+            agent.block_action_for_state(state, row * GRID_COLS + col)
 
         done = result.game_over or result.win
         step += 1
@@ -173,6 +177,7 @@ def compute_reward(result):
 
 def run_episode(logic, agent, add_noise=True):
     logic.reset()
+    agent.reset_episode()
     episode_reward = 0.0
     episode_steps = 0
     done = False
@@ -193,6 +198,7 @@ def run_episode(logic, agent, add_noise=True):
             valid_clicks += 1
         else:
             invalid_clicks += 1
+            agent.block_action_for_state(state, row * GRID_COLS + col)
 
         done = result.game_over or result.win
         is_win = result.win
