@@ -524,7 +524,35 @@ class TransformerDiscreteAgent:
 
             self.optimizer.zero_grad()
             _dbg("[train_step] before backward")
-            loss.backward()
+            # ── 精準包 backward：PyTorch 2.1 + CUDA 11.8 的 attention backward kernel
+            # 偶發 illegal instruction（機率性 kernel bug，不是訓練數值問題）。
+            # 撞到就丟掉這個 batch、清乾淨 grad/cache，跳下一個 step；非 CUDA 類錯誤照常往上丟。
+            # synchronize 是必要的：沒設 CUDA_LAUNCH_BLOCKING 時，backward 是 async，
+            # kernel error 會延後到下一個 sync 點才暴露 — sync 一次才能讓 try/except 真的攔到 backward。
+            try:
+                loss.backward()
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+            except RuntimeError as exc:
+                msg = str(exc)
+                if any(tag in msg for tag in ("CUDA error", "illegal instruction", "device-side assert")):
+                    _dbg_logger.warning(
+                        f"[train_step] backward CUDA crash at total_it={self.total_it}; "
+                        f"dropping batch and continuing. msg={msg!r}"
+                    )
+                    for _h in _dbg_logger.handlers:
+                        try:
+                            _h.flush()
+                        except Exception:
+                            pass
+                    self.optimizer.zero_grad(set_to_none=True)
+                    if device.type == "cuda":
+                        try:
+                            torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+                    return None
+                raise  # 其他 RuntimeError 交給外層 try/except 寫 traceback
             _dbg("[train_step] after backward")
             _dbg_mem("train_step after backward")
             all_params = list(self.backbone.parameters()) + list(self.q_network.parameters())
