@@ -1,6 +1,7 @@
 import atexit
 import datetime
 import logging as _logging
+import math
 import random
 from collections import defaultdict, deque
 from pathlib import Path
@@ -9,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
 
 from model_structure.transformer_shared import EncoderDecoderTransformer, FQFQNetwork, FixedSinusoidalPositionEmbedding
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
@@ -29,6 +31,10 @@ TARGET_UPDATE_FREQ = 50
 N_STEP = 1
 NUM_FQF_FRACTIONS = 8
 FQF_ENTROPY_COEF = 1e-3
+GRAD_CLIP_NORM = 1.0
+# Heavy diagnostics — log less frequently to avoid TensorBoard bloat / overhead.
+HISTOGRAM_EVERY = 200          # per-layer weight/grad norms
+WEIGHT_DISTANCE_LOG_EVERY = 100  # full-model weight snapshot distance
 
 # ── learning rate warmup ─────────────────────────────────────────────
 # Linear LR warmup over the first N optimizer steps (transformer 早期穩定)
@@ -321,9 +327,31 @@ class TransformerDiscreteAgent:
         self._io_log.write(f"{'=' * 60}\n")
         self._io_log.flush()
 
+        # TensorBoard — own log_dir keyed by session timestamp, so the
+        # training script (train_stage1_simple.py) can reuse it instead of
+        # creating a second writer.
+        tb_root = TRANSFORMER_MODEL_PATH / "tensorboard"
+        tb_root.mkdir(parents=True, exist_ok=True)
+        tb_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.tensorboard_log_dir = tb_root / tb_timestamp
+        self.tb_writer = SummaryWriter(log_dir=str(self.tensorboard_log_dir))
+        print(f"[FQF] TensorBoard: tensorboard --logdir {tb_root}")
+        print(f"[FQF] Current run: {self.tensorboard_log_dir}")
+
         self.try_load_model()
+
+        # Weight snapshots for diagnosing drift. Must be captured AFTER
+        # try_load_model so that "init" reflects the actual starting point
+        # of this session (including any loaded checkpoint).
+        self._init_weight_reference = self._capture_trainable_weight_snapshot()
+        self._rolling_weight_reference = self._capture_trainable_weight_snapshot()
+        self._rolling_weight_reference_step = self.total_it
+
+        # atexit order is LIFO — register tb close last so it runs first,
+        # before the file handles below.
         atexit.register(self.save_persistent)
         atexit.register(self._close_io_log)
+        atexit.register(self._close_tb_writer)
 
     def clear_blocked_actions(self):
         self.blocked_actions.clear()
@@ -517,16 +545,22 @@ class TransformerDiscreteAgent:
                 target_mean = target_quantiles.mean(dim=1, keepdim=True)
                 td_error = (q_taken - target_mean).abs().detach()
 
-            per_sample_quantile_loss = _quantile_huber_loss(
+            per_sample_quantile_loss, frac_huber_clipped = _quantile_huber_loss(
                 current_quantiles=chosen_quantiles,
                 target_quantiles=target_quantiles.detach(),
                 tau_hats=tau_hats.detach(),
+                return_stats=True,
             )
             entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
             per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy
             loss = (is_weights * per_sample_loss).mean()
             _dbg_tensor("train_step.loss", loss)
             _dbg_tensor("train_step.td_error", td_error)
+
+            # FQF distribution-health diagnostics (cheap, computed inside no_grad).
+            with torch.no_grad():
+                fpn_norm_entropy = (entropy.mean() / math.log(NUM_FQF_FRACTIONS)).item()
+                fpn_tau_std = tau_hats.std(dim=1).mean().item()
 
             if not torch.isfinite(loss):
                 raise RuntimeError(
@@ -582,7 +616,49 @@ class TransformerDiscreteAgent:
                 if param.grad is not None and not torch.isfinite(param.grad).all():
                     raise RuntimeError(f"Non-finite gradient detected in parameter: {name}")
             _dbg("[train_step] after grad-finite check")
-            torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
+
+            # Pre-clip gradient norms — must be captured BEFORE clip_grad_norm_,
+            # otherwise the per-param tensors are scaled in-place and we lose
+            # the true magnitude that caused any explosion.
+            backbone_pre = self._module_grad_norm(self.backbone)
+            head_pre = self._module_grad_norm(self.q_network)
+            # Extras (e.g. YOLO when Stage 2 plugs in) contribute to the clip
+            # norm; track them separately so pre/post totals match the
+            # parameter set actually passed to clip_grad_norm_.
+            extras_pre_sq = 0.0
+            if extra_params_to_clip is not None:
+                for param in extra_params_to_clip:
+                    if param.grad is None:
+                        continue
+                    extras_pre_sq += float(param.grad.detach().float().pow(2).sum().item())
+            extras_pre = extras_pre_sq ** 0.5
+            # Capture per-layer norm snapshots BEFORE clip — but DON'T write
+            # to TB yet; writes belong in the post-try success path so a CUDA
+            # crash on clip / step doesn't leave orphan per-layer rows in TB
+            # without the matching global rows.
+            backbone_norm_snapshots = None
+            if self.total_it % HISTOGRAM_EVERY == 0:
+                backbone_norm_snapshots = self._collect_backbone_weight_norm_snapshots()
+
+            grad_norm_total = torch.nn.utils.clip_grad_norm_(all_params, max_norm=GRAD_CLIP_NORM)
+            grad_norm_total_value = float(grad_norm_total)
+            grad_clip_threshold = float(GRAD_CLIP_NORM)
+            grad_clip_scale = min(1.0, grad_clip_threshold / (grad_norm_total_value + 1e-12))
+            grad_clip_percent = 1.0 - grad_clip_scale
+            grad_clip_excess_norm = max(0.0, grad_norm_total_value - grad_clip_threshold)
+            grad_clip_excess_ratio = grad_clip_excess_norm / (grad_clip_threshold + 1e-12)
+
+            backbone_post = self._module_grad_norm(self.backbone)
+            head_post = self._module_grad_norm(self.q_network)
+            extras_post_sq = 0.0
+            if extra_params_to_clip is not None:
+                for param in extra_params_to_clip:
+                    if param.grad is None:
+                        continue
+                    extras_post_sq += float(param.grad.detach().float().pow(2).sum().item())
+            extras_post = extras_post_sq ** 0.5
+            grad_post_total = (backbone_post ** 2 + head_post ** 2 + extras_post_sq) ** 0.5
+
             _dbg("[train_step] after clip_grad_norm_")
             _dbg("[train_step] before optimizer.step")
             self.optimizer.step()
@@ -622,6 +698,22 @@ class TransformerDiscreteAgent:
             log_unhandled_exception(f"train_step total_it={self.total_it}")
             raise
 
+        # Weight-drift snapshot (expensive — every WEIGHT_DISTANCE_LOG_EVERY).
+        weight_distance_log = None
+        if self.total_it % WEIGHT_DISTANCE_LOG_EVERY == 0:
+            current_snapshot = self._capture_trainable_weight_snapshot()
+            init_distance = self._snapshot_distance(current_snapshot, self._init_weight_reference)
+            rolling_distance = self._snapshot_distance(current_snapshot, self._rolling_weight_reference)
+            rolling_step_gap = self.total_it - self._rolling_weight_reference_step
+            weight_distance_log = {
+                "from_init": init_distance,
+                "from_prev_window": rolling_distance,
+                "prev_window_step": self._rolling_weight_reference_step,
+                "window_size": rolling_step_gap,
+            }
+            self._rolling_weight_reference = current_snapshot
+            self._rolling_weight_reference_step = self.total_it
+
         self.replay_buffer.update_priorities(per_indices, td_error.squeeze(-1).cpu().numpy())
 
         if self.total_it % TARGET_UPDATE_FREQ == 0:
@@ -658,6 +750,15 @@ class TransformerDiscreteAgent:
             top3_str = ", ".join(f"({row},{col})x{count}" for (row, col), count in top3_actions)
 
             q_mean = q_taken.mean().item()
+            q_taken_std = q_taken.std().item() if q_taken.numel() > 1 else 0.0
+            q_all_max = q_2d.max().item()
+            q_all_min = q_2d.min().item()
+            target_q_mean = target_quantiles.float().mean().item()
+            target_q_std = target_quantiles.float().std().item() if target_quantiles.numel() > 1 else 0.0
+            td_error_mean = td_error.mean().item()
+            td_error_max = td_error.max().item()
+            batch_reward_mean = reward.float().mean().item()
+            batch_done_rate = done.float().mean().item()
 
         self._io_log.write(
             f"[Step {self.total_it}] {datetime.datetime.now().strftime('%H:%M:%S')}\n"
@@ -669,9 +770,69 @@ class TransformerDiscreteAgent:
             f" | all: min={q0_flat.min().item():.4f} max={q0_flat.max().item():.4f}\n"
             f"  FQF:    loss={loss.item():.4f} | tau_entropy={entropy.mean().item():.4f}"
             f" | epsilon={self.epsilon:.4f}\n"
+            f"  TD:     mean={td_error_mean:.4f} max={td_error_max:.4f} "
+            f"frac_huber_clipped={frac_huber_clipped:.3f}\n"
+            f"  Grad:   pre_total={grad_norm_total_value:.4f} post_total={grad_post_total:.4f} "
+            f"clip_percent={grad_clip_percent:.2%}\n"
             f"---\n"
         )
         self._io_log.flush()
+
+        # ── TensorBoard scalars (cheap; logged every step) ──
+        step = self.total_it
+        self.tb_writer.add_scalar("train/Q_loss", loss.item(), step)
+        self.tb_writer.add_scalar("train/q_mean", q_mean, step)
+        self.tb_writer.add_scalar("train/q_taken_std", q_taken_std, step)
+        self.tb_writer.add_scalar("train/q_max", q_all_max, step)
+        self.tb_writer.add_scalar("train/q_min", q_all_min, step)
+        self.tb_writer.add_scalar("train/target_q_mean", target_q_mean, step)
+        self.tb_writer.add_scalar("train/target_q_std", target_q_std, step)
+        self.tb_writer.add_scalar("train/td_error_mean", td_error_mean, step)
+        self.tb_writer.add_scalar("train/td_error_max", td_error_max, step)
+        self.tb_writer.add_scalar("train/frac_huber_clipped", frac_huber_clipped, step)
+        self.tb_writer.add_scalar("train/batch_reward_mean", batch_reward_mean, step)
+        self.tb_writer.add_scalar("train/batch_done_rate", batch_done_rate, step)
+        self.tb_writer.add_scalar("train/epsilon", self.epsilon, step)
+        # LR (after warmup) — useful to see when warmup ends and where the
+        # rise-then-fall pattern starts relative to the schedule.
+        self.tb_writer.add_scalar("train/lr", self.optimizer.param_groups[0]["lr"], step)
+        self.tb_writer.add_scalar("fpn/norm_entropy", fpn_norm_entropy, step)
+        self.tb_writer.add_scalar("fpn/tau_std", fpn_tau_std, step)
+        self.tb_writer.add_scalar("grad/total_pre_clip", grad_norm_total_value, step)
+        self.tb_writer.add_scalar("grad/total_post_clip", grad_post_total, step)
+        self.tb_writer.add_scalar("grad/clip_threshold", grad_clip_threshold, step)
+        self.tb_writer.add_scalar("grad/clip_percent", grad_clip_percent, step)
+        self.tb_writer.add_scalar("grad/clip_excess_norm", grad_clip_excess_norm, step)
+        self.tb_writer.add_scalar("grad/clip_excess_ratio", grad_clip_excess_ratio, step)
+        self.tb_writer.add_scalar("grad_pre/backbone", backbone_pre, step)
+        self.tb_writer.add_scalar("grad_pre/head", head_pre, step)
+        self.tb_writer.add_scalar("grad_post/backbone", backbone_post, step)
+        self.tb_writer.add_scalar("grad_post/head", head_post, step)
+        # Extras (Stage 2 only — YOLO params). Always logged for symmetry;
+        # equals 0 when extra_params_to_clip is None.
+        self.tb_writer.add_scalar("grad_pre/extras", extras_pre, step)
+        self.tb_writer.add_scalar("grad_post/extras", extras_post, step)
+        # IS weights — to see if priorities are getting peaked.
+        self.tb_writer.add_scalar("train/is_weight_mean", is_weights.float().mean().item(), step)
+        self.tb_writer.add_scalar("train/is_weight_max", is_weights.float().max().item(), step)
+
+        if weight_distance_log is not None:
+            self.tb_writer.add_scalar("weights/delta_from_init", weight_distance_log["from_init"], step)
+            self.tb_writer.add_scalar("weights/delta_from_prev_window", weight_distance_log["from_prev_window"], step)
+
+        # Per-layer weight/grad norms — collected pre-clip inside the try
+        # block above; written here so we never leave orphan rows on a
+        # CUDA-recovery early return.
+        if backbone_norm_snapshots is not None:
+            self._write_backbone_weight_norm_snapshots(backbone_norm_snapshots, step)
+
+        # Buffer composition — diagnoses replay drift over time.
+        bucket_counts = self.replay_buffer.bucket_sizes()
+        for bucket_name, count in bucket_counts.items():
+            self.tb_writer.add_scalar(f"buffer/bucket_{bucket_name}", count, step)
+        self.tb_writer.add_scalar("buffer/total_size", self.replay_buffer.size(), step)
+
+        self.tb_writer.flush()
 
         return {
             "Q_loss": loss.item(),
@@ -681,6 +842,139 @@ class TransformerDiscreteAgent:
     def reset_episode(self):
         self._flush_n_step_buffer()
         self.clear_blocked_actions()
+
+    # ──────────────────────────── diagnostics helpers ──────────────────────
+
+    def _module_grad_norm(self, module):
+        """L2 norm of all gradients inside a module (post-backward, pre-clip)."""
+        grad_sq_sum = 0.0
+        for param in module.parameters():
+            if param.grad is None:
+                continue
+            grad_sq_sum += float(param.grad.detach().float().pow(2).sum().item())
+        return grad_sq_sum ** 0.5
+
+    def _trainable_module_groups(self):
+        return {
+            "backbone": self.backbone,
+            "head": self.q_network,
+        }
+
+    def _capture_trainable_weight_snapshot(self):
+        """Detached CPU snapshot of every trainable parameter, keyed by group.param."""
+        snapshot = {}
+        for group_name, module in self._trainable_module_groups().items():
+            for param_name, param in module.named_parameters():
+                snapshot[f"{group_name}.{param_name}"] = param.detach().float().cpu().clone()
+        return snapshot
+
+    def _snapshot_distance(self, current_snapshot, reference_snapshot, eps=1e-12):
+        """Relative L2 distance ||current - ref|| / ||ref|| across full parameter vector."""
+        diff_sq_sum = 0.0
+        ref_sq_sum = 0.0
+        for name, current_value in current_snapshot.items():
+            reference_value = reference_snapshot.get(name)
+            if reference_value is None:
+                continue
+            diff = current_value - reference_value
+            diff_sq_sum += float(diff.pow(2).sum().item())
+            ref_sq_sum += float(reference_value.pow(2).sum().item())
+        return (diff_sq_sum ** 0.5) / max(ref_sq_sum ** 0.5, eps)
+
+    def _tensor_norm(self, tensor):
+        if tensor is None:
+            return None
+        return float(tensor.detach().float().norm().item())
+
+    def _collect_param_weight_and_grad_norm(self, tag_prefix, param, out):
+        """Append (tag, weight_norm, grad_norm) to ``out`` for later TB writes.
+
+        Split from the TB write so callers inside CUDA-recovery try-blocks
+        can collect snapshots, return None on crash, and only write once they
+        reach the post-try success path. Writing inside the try would let a
+        crash leave per-layer rows in TB without matching global rows.
+        """
+        if param is None:
+            return
+        weight_norm = self._tensor_norm(param)
+        grad_norm = self._tensor_norm(param.grad)
+        out.append((tag_prefix, weight_norm, grad_norm))
+
+    def _collect_backbone_weight_norm_snapshots(self):
+        """Capture per-layer weight & pre-clip grad norms for encoder & decoder.
+
+        Returns ``list[(tag_prefix, weight_norm, grad_norm)]``. Must be called
+        BEFORE ``clip_grad_norm_`` so the grad values are pre-clip. Pair with
+        ``_write_backbone_weight_norm_snapshots`` for the actual TB writes.
+
+        Uses standard ``nn.TransformerEncoderLayer`` / ``nn.TransformerDecoderLayer``
+        attribute names (``self_attn.in_proj_weight``, ``linear1.weight`` …).
+        """
+        snapshots: list = []
+        encoder_layers = getattr(self.backbone.core.transformer, "layers", None)
+        if encoder_layers is not None:
+            for layer_idx, layer in enumerate(encoder_layers):
+                prefix = f"encoder/layer{layer_idx}"
+                self._collect_param_weight_and_grad_norm(
+                    f"{prefix}/self_attn_in_proj",
+                    getattr(layer.self_attn, "in_proj_weight", None),
+                    snapshots,
+                )
+                self._collect_param_weight_and_grad_norm(
+                    f"{prefix}/self_attn_out_proj",
+                    layer.self_attn.out_proj.weight,
+                    snapshots,
+                )
+                self._collect_param_weight_and_grad_norm(
+                    f"{prefix}/ffn_linear1", layer.linear1.weight, snapshots
+                )
+                self._collect_param_weight_and_grad_norm(
+                    f"{prefix}/ffn_linear2", layer.linear2.weight, snapshots
+                )
+
+        decoder_layers = getattr(self.backbone.core.decoder, "layers", None)
+        if decoder_layers is not None:
+            for layer_idx, layer in enumerate(decoder_layers):
+                prefix = f"decoder/layer{layer_idx}"
+                self._collect_param_weight_and_grad_norm(
+                    f"{prefix}/self_attn_in_proj",
+                    getattr(layer.self_attn, "in_proj_weight", None),
+                    snapshots,
+                )
+                self._collect_param_weight_and_grad_norm(
+                    f"{prefix}/self_attn_out_proj",
+                    layer.self_attn.out_proj.weight,
+                    snapshots,
+                )
+                self._collect_param_weight_and_grad_norm(
+                    f"{prefix}/cross_attn_in_proj",
+                    getattr(layer.multihead_attn, "in_proj_weight", None),
+                    snapshots,
+                )
+                self._collect_param_weight_and_grad_norm(
+                    f"{prefix}/cross_attn_out_proj",
+                    layer.multihead_attn.out_proj.weight,
+                    snapshots,
+                )
+                self._collect_param_weight_and_grad_norm(
+                    f"{prefix}/ffn_linear1", layer.linear1.weight, snapshots
+                )
+                self._collect_param_weight_and_grad_norm(
+                    f"{prefix}/ffn_linear2", layer.linear2.weight, snapshots
+                )
+        return snapshots
+
+    def _write_backbone_weight_norm_snapshots(self, snapshots, global_step):
+        """Write previously-collected per-layer snapshots to TensorBoard."""
+        for tag_prefix, weight_norm, grad_norm in snapshots:
+            if weight_norm is not None:
+                self.tb_writer.add_scalar(f"weight_norm/{tag_prefix}", weight_norm, global_step)
+            if grad_norm is not None:
+                self.tb_writer.add_scalar(f"grad_norm/{tag_prefix}", grad_norm, global_step)
+
+    def _close_tb_writer(self):
+        if getattr(self, "tb_writer", None) is not None:
+            self.tb_writer.close()
 
     def _close_io_log(self):
         if self._io_log and not self._io_log.closed:

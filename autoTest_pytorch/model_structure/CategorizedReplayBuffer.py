@@ -431,6 +431,21 @@ class CategorizedReplayBuffer:
         """Return the current total number of entries in the buffer."""
         return self.size_count
 
+    def bucket_sizes(self):
+        """Return per-bucket entry counts as a dict keyed by REWARD_TYPES.
+
+        Useful for monitoring whether rare-event buckets (win / lose / invalid)
+        are starving or dominating relative to the bulk progress bucket.
+        """
+        counts = {reward_type: 0 for reward_type in self.REWARD_TYPES}
+        for entry in self.index:
+            rt = entry.get("reward_type", "other")
+            if rt in counts:
+                counts[rt] += 1
+            else:
+                counts[rt] = counts.get(rt, 0) + 1
+        return counts
+
     def get_all_entries(self):
         """Returns internal objects suitable for RAM persistent saving. 
         Note this won't move disk files, just the internal state index."""

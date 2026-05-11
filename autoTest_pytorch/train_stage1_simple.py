@@ -19,7 +19,6 @@ import numpy as np
 import torch
 from collections import deque
 from pathlib import Path
-from torch.utils.tensorboard import SummaryWriter
 
 from Minesweeper.MinesweeperLogic import MinesweeperLogic
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
@@ -297,11 +296,12 @@ def main():
     logic = MinesweeperLogic(rows=GRID_ROWS, cols=GRID_COLS, mines_count=GRID_MINES)
     agent = TransformerDiscreteAgent(grid_h=GRID_ROWS, grid_w=GRID_COLS)
 
-    # TensorBoard
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    tb_dir = TENSORBOARD_DIR / timestamp
-    writer = SummaryWriter(log_dir=str(tb_dir))
+    # TensorBoard — reuse the writer the agent created in __init__ so that
+    # train-step diagnostics (td_error / grad / weights drift) land in the
+    # same log_dir as the eval/episode scalars logged here.
+    writer = agent.tb_writer
     print(f"TensorBoard: tensorboard --logdir {TENSORBOARD_DIR}")
+    print(f"  Active run: {agent.tensorboard_log_dir}")
 
     # CSV
     csv_logger = CSVLogger(CSV_LOG_PATH)
@@ -335,13 +335,16 @@ def main():
             recent_wins.append(1 if stats['is_win'] else 0)
             recent_steps.append(stats['steps'])
 
-            # TensorBoard
-            writer.add_scalar('train/episode_reward', stats['reward'], episode)
-            writer.add_scalar('train/episode_steps', stats['steps'], episode)
-            writer.add_scalar('train/invalid_rate', stats['invalid_rate'], episode)
+            # TensorBoard — episode-level scalars. NOTE: do NOT reuse the
+            # `train/Q_loss` / `train/q_mean` tag names; the agent already
+            # writes those per gradient step (different step axis) — sharing
+            # the tag corrupts the curves with two interleaved step counters.
+            writer.add_scalar('episode/reward', stats['reward'], episode)
+            writer.add_scalar('episode/steps', stats['steps'], episode)
+            writer.add_scalar('episode/invalid_rate', stats['invalid_rate'], episode)
             if stats['Q_loss'] is not None:
-                writer.add_scalar('train/Q_loss', stats['Q_loss'], episode)
-                writer.add_scalar('train/q_mean', stats['q_mean'], episode)
+                writer.add_scalar('episode/Q_loss_avg', stats['Q_loss'], episode)
+                writer.add_scalar('episode/q_mean_avg', stats['q_mean'], episode)
 
             # CSV
             csv_row = {
@@ -442,10 +445,12 @@ def main():
         agent.save_persistent()
 
     finally:
-        print(f"\nTensorBoard logs: {tb_dir}")
+        print(f"\nTensorBoard logs: {agent.tensorboard_log_dir}")
         print(f"CSV log: {CSV_LOG_PATH}")
         csv_logger.close()
-        writer.close()
+        # Don't close writer here — it's owned by the agent and will be
+        # closed via the agent's atexit hook. Calling close() twice on the
+        # same SummaryWriter is a no-op in practice, but explicit is better.
 
 
 if __name__ == "__main__":
