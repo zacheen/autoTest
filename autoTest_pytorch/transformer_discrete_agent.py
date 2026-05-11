@@ -524,11 +524,10 @@ class TransformerDiscreteAgent:
 
             self.optimizer.zero_grad()
             _dbg("[train_step] before backward")
-            # ── 精準包 backward：PyTorch 2.1 + CUDA 11.8 的 attention backward kernel
-            # 偶發 illegal instruction（機率性 kernel bug，不是訓練數值問題）。
-            # 撞到就丟掉這個 batch、清乾淨 grad/cache，跳下一個 step；非 CUDA 類錯誤照常往上丟。
-            # synchronize 是必要的：沒設 CUDA_LAUNCH_BLOCKING 時，backward 是 async，
-            # kernel error 會延後到下一個 sync 點才暴露 — sync 一次才能讓 try/except 真的攔到 backward。
+            # ── 精準包 backward：tag 成 "backward CUDA crash"，方便事後 grep 統計
+            # 撞牆比例（是 backward kernel bug 還是 forward / optimizer 的）。
+            # synchronize 是必要的：沒設 CUDA_LAUNCH_BLOCKING 時 backward 是 async，
+            # kernel error 會延後到下一個 sync 點才暴露，要在這 sync 一次才能讓 try/except 真的攔到 backward。
             try:
                 loss.backward()
                 if device.type == "cuda":
@@ -569,7 +568,37 @@ class TransformerDiscreteAgent:
             self.optimizer.step()
             _dbg("[train_step] after optimizer.step")
             _dbg_mem("train_step after optimizer.step")
-        except Exception:
+            # 在離開 try 前再 sync 一次：optimizer.step 會 queue Adam kernel，
+            # 若有 async error 留到外面就接不到了。一次 sync 確保 try 範圍內就把錯誤撈出來。
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+        except Exception as exc:
+            # ── 非 backward 區段的 CUDA crash（forward / loss / grad-check / clip / optimizer.step / 結尾 sync）──
+            # tag 成 "non-backward CUDA crash" 方便和 backward 的 grep 區分，用來統計撞牆位置。
+            # 其他 (非 CUDA error 的) 例外才當真錯誤，寫 traceback 後往上丟。
+            msg = str(exc)
+            if isinstance(exc, RuntimeError) and any(
+                tag in msg for tag in ("CUDA error", "illegal instruction", "device-side assert")
+            ):
+                _dbg_logger.warning(
+                    f"[train_step] non-backward CUDA crash at total_it={self.total_it}; "
+                    f"dropping batch and continuing. msg={msg!r}"
+                )
+                for _h in _dbg_logger.handlers:
+                    try:
+                        _h.flush()
+                    except Exception:
+                        pass
+                try:
+                    self.optimizer.zero_grad(set_to_none=True)
+                except Exception:
+                    pass
+                if device.type == "cuda":
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                return None
             log_unhandled_exception(f"train_step total_it={self.total_it}")
             raise
 
