@@ -524,6 +524,14 @@ class TransformerDiscreteAgent:
 
             self.optimizer.zero_grad()
             _dbg("[train_step] before backward")
+            # ── Belt-and-suspenders：進 inner try 之前先排空 forward queue ──
+            # isfinite(loss) 那行雖然會 sync 一次、理論上已經 drain 過 forward 的 async error，
+            # 但 CUDA 的 sticky error state 有可能讓 forward 的 error 在 backward 內部被 check 到，
+            # 然後被誤標成 "backward CUDA crash"。先 sync 一次保證 inner try 開始時 GPU queue 是空的，
+            # 這樣 inner except 收到的 error 一定是 backward 自己產生的、不會被 forward 殘留 error 誤標。
+            # 成本：每個 train_step 多一個 sync (~5-20 μs)，極小。
+            if device.type == "cuda":
+                torch.cuda.synchronize()
             # ── 精準包 backward：tag 成 "backward CUDA crash"，方便事後 grep 統計
             # 撞牆比例（是 backward kernel bug 還是 forward / optimizer 的）。
             # synchronize 是必要的：沒設 CUDA_LAUNCH_BLOCKING 時 backward 是 async，
