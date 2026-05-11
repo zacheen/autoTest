@@ -995,7 +995,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         bb_path = VISUAL_V3_MODEL_PATH / "backbone.pth"
         if bb_path.exists():
             try:
-                self.backbone.load_state_dict(torch.load(bb_path, map_location=device))
+                self.backbone.load_state_dict(torch.load(bb_path, map_location=device, weights_only=True))
                 self._log_checkpoint_message(f"Loaded backbone: {bb_path}")
             except Exception as exc:
                 self._log_checkpoint_message(
@@ -1011,7 +1011,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         q_path = VISUAL_V3_MODEL_PATH / "fqf_network.pth"
         if q_path.exists():
             try:
-                self.q_network.load_state_dict(torch.load(q_path, map_location=device))
+                self.q_network.load_state_dict(torch.load(q_path, map_location=device, weights_only=True))
                 self._log_checkpoint_message(f"Loaded FQF-Network: {q_path}")
             except Exception as exc:
                 self._log_checkpoint_message(
@@ -1027,7 +1027,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         qt_path = VISUAL_V3_MODEL_PATH / "fqf_target.pth"
         if qt_path.exists():
             try:
-                self.q_target.load_state_dict(torch.load(qt_path, map_location=device))
+                self.q_target.load_state_dict(torch.load(qt_path, map_location=device, weights_only=True))
                 self._log_checkpoint_message(f"Loaded FQF-Target: {qt_path}")
             except Exception as exc:
                 self._log_checkpoint_message(
@@ -1075,7 +1075,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
                 continue
 
             try:
-                peek = torch.load(str(state_src), map_location="cpu")
+                peek = torch.load(str(state_src), map_location="cpu", weights_only=True)
                 if not torch.is_tensor(peek) or tuple(peek.shape) != (3, *IMAGE_SIZE):
                     continue
             except Exception:

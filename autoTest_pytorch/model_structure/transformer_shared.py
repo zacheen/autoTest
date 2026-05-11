@@ -109,7 +109,9 @@ class EncoderDecoderTransformer(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        # enable_nested_tensor=False：nested-tensor fastpath 只支援 post-LN（norm_first=False），
+        # 我們用 pre-LN（norm_first=True）會跟它互斥，PyTorch 會自動關掉並 warn。明確設 False 消 warning。
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, enable_nested_tensor=False)
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
 
     def encode(self, memory_tokens):

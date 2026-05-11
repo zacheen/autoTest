@@ -1073,7 +1073,7 @@ class TransformerDiscreteAgent:
         backbone_path = TRANSFORMER_MODEL_PATH / "backbone.pth"
         if backbone_path.exists():
             try:
-                backbone_state = torch.load(backbone_path, map_location=device)
+                backbone_state = torch.load(backbone_path, map_location=device, weights_only=True)
                 incompatible = self.backbone.load_backbone_state(backbone_state, strict=False)
                 print("[FQF] Loaded Backbone")
                 if incompatible.missing_keys:
@@ -1086,7 +1086,7 @@ class TransformerDiscreteAgent:
         q_path = TRANSFORMER_MODEL_PATH / "fqf_network.pth"
         if q_path.exists():
             try:
-                self.q_network.load_state_dict(torch.load(q_path, map_location=device))
+                self.q_network.load_state_dict(torch.load(q_path, map_location=device, weights_only=True))
                 print("[FQF] Loaded FQF-Network")
             except Exception as exc:
                 print(f"[FQF] Failed to load FQF-Network: {exc}")
@@ -1096,7 +1096,7 @@ class TransformerDiscreteAgent:
         q_target_path = TRANSFORMER_MODEL_PATH / "fqf_target.pth"
         if q_target_path.exists():
             try:
-                self.q_target.load_state_dict(torch.load(q_target_path, map_location=device))
+                self.q_target.load_state_dict(torch.load(q_target_path, map_location=device, weights_only=True))
                 print("[FQF] Loaded FQF-Target")
             except Exception as exc:
                 print(f"[FQF] Failed to load FQF-Target: {exc}")
