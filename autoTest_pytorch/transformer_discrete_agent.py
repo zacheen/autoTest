@@ -30,6 +30,13 @@ N_STEP = 1
 NUM_FQF_FRACTIONS = 8
 FQF_ENTROPY_COEF = 1e-3
 
+# ── learning rate warmup ─────────────────────────────────────────────
+# Linear LR warmup over the first N optimizer steps (transformer 早期穩定)
+# 從 base_lr * LR_WARMUP_START_FACTOR 線性增加到 base_lr
+LR_WARMUP_STEPS         = 2000   # 第一次從頭訓練的 warmup 長度
+LR_WARMUP_START_FACTOR  = 0.0
+LR_RESUME_WARMUP_STEPS  = 2000   # 每次重啟（包含第一次）的額外 warmup 長度
+
 TRANSFORMER_MODEL_PATH = Path("./models/stage1_transformer")
 TRANSFORMER_D_MODEL = 64
 TRANSFORMER_NHEAD = 4
@@ -281,6 +288,8 @@ class TransformerDiscreteAgent:
         from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 
         self.optimizer = build_fqf_optimizer(self.backbone, self.q_network)
+        # 紀錄每個 param group 的 base lr，warmup 期間根據 total_it / steps_since_resume 動態縮放
+        self._base_lrs = [group["lr"] for group in self.optimizer.param_groups]
 
         self.replay_buffer = CategorizedReplayBuffer(
             max_size=PER_CAPACITY,
@@ -292,6 +301,7 @@ class TransformerDiscreteAgent:
             beta_start=PER_BETA_START
         )
         self.total_it = 0
+        self.steps_since_resume = 0  # 每次啟動重置；用於 resume LR warmup（不存檔）
         self.episode_count = 0
         self.n_step = N_STEP
         self.n_step_gamma = MINESWEEPER_REWARD_CONFIG.gamma
@@ -414,6 +424,8 @@ class TransformerDiscreteAgent:
             return None
 
         self.total_it += 1
+        self.steps_since_resume += 1
+        self._apply_lr_warmup()
 
         try:
             _dbg(f"[train_step] ENTER total_it={self.total_it} buf_size={self.replay_buffer.size()}")
@@ -686,6 +698,27 @@ class TransformerDiscreteAgent:
                 f" | epsilon={self.epsilon:.4f}"
             )
             self.save_persistent()
+
+    # ──────────────────────────── lr warmup ────────────────────────────
+
+    def _apply_lr_warmup(self) -> None:
+        """Linear LR warmup，兩個 warmup 取較嚴格者：
+        - init warmup：以 total_it 為進度，第一次從頭訓練時生效
+        - resume warmup：以 steps_since_resume 為進度，每次啟動（含重啟）都會生效
+        最終 factor = min(init_factor, resume_factor)，所以重啟後雖然 total_it 已大，
+        resume warmup 仍會把 LR 從 LR_WARMUP_START_FACTOR×base_lr 線性拉回 base_lr。"""
+
+        def _factor_from(step: int, total: int) -> float:
+            if total <= 0:
+                return 1.0
+            progress = min(1.0, step / total)
+            return LR_WARMUP_START_FACTOR + (1.0 - LR_WARMUP_START_FACTOR) * progress
+
+        init_factor   = _factor_from(self.total_it,           LR_WARMUP_STEPS)
+        resume_factor = _factor_from(self.steps_since_resume, LR_RESUME_WARMUP_STEPS)
+        factor = min(init_factor, resume_factor)
+        for group, base_lr in zip(self.optimizer.param_groups, self._base_lrs):
+            group["lr"] = base_lr * factor
 
     def _save_model(self):
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
