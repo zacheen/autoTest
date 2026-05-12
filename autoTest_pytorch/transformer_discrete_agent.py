@@ -343,12 +343,13 @@ class TransformerDiscreteAgent:
         self._rolling_weight_reference = self._capture_trainable_weight_snapshot()
         self._rolling_weight_reference_step = self.total_it
 
-        # atexit order is LIFO — register tb close last so it runs first,
-        # before the file handles below.
+        # atexit order is LIFO. Desired run order: _save_model (which flushes
+        # tb) → save_persistent → close io_log → close tb_writer. So register
+        # closes first (run last) and saves last (run first).
+        atexit.register(self._close_tb_writer)
+        atexit.register(self._close_io_log)
         atexit.register(self.save_persistent)
         atexit.register(self._save_model)
-        atexit.register(self._close_io_log)
-        atexit.register(self._close_tb_writer)
 
     def clear_blocked_actions(self):
         self.blocked_actions.clear()
@@ -811,8 +812,6 @@ class TransformerDiscreteAgent:
             self.tb_writer.add_scalar(f"buffer/bucket_{bucket_name}", count, step)
         self.tb_writer.add_scalar("buffer/total_size", self.replay_buffer.size(), step)
 
-        self.tb_writer.flush()
-
         return {
             "Q_loss": loss.item(),
             "q_mean": q_mean,
@@ -994,6 +993,9 @@ class TransformerDiscreteAgent:
             group["lr"] = base_lr * factor
 
     def _save_model(self):
+        # Flush TB before saving — pair the on-disk model checkpoint with the
+        # matching TB scalars from this point in training.
+        self.tb_writer.flush()
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
         torch.save(self.backbone.state_dict(), TRANSFORMER_MODEL_PATH / "backbone.pth")
         torch.save(self.q_network.state_dict(), TRANSFORMER_MODEL_PATH / "fqf_network.pth")
