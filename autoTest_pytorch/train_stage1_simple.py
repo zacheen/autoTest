@@ -31,7 +31,7 @@ GRID_MINES = 4
 MAX_EPISODES = 100000
 MAX_STEPS_PER_EPISODE = 200
 LOG_INTERVAL = 50
-SAVE_INTERVAL = 300
+SAVE_DEMO_INTERVAL = 300
 
 # ---------- 評估參數 ----------
 EVAL_INTERVAL = 100
@@ -416,8 +416,7 @@ def main():
                       f"Speed: {eps_per_sec:.1f} ep/s | "
                       f"Epsilon: {agent.epsilon:.4f}")
 
-            if episode % SAVE_INTERVAL == 0:
-                agent._save_model()
+            if episode % SAVE_DEMO_INTERVAL == 0:
                 run_demo_at_save(logic, agent)
 
         # 訓練正常結束
@@ -438,10 +437,12 @@ def main():
         print(f"Avg Steps: {final_eval['avg_steps']:.1f}")
         print(f"Invalid Rate: {final_eval['avg_invalid_rate']:.2%}")
 
+        agent._save_model()
         agent.save_persistent()
 
     except KeyboardInterrupt:
         print("\n\n[!] Training interrupted")
+        agent._save_model()
         agent.save_persistent()
 
     finally:

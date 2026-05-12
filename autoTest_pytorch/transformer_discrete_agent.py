@@ -350,6 +350,7 @@ class TransformerDiscreteAgent:
         # atexit order is LIFO — register tb close last so it runs first,
         # before the file handles below.
         atexit.register(self.save_persistent)
+        atexit.register(self._save_model)
         atexit.register(self._close_io_log)
         atexit.register(self._close_tb_writer)
 
@@ -967,12 +968,12 @@ class TransformerDiscreteAgent:
         self.episode_count += 1
         decay_progress = min(self.episode_count / self.epsilon_decay_episodes, 1.0)
         self.epsilon = self.epsilon_min + (0.3 - self.epsilon_min) * (1.0 - decay_progress)
-        self._save_model()
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
             print(
                 f"[FQF] Periodic save at episode {self.episode_count}"
                 f" | epsilon={self.epsilon:.4f}"
             )
+            self._save_model()
             self.save_persistent()
 
     # ──────────────────────────── lr warmup ────────────────────────────
