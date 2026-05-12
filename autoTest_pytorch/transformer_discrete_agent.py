@@ -35,6 +35,7 @@ GRAD_CLIP_NORM = 1.0
 # Heavy diagnostics — log less frequently to avoid TensorBoard bloat / overhead.
 HISTOGRAM_EVERY = 200          # per-layer weight/grad norms
 WEIGHT_DISTANCE_LOG_EVERY = 100  # full-model weight snapshot distance
+DIAGNOSTIC_LOG_EVERY = 10      # io_log / TB scalars / no_grad diagnostic block
 
 # ── learning rate warmup ─────────────────────────────────────────────
 # Linear LR warmup over the first N optimizer steps (transformer 早期穩定)
@@ -557,8 +558,9 @@ class TransformerDiscreteAgent:
 
             # FQF distribution-health diagnostics (cheap, computed inside no_grad).
             with torch.no_grad():
-                fpn_norm_entropy = (entropy.mean() / math.log(NUM_FQF_FRACTIONS)).item()
-                fpn_tau_std = tau_hats.std(dim=1).mean().item()
+                # 留作 tensor,實際 .item() 在後面 diagnostic 階段跟其他 stats 一起 batch。
+                fpn_norm_entropy_t = entropy.mean() / math.log(NUM_FQF_FRACTIONS)
+                fpn_tau_std_t = tau_hats.std(dim=1).mean()
 
             if not torch.isfinite(loss):
                 raise RuntimeError(
@@ -678,28 +680,66 @@ class TransformerDiscreteAgent:
             log_unhandled_exception(f"train_step total_it={self.total_it}")
             raise
 
-        # Weight-drift snapshot (expensive — every WEIGHT_DISTANCE_LOG_EVERY).
-        weight_distance_log = None
-        if self.total_it % WEIGHT_DISTANCE_LOG_EVERY == 0:
-            current_snapshot = self._capture_trainable_weight_snapshot()
-            init_distance = self._snapshot_distance(current_snapshot, self._init_weight_reference)
-            rolling_distance = self._snapshot_distance(current_snapshot, self._rolling_weight_reference)
-            rolling_step_gap = self.total_it - self._rolling_weight_reference_step
-            weight_distance_log = {
-                "from_init": init_distance,
-                "from_prev_window": rolling_distance,
-                "prev_window_step": self._rolling_weight_reference_step,
-                "window_size": rolling_step_gap,
-            }
-            self._rolling_weight_reference = current_snapshot
-            self._rolling_weight_reference_step = self.total_it
-
         self.replay_buffer.update_priorities(per_indices, td_error.squeeze(-1).cpu().numpy())
 
         if self.total_it % TARGET_UPDATE_FREQ == 0:
             self.q_target.load_state_dict(self.q_network.state_dict())
 
+        # ── Weight-drift snapshot — independent gating ──
+        # 跟 DIAGNOSTIC_LOG_EVERY 解耦,可以設成任何值(不需要是 10 的倍數)。
+        # init_distance / rolling_distance 是 Python float(_snapshot_distance 內部已 .item()),
+        # 直接 add_scalar 不需要再 sync。
+        if self.total_it % WEIGHT_DISTANCE_LOG_EVERY == 0:
+            current_snapshot = self._capture_trainable_weight_snapshot()
+            init_distance = self._snapshot_distance(current_snapshot, self._init_weight_reference)
+            rolling_distance = self._snapshot_distance(current_snapshot, self._rolling_weight_reference)
+            self._rolling_weight_reference = current_snapshot
+            self._rolling_weight_reference_step = self.total_it
+            self.tb_writer.add_scalar("weights/delta_from_init", init_distance, self.total_it)
+            self.tb_writer.add_scalar("weights/delta_from_prev_window", rolling_distance, self.total_it)
+
+        # ── Diagnostic / logging — only every DIAGNOSTIC_LOG_EVERY steps ──
+        # 把 io_log / TB / no_grad stats 區塊降頻;其他 step 直接 return None,
+        # 省下 ~40 個隱式 GPU→CPU sync。
+        if self.total_it % DIAGNOSTIC_LOG_EVERY != 0:
+            return None
+
         with torch.no_grad():
+            # 把所有要拉的 scalar 合成一個 tensor、一次 .cpu() 搬回。
+            # 從 16 個 .item() (= 16 個 GPU→CPU sync) 變成 1 個 sync。
+            q0_flat = q_2d[0].view(-1)
+            _zero = torch.zeros((), device=loss.device, dtype=loss.dtype)
+            _stats = torch.stack([
+                loss,
+                q_taken.mean(),
+                q_taken.std() if q_taken.numel() > 1 else _zero,
+                q_2d.max(),
+                q_2d.min(),
+                q0_flat.min(),
+                q0_flat.max(),
+                target_quantiles.float().mean(),
+                target_quantiles.float().std() if target_quantiles.numel() > 1 else _zero,
+                td_error.mean(),
+                td_error.max(),
+                reward.float().mean(),
+                done.float().mean(),
+                entropy.mean(),
+                is_weights.float().mean(),
+                is_weights.float().max(),
+                fpn_norm_entropy_t,
+                fpn_tau_std_t,
+            ]).cpu().tolist()
+            (
+                loss_value, q_mean, q_taken_std, q_all_max, q_all_min,
+                q0_min, q0_max,
+                target_q_mean, target_q_std,
+                td_error_mean, td_error_max,
+                batch_reward_mean, batch_done_rate,
+                entropy_value, is_weight_mean, is_weight_max,
+                fpn_norm_entropy, fpn_tau_std,
+            ) = _stats
+
+            # 以下 .item() / .tolist() 留著 — 只在 diagnostic 步驟跑,成本可接受。
             reward_counts = defaultdict(int)
             for value in reward.squeeze(-1).tolist():
                 reward_counts[value] += 1
@@ -715,7 +755,6 @@ class TransformerDiscreteAgent:
                 if count > 0:
                     num_counts[ch - 2] = count
 
-            q0_flat = q_2d[0].view(-1)
             top5_vals, top5_flat = q0_flat.topk(5)
             top5_info = [
                 (idx.item() // self.grid_w, idx.item() % self.grid_w, f"{val.item():.4f}")
@@ -729,17 +768,6 @@ class TransformerDiscreteAgent:
             top3_actions = sorted(action_freq.items(), key=lambda item: -item[1])[:3]
             top3_str = ", ".join(f"({row},{col})x{count}" for (row, col), count in top3_actions)
 
-            q_mean = q_taken.mean().item()
-            q_taken_std = q_taken.std().item() if q_taken.numel() > 1 else 0.0
-            q_all_max = q_2d.max().item()
-            q_all_min = q_2d.min().item()
-            target_q_mean = target_quantiles.float().mean().item()
-            target_q_std = target_quantiles.float().std().item() if target_quantiles.numel() > 1 else 0.0
-            td_error_mean = td_error.mean().item()
-            td_error_max = td_error.max().item()
-            batch_reward_mean = reward.float().mean().item()
-            batch_done_rate = done.float().mean().item()
-
         self._io_log.write(
             f"[Step {self.total_it}] {datetime.datetime.now().strftime('%H:%M:%S')}\n"
             f"  State:  unrevealed={unrevealed} | revealed={revealed} | flagged={flagged}"
@@ -747,8 +775,8 @@ class TransformerDiscreteAgent:
             f"  Batch:  rewards={dict(reward_counts)} | top_actions=[{top3_str}]\n"
             f"  Q-top5: {top5_info}\n"
             f"  Q-val:  taken_mean={q_mean:.4f}"
-            f" | all: min={q0_flat.min().item():.4f} max={q0_flat.max().item():.4f}\n"
-            f"  FQF:    loss={loss.item():.4f} | tau_entropy={entropy.mean().item():.4f}"
+            f" | all: min={q0_min:.4f} max={q0_max:.4f}\n"
+            f"  FQF:    loss={loss_value:.4f} | tau_entropy={entropy_value:.4f}"
             f" | epsilon={self.epsilon:.4f}\n"
             f"  TD:     mean={td_error_mean:.4f} max={td_error_max:.4f} "
             f"frac_huber_clipped={frac_huber_clipped:.3f}\n"
@@ -758,9 +786,9 @@ class TransformerDiscreteAgent:
         )
         self._io_log.flush()
 
-        # ── TensorBoard scalars (cheap; logged every step) ──
+        # ── TensorBoard scalars ──
         step = self.total_it
-        self.tb_writer.add_scalar("train/Q_loss", loss.item(), step)
+        self.tb_writer.add_scalar("train/Q_loss", loss_value, step)
         self.tb_writer.add_scalar("train/q_mean", q_mean, step)
         self.tb_writer.add_scalar("train/q_taken_std", q_taken_std, step)
         self.tb_writer.add_scalar("train/q_max", q_all_max, step)
@@ -773,8 +801,6 @@ class TransformerDiscreteAgent:
         self.tb_writer.add_scalar("train/batch_reward_mean", batch_reward_mean, step)
         self.tb_writer.add_scalar("train/batch_done_rate", batch_done_rate, step)
         self.tb_writer.add_scalar("train/epsilon", self.epsilon, step)
-        # LR (after warmup) — useful to see when warmup ends and where the
-        # rise-then-fall pattern starts relative to the schedule.
         self.tb_writer.add_scalar("train/lr", self.optimizer.param_groups[0]["lr"], step)
         self.tb_writer.add_scalar("fpn/norm_entropy", fpn_norm_entropy, step)
         self.tb_writer.add_scalar("fpn/tau_std", fpn_tau_std, step)
@@ -788,17 +814,10 @@ class TransformerDiscreteAgent:
         self.tb_writer.add_scalar("grad_pre/head", head_pre, step)
         self.tb_writer.add_scalar("grad_post/backbone", backbone_post, step)
         self.tb_writer.add_scalar("grad_post/head", head_post, step)
-        # Extras (Stage 2 only — YOLO params). Always logged for symmetry;
-        # equals 0 when extra_params_to_clip is None.
         self.tb_writer.add_scalar("grad_pre/extras", extras_pre, step)
         self.tb_writer.add_scalar("grad_post/extras", extras_post, step)
-        # IS weights — to see if priorities are getting peaked.
-        self.tb_writer.add_scalar("train/is_weight_mean", is_weights.float().mean().item(), step)
-        self.tb_writer.add_scalar("train/is_weight_max", is_weights.float().max().item(), step)
-
-        if weight_distance_log is not None:
-            self.tb_writer.add_scalar("weights/delta_from_init", weight_distance_log["from_init"], step)
-            self.tb_writer.add_scalar("weights/delta_from_prev_window", weight_distance_log["from_prev_window"], step)
+        self.tb_writer.add_scalar("train/is_weight_mean", is_weight_mean, step)
+        self.tb_writer.add_scalar("train/is_weight_max", is_weight_max, step)
 
         # Per-layer weight/grad norms — collected pre-clip inside the try
         # block above; written here so we never leave orphan rows on a
@@ -813,7 +832,7 @@ class TransformerDiscreteAgent:
         self.tb_writer.add_scalar("buffer/total_size", self.replay_buffer.size(), step)
 
         return {
-            "Q_loss": loss.item(),
+            "Q_loss": loss_value,
             "q_mean": q_mean,
         }
 
