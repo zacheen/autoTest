@@ -34,8 +34,9 @@ LOG_INTERVAL = 50
 SAVE_DEMO_INTERVAL = 300
 
 # ---------- 評估參數 ----------
-EVAL_INTERVAL = 100
-EVAL_EPISODES = 50
+EVAL_INTERVAL = 200
+EVAL_EPISODES = 30
+EVAL_OFFSET = 50  # 第一次 eval 在 ep 50,之後每 EVAL_INTERVAL 一次:50, 250, 450...
 
 # ---------- 路徑 ----------
 TENSORBOARD_DIR = Path("./models/stage1_transformer/tensorboard")
@@ -366,7 +367,7 @@ def main():
             }
 
             # 評估
-            if episode % EVAL_INTERVAL == 0:
+            if episode >= EVAL_OFFSET and (episode - EVAL_OFFSET) % EVAL_INTERVAL == 0:
                 eval_stats = run_evaluation(logic, agent)
                 writer.add_scalar('eval/avg_reward', eval_stats['avg_reward'], episode)
                 writer.add_scalar('eval/win_rate', eval_stats['win_rate'], episode)
@@ -391,26 +392,16 @@ def main():
                 avg_reward = np.mean(recent_rewards)
                 win_rate = np.mean(recent_wins) * 100
                 avg_steps = np.mean(recent_steps)
-                train_greedy_stats = run_fixed_policy_evaluation(
-                    logic,
-                    agent,
-                    num_episodes=LOG_INTERVAL,
-                )
                 elapsed = time.time() - start_time
                 eps_per_sec = episode / elapsed
 
                 writer.add_scalar('train/avg_reward_50', avg_reward, episode)
                 writer.add_scalar('train/win_rate_50', win_rate, episode)
-                writer.add_scalar('train_greedy/avg_reward_50', train_greedy_stats['avg_reward'], episode)
-                writer.add_scalar('train_greedy/win_rate_50', train_greedy_stats['win_rate'], episode)
-                writer.add_scalar('train_greedy/avg_steps_50', train_greedy_stats['avg_steps'], episode)
-                writer.add_scalar('train_greedy/avg_invalid_rate_50', train_greedy_stats['avg_invalid_rate'], episode)
 
                 overall_wr = total_wins / episode * 100
                 print(f"[Ep {episode:>6d}] "
                       f"Avg Reward: {avg_reward:>7.2f} | "
                       f"Win Rate(50): {win_rate:>5.1f}% | "
-                      f"Train Greedy WR(50): {train_greedy_stats['win_rate']:>5.1f}% | "
                       f"Overall WR: {overall_wr:>5.1f}% | "
                       f"Total Wins: {total_wins} | "
                       f"Speed: {eps_per_sec:.1f} ep/s | "
