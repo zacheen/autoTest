@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import datetime
-import random
 import shutil
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -137,79 +135,19 @@ class VisualAgentCommonMixin:
         if buf.size_count == 0:
             return
 
-        reward_groups = defaultdict(list)
-        for idx in range(buf.size_count):
-            reward_groups[buf.index[idx].get("tail_reward", buf.index[idx]["reward"])].append(idx)
-
         target = min(self.save_capacity, buf.size_count)
-        selected_indices = []
-        remaining = target
-        groups = sorted(reward_groups.items(), key=lambda item: len(item[1]))
-        for group_idx, (_, indices) in enumerate(groups):
-            if group_idx == len(groups) - 1:
-                count = remaining
-            else:
-                count = round(len(indices) / buf.size_count * target)
-            count = min(count, len(indices), remaining)
-            selected_indices.extend(random.sample(indices, count))
-            remaining -= count
-            if remaining <= 0:
-                break
-
-        self.replay_persistent_path.mkdir(parents=True, exist_ok=True)
-        for file_path in self.replay_persistent_path.glob("*.pt"):
-            file_path.unlink()
-
-        persistent_index = []
-        save_idx = 0
-        for old_idx in selected_indices:
-            old_entry = buf.index[old_idx]
-            state_src = Path(old_entry["state"])
-            if not state_src.exists():
-                continue
-
-            state_dst = self.replay_persistent_path / f"state_{save_idx}.pt"
-            shutil.copy2(str(state_src), str(state_dst))
-
-            next_state_dst = None
-            if old_entry["next_state"]:
-                next_src = Path(old_entry["next_state"])
-                if next_src.exists():
-                    next_state_dst = self.replay_persistent_path / f"next_state_{save_idx}.pt"
-                    shutil.copy2(str(next_src), str(next_state_dst))
-
-            persistent_index.append({
-                "storage_id": save_idx,
-                "state": str(state_dst),
-                "action": old_entry["action"],
-                "next_state": str(next_state_dst) if next_state_dst else None,
-                "reward": old_entry["reward"],
-                "tail_reward": float(old_entry.get("tail_reward", old_entry["reward"])),
-                "done": old_entry["done"],
-                "discount": float(old_entry.get("discount", 1.0)),
-                "n_steps": int(old_entry.get("n_steps", 1)),
-                "priority": float(old_entry.get("priority", self.priority_min)),
-                "reward_type": old_entry.get(
-                    "reward_type",
-                    buf._reward_type(
-                        float(old_entry.get("tail_reward", old_entry["reward"])),
-                        bool(old_entry["done"]),
-                    ),
-                ),
-                "insert_order": save_idx + 1,
-            })
-            save_idx += 1
+        persistent_entries = buf.export_top_k(target, persistent_dir=self.replay_persistent_path)
 
         torch.save(
             {
-                "persistent_index": persistent_index,
+                "persistent_entries": persistent_entries,
                 "total_it": self.total_it,
                 "episode_count": self.episode_count,
                 "epsilon": self.epsilon,
             },
             self._training_state_path(),
         )
-        print(f"{self.log_prefix} Persistent save: {len(persistent_index)} entries")
+        print(f"{self.log_prefix} Persistent save: {len(persistent_entries)} entries")
 
     def _load_persistent_training_state(self) -> None:
         ts_path = self._training_state_path()
@@ -217,9 +155,11 @@ class VisualAgentCommonMixin:
             return
         try:
             state = torch.load(ts_path, map_location=self.device, weights_only=False)
-            persistent_index = state.get("persistent_index", [])
-            if persistent_index:
-                self._load_persistent_buffer(persistent_index)
+            # Read new unified key first; fall back to legacy "persistent_index"
+            # key so older save files keep loading.
+            persistent_entries = state.get("persistent_entries") or state.get("persistent_index", [])
+            if persistent_entries:
+                self._load_persistent_buffer(persistent_entries)
         except Exception as exc:
             message = f"MISSING/FAILED replay/training checkpoint: {ts_path} | error={exc}"
             if hasattr(self, "_log_checkpoint_message"):
@@ -227,14 +167,14 @@ class VisualAgentCommonMixin:
             else:
                 print(f"{self.log_prefix} {message}")
 
-    def _load_persistent_buffer(self, persistent_index) -> None:
+    def _load_persistent_buffer(self, persistent_entries) -> None:
         self.replay_path.mkdir(parents=True, exist_ok=True)
         for file_path in self.replay_path.glob("*.pt"):
             file_path.unlink()
 
         loaded_count = 0
         self.replay_buffer.index = []
-        for entry in persistent_index[: self.replay_buffer.max_size]:
+        for entry in persistent_entries[: self.replay_buffer.max_size]:
             state_src_str = entry.get("state", entry.get("state_path"))
             if state_src_str is None:
                 continue

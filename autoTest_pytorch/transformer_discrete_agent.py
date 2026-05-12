@@ -1036,22 +1036,12 @@ class TransformerDiscreteAgent:
         if total == 0:
             return
 
-        all_entries = buf.get_all_entries()
-        
-        # Sort by priority locally to do Top-K before saving
-        all_entries_sorted = sorted(
-            all_entries, 
-            key=lambda e: buf._effective_priority(e), 
-            reverse=True
-        )
-        
-        if len(all_entries_sorted) > SAVE_CAPACITY:
-            all_entries_sorted = all_entries_sorted[:SAVE_CAPACITY]
+        selected_entries = buf.export_top_k(min(SAVE_CAPACITY, total))
 
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
-                "persistent_entries": all_entries_sorted,
+                "persistent_entries": selected_entries,
                 "total_it": self.total_it,
                 "episode_count": self.episode_count,
             },
@@ -1060,11 +1050,11 @@ class TransformerDiscreteAgent:
 
         saved_rewards = defaultdict(int)
         saved_buckets = defaultdict(int)
-        for entry in all_entries_sorted:
+        for entry in selected_entries:
             saved_rewards[entry.get("tail_reward", entry["reward"])] += 1
             saved_buckets[entry["reward_type"]] += 1
         print("--- save info ---------------")
-        print(f"[FQF] Persistent save: {len(all_entries_sorted)} entries")
+        print(f"[FQF] Persistent save: {len(selected_entries)} entries")
         print(f"[FQF] Tail reward distribution: {dict(saved_rewards)}")
         print(f"[FQF] Reward bucket distribution: {dict(saved_buckets)}")
         print("--- save end ---------------")

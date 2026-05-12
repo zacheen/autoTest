@@ -26,7 +26,7 @@ import hashlib
 import math
 import random
 import shutil
-from collections import defaultdict, deque
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -897,86 +897,6 @@ class VisualAgentV3(VisualAgentCommonMixin):
         torch.save(self.q_network.state_dict(), VISUAL_V3_MODEL_PATH / "fqf_network.pth")
         torch.save(self.q_target.state_dict(),  VISUAL_V3_MODEL_PATH / "fqf_target.pth")
         self._save_optimizer_state()
-
-    def save_persistent(self) -> None:
-        buf = self.replay_buffer
-        if buf.size_count == 0:
-            return
-
-        reward_groups = defaultdict(list)
-        for idx in range(buf.size_count):
-            reward_groups[buf.index[idx].get("tail_reward", buf.index[idx]["reward"])].append(idx)
-
-        target = min(VISUAL_SAVE_CAPACITY, buf.size_count)
-        selected_indices = []
-        remaining = target
-        groups = sorted(reward_groups.items(), key=lambda item: len(item[1]))
-        for group_idx, (_, indices) in enumerate(groups):
-            if group_idx == len(groups) - 1:
-                count = remaining
-            else:
-                count = round(len(indices) / buf.size_count * target)
-            count = min(count, len(indices), remaining)
-            selected_indices.extend(random.sample(indices, count))
-            remaining -= count
-            if remaining <= 0:
-                break
-
-        VISUAL_V3_REPLAY_PERSISTENT_PATH.mkdir(parents=True, exist_ok=True)
-        for file_path in VISUAL_V3_REPLAY_PERSISTENT_PATH.glob("*.pt"):
-            file_path.unlink()
-
-        persistent_index = []
-        save_idx = 0
-        for old_idx in selected_indices:
-            old_entry = buf.index[old_idx]
-
-            state_src = Path(old_entry["state"])
-            if not state_src.exists():
-                continue
-
-            state_dst = VISUAL_V3_REPLAY_PERSISTENT_PATH / f"state_{save_idx}.pt"
-            shutil.copy2(str(state_src), str(state_dst))
-
-            next_state_dst = None
-            if old_entry["next_state"]:
-                next_src = Path(old_entry["next_state"])
-                if next_src.exists():
-                    next_state_dst = VISUAL_V3_REPLAY_PERSISTENT_PATH / f"next_state_{save_idx}.pt"
-                    shutil.copy2(str(next_src), str(next_state_dst))
-
-            persistent_index.append({
-                "storage_id": save_idx,
-                "state": str(state_dst),
-                "action": old_entry["action"],
-                "next_state": str(next_state_dst) if next_state_dst else None,
-                "reward": old_entry["reward"],
-                "tail_reward": float(old_entry.get("tail_reward", old_entry["reward"])),
-                "done": old_entry["done"],
-                "discount": float(old_entry.get("discount", 1.0)),
-                "n_steps": int(old_entry.get("n_steps", 1)),
-                "priority": float(old_entry.get("priority", VISUAL_PRIORITY_MIN)),
-                "reward_type": old_entry.get(
-                    "reward_type",
-                    buf._reward_type(
-                        float(old_entry.get("tail_reward", old_entry["reward"])),
-                        bool(old_entry["done"]),
-                    ),
-                ),
-                "insert_order": save_idx + 1,
-            })
-            save_idx += 1
-
-        torch.save(
-            {
-                "persistent_index": persistent_index,
-                "total_it": self.total_it,
-                "episode_count": self.episode_count,
-                "epsilon": self.epsilon,
-            },
-            VISUAL_V3_MODEL_PATH / "training_state.pth",
-        )
-        print(f"[V3] Persistent save: {len(persistent_index)} entries")
 
     def _log_checkpoint_message(self, message: str, *, warning: bool = False) -> None:
         prefix = "[V3 CHECKPOINT]"

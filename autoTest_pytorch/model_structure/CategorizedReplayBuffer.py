@@ -165,38 +165,127 @@ class CategorizedReplayBuffer:
         aged_priority = base_priority / (1.0 + self.age_decay * age)
         return aged_priority
 
+    def top_k_balanced(self, k):
+        """Select up to ``k`` entries with bucket balance + priority ranking.
+
+        1. Each ``reward_type`` bucket keeps top ``k // len(REWARD_TYPES)``
+           entries by ``_effective_priority``.
+        2. Remaining slots are filled from cross-bucket leftovers, again
+           ranked by ``_effective_priority``.
+
+        Pure function: does NOT mutate ``self.index`` or touch disk files.
+        Returns a list of entry-dict references (aliases into ``self.index``).
+        Returned length is ``min(k, size_count)``; may be smaller if some
+        buckets are empty AND there aren't enough leftovers to backfill.
+        """
+        if k <= 0 or self.size_count == 0:
+            return []
+        if k >= self.size_count:
+            return list(self.index)
+
+        bucket_quota = max(1, k // len(self.REWARD_TYPES))
+        grouped_entries = {reward_type: [] for reward_type in self.REWARD_TYPES}
+        for entry in self.index:
+            grouped_entries.setdefault(entry["reward_type"], []).append(entry)
+
+        survivors = []
+        leftovers = []
+        for reward_type in self.REWARD_TYPES:
+            entries = grouped_entries.get(reward_type, [])
+            entries.sort(key=self._effective_priority, reverse=True)
+            survivors.extend(entries[:bucket_quota])
+            leftovers.extend(entries[bucket_quota:])
+
+        remaining_slots = max(0, k - len(survivors))
+        if remaining_slots > 0 and leftovers:
+            leftovers.sort(key=self._effective_priority, reverse=True)
+            survivors.extend(leftovers[:remaining_slots])
+
+        return survivors[:k]
+
+    def export_top_k(self, k, persistent_dir=None):
+        """Pick top-k balanced entries ready for serialization.
+
+        RAM mode (``storage_mode == "ram"``):
+            ``persistent_dir`` must be ``None``. Returns the entry-dict
+            references directly — their ``state`` / ``next_state`` are
+            in-memory tensors.
+
+        Disk mode (``storage_mode == "disk"``):
+            ``persistent_dir`` must be a path. The directory is created if
+            missing and cleared of stale ``.pt`` files, then each selected
+            entry's state / next_state file is copied in with fresh
+            ``storage_id`` numbering. Returns NEW entry dicts whose
+            ``state`` / ``next_state`` paths point inside ``persistent_dir``.
+
+        Raises:
+            ValueError: if ``storage_mode`` and ``persistent_dir`` don't match.
+        """
+        if self.storage_mode == "ram":
+            if persistent_dir is not None:
+                raise ValueError("RAM-mode buffer must not be given persistent_dir")
+            return self.top_k_balanced(k)
+
+        if persistent_dir is None:
+            raise ValueError("Disk-mode buffer requires persistent_dir for export")
+
+        persistent_dir = Path(persistent_dir)
+        persistent_dir.mkdir(parents=True, exist_ok=True)
+        for stale_path in persistent_dir.glob("*.pt"):
+            stale_path.unlink()
+
+        selected = self.top_k_balanced(k)
+        exported = []
+        save_idx = 0
+        for old_entry in selected:
+            state_src = Path(old_entry["state"])
+            if not state_src.exists():
+                continue
+
+            state_dst = persistent_dir / f"state_{save_idx}.pt"
+            shutil.copy2(str(state_src), str(state_dst))
+
+            next_state_dst = None
+            if old_entry["next_state"]:
+                next_src = Path(old_entry["next_state"])
+                if next_src.exists():
+                    next_state_dst = persistent_dir / f"next_state_{save_idx}.pt"
+                    shutil.copy2(str(next_src), str(next_state_dst))
+
+            exported.append({
+                "storage_id": save_idx,
+                "state": str(state_dst),
+                "action": old_entry["action"],
+                "next_state": str(next_state_dst) if next_state_dst else None,
+                "reward": old_entry["reward"],
+                "tail_reward": float(old_entry.get("tail_reward", old_entry["reward"])),
+                "done": old_entry["done"],
+                "discount": float(old_entry.get("discount", 1.0)),
+                "n_steps": int(old_entry.get("n_steps", 1)),
+                "priority": float(old_entry.get("priority", self.priority_min)),
+                "reward_type": old_entry.get(
+                    "reward_type",
+                    self._reward_type(
+                        float(old_entry.get("tail_reward", old_entry["reward"])),
+                        bool(old_entry["done"]),
+                    ),
+                ),
+                "insert_order": save_idx + 1,
+            })
+            save_idx += 1
+
+        return exported
+
     def _prune_if_needed(self):
         """Reduce buffer size to max capacity by removing lowest priority entries across buckets."""
         if self.size_count <= self.max_size + self.overflow_margin:
             return
 
-        bucket_quota = max(1, self.max_size // len(self.REWARD_TYPES))
-        grouped_entries = {reward_type: [] for reward_type in self.REWARD_TYPES}
-        for entry in self.index:
-            grouped_entries.setdefault(entry["reward_type"], []).append(entry)
-
-        selected_ids = set()
-        survivors = []
-        leftovers = []
-
-        for reward_type in self.REWARD_TYPES:
-            entries = grouped_entries.get(reward_type, [])
-            entries.sort(key=self._effective_priority, reverse=True)
-            keep = entries[:bucket_quota]
-            spill = entries[bucket_quota:]
-            survivors.extend(keep)
-            selected_ids.update(entry["storage_id"] for entry in keep)
-            leftovers.extend(spill)
-
-        remaining_slots = max(0, self.max_size - len(survivors))
-        if remaining_slots > 0 and leftovers:
-            leftovers.sort(key=self._effective_priority, reverse=True)
-            extra = leftovers[:remaining_slots]
-            survivors.extend(extra)
-            selected_ids.update(entry["storage_id"] for entry in extra)
+        survivors = self.top_k_balanced(self.max_size)
+        selected_ids = {entry["storage_id"] for entry in survivors}
 
         old_entries = self.index
-        self.index = survivors[:self.max_size]
+        self.index = survivors
         self.size_count = len(self.index)
 
         # Cleanup deleted elements
