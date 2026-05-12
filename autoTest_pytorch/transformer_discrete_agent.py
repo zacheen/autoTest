@@ -50,19 +50,15 @@ TRANSFORMER_NUM_LAYERS = 4
 TRANSFORMER_FF_DIM = 256
 TRANSFORMER_DROPOUT = 0.1
 
-# ── CUDA SDP backend (v3 經驗) ──────────────────────────────────────────
-# PyTorch 2.x 在某些 CUDA / GPU 組合上，nn.TransformerEncoderLayer 走 flash 或
-# mem-efficient SDP kernel 會丟 "illegal instruction"。math backend 慢但穩。
+# ── CUDA SDP backend ──────────────────────────────────────────────────
+# mem-efficient SDP kernel 在某些 CUDA / GPU 組合上會丟 "illegal instruction"。
+# flash / math 用 PyTorch 預設（皆 enabled）。
 if device.type == "cuda":
     try:
-        if hasattr(torch.backends.cuda, "enable_flash_sdp"):
-            torch.backends.cuda.enable_flash_sdp(False)
         if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
             torch.backends.cuda.enable_mem_efficient_sdp(False)
-        if hasattr(torch.backends.cuda, "enable_math_sdp"):
-            torch.backends.cuda.enable_math_sdp(True)
     except Exception:
-        pass  # 失敗就讓 PyTorch 用預設值，不噴 CMD（之後若有 logger 會記錄訓練錯誤）
+        pass
 
 # ── debug logger (寫到檔案，不噴 CMD；DEBUG_CUDA_SAMPLE=True 才會啟用) ──
 # True 時會插入 cuda.synchronize + 寫 log，會拖慢訓練；只在除錯 CUDA error 時開。
