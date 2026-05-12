@@ -340,12 +340,12 @@ def main():
             # `train/Q_loss` / `train/q_mean` tag names; the agent already
             # writes those per gradient step (different step axis) — sharing
             # the tag corrupts the curves with two interleaved step counters.
-            writer.add_scalar('episode/reward', stats['reward'], episode)
-            writer.add_scalar('episode/steps', stats['steps'], episode)
-            writer.add_scalar('episode/invalid_rate', stats['invalid_rate'], episode)
+            writer.add_scalar('episode/reward', stats['reward'], agent.episode_count)
+            writer.add_scalar('episode/steps', stats['steps'], agent.episode_count)
+            writer.add_scalar('episode/invalid_rate', stats['invalid_rate'], agent.episode_count)
             if stats['Q_loss'] is not None:
-                writer.add_scalar('episode/Q_loss_avg', stats['Q_loss'], episode)
-                writer.add_scalar('episode/q_mean_avg', stats['q_mean'], episode)
+                writer.add_scalar('episode/Q_loss_avg', stats['Q_loss'], agent.episode_count)
+                writer.add_scalar('episode/q_mean_avg', stats['q_mean'], agent.episode_count)
 
             # CSV
             csv_row = {
@@ -369,10 +369,10 @@ def main():
             # 評估
             if episode >= EVAL_OFFSET and (episode - EVAL_OFFSET) % EVAL_INTERVAL == 0:
                 eval_stats = run_evaluation(logic, agent)
-                writer.add_scalar('eval/avg_reward', eval_stats['avg_reward'], episode)
-                writer.add_scalar('eval/win_rate', eval_stats['win_rate'], episode)
-                writer.add_scalar('eval/avg_steps', eval_stats['avg_steps'], episode)
-                writer.add_scalar('eval/avg_invalid_rate', eval_stats['avg_invalid_rate'], episode)
+                writer.add_scalar('eval/avg_reward', eval_stats['avg_reward'], agent.episode_count)
+                writer.add_scalar('eval/win_rate', eval_stats['win_rate'], agent.episode_count)
+                writer.add_scalar('eval/avg_steps', eval_stats['avg_steps'], agent.episode_count)
+                writer.add_scalar('eval/avg_invalid_rate', eval_stats['avg_invalid_rate'], agent.episode_count)
 
                 csv_row['eval_avg_reward'] = f"{eval_stats['avg_reward']:.2f}"
                 csv_row['eval_win_rate'] = f"{eval_stats['win_rate']:.1f}"
@@ -395,8 +395,8 @@ def main():
                 elapsed = time.time() - start_time
                 eps_per_sec = episode / elapsed
 
-                writer.add_scalar('train/avg_reward_50', avg_reward, episode)
-                writer.add_scalar('train/win_rate_50', win_rate, episode)
+                writer.add_scalar('train/avg_reward_50', avg_reward, agent.episode_count)
+                writer.add_scalar('train/win_rate_50', win_rate, agent.episode_count)
 
                 overall_wr = total_wins / episode * 100
                 print(f"[Ep {episode:>6d}] "
