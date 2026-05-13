@@ -726,6 +726,10 @@ class TransformerDiscreteAgent:
             grad_post_total = (backbone_post ** 2 + head_post ** 2 + extras_post_sq) ** 0.5
 
             _dbg("[train_step] after clip_grad_norm_")
+            # Pre-step v-clamp:HW bit flip 把 v 翻成負 → sqrt(neg)=NaN → 下一步 weight=NaN。
+            # 在 optimizer.step() 之前 clamp,讓 Adam 永遠看到 v >= 0 的 invariant。
+            # 命中時詳細寫到 stdout / io_log / vclamp_events.log / TB,事後 grep 統計頻率。
+            self._clamp_optimizer_v_and_log()
             _dbg("[train_step] before optimizer.step")
             self.optimizer.step()
             _dbg("[train_step] after optimizer.step")
@@ -1015,6 +1019,94 @@ class TransformerDiscreteAgent:
                     neg_n = int((val < 0).sum().item())
                     bad.append((f"{label}.state[{pid}].{key}", f"negative={neg_n} (math-impossible)"))
         return bad
+
+    def _clamp_optimizer_v_and_log(self):
+        """Pre-step belt-and-suspenders:Adam 的 exp_avg_sq(v)若有負值就 in-place clamp。
+
+        動機:v 數學上恆 >= 0(β2·v_old + (1-β2)·grad²,兩項都非負)。若觀察到負值,
+              壓倒性是 consumer GPU 沒 ECC 的 VRAM transient bit flip(本案就是 sign-bit
+              翻轉:-5.66e-7 vs |v|.max()=9.03e-7 同數量級)。若不清掉,AdamW 下一步
+              算 sqrt(negative)=NaN,接著把 weight 寫成 NaN,就是 stage 7 攔到的爆點。
+
+        Self-healing(不 raise) — 把 HW transient 變成可繼續訓練的小事件;但每次命中
+        詳細寫四個地方,長期 grep 可以建出頻率/位置分布:
+          - stdout (訓練 console 立刻可見)
+          - self._io_log (跟其他 step 的 diagnostic 混在一起,容易對時間軸)
+          - models/stage1_transformer/vclamp_events.log (專屬 event log,好 grep)
+          - TensorBoard (vclamp/elements_this_step / elements_total / params_this_step)
+
+        命中位置會同步把 paired exp_avg(m)歸零,避免被汙染的 momentum 殘留繼續
+        把剛 reset 的 weight element 推向奇怪方向。
+        """
+        detections = []
+        # 用 named_parameters 是為了拿 human-readable 名稱寫 log
+        # (optimizer.state 的 key 是 param 物件本身,沒名字)
+        for source_name, module in (("backbone", self.backbone), ("q_network", self.q_network)):
+            for pname, p in module.named_parameters():
+                st = self.optimizer.state.get(p)
+                if st is None:
+                    continue
+                v = st.get("exp_avg_sq")
+                if not isinstance(v, torch.Tensor) or not v.dtype.is_floating_point:
+                    continue
+                neg_mask = v < 0
+                if not bool(neg_mask.any().item()):
+                    continue
+                neg_n = int(neg_mask.sum().item())
+                # 最多取 5 個位置 + 數值寫 log,避免大規模 corruption 時 log 爆炸
+                sample_pos = neg_mask.nonzero(as_tuple=False)[:5].tolist()
+                sample_vals = v[neg_mask][:5].tolist()
+                full_name = f"{source_name}.{pname}"
+                detections.append((full_name, tuple(v.shape), neg_n, sample_pos, sample_vals))
+                # In-place clamp v >= 0
+                v.clamp_(min=0)
+                # 同位置清 m
+                m = st.get("exp_avg")
+                if isinstance(m, torch.Tensor) and m.shape == v.shape:
+                    m[neg_mask] = 0.0
+
+        if not detections:
+            return
+
+        total = sum(d[2] for d in detections)
+        header = (
+            f"[vclamp] step={self.total_it} caught {len(detections)} param(s),"
+            f" {total} negative-v element(s) -- clamped to 0 (+ paired m zeroed)"
+        )
+        lines = [header]
+        for full_name, shape, neg_n, sample_pos, sample_vals in detections:
+            sample = ", ".join(
+                f"@{tuple(pos)}={val:.4e}" for pos, val in zip(sample_pos, sample_vals)
+            )
+            lines.append(
+                f"[vclamp]   {full_name} shape={shape} neg_count={neg_n} sample=[{sample}]"
+            )
+
+        # 1) stdout — 訓練 console 立刻看到
+        for line in lines:
+            print(line)
+        # 2) io_log — 跟訓練的 step diagnostic 混在一起對時間軸
+        try:
+            self._io_log.write("\n".join(lines) + "\n")
+            self._io_log.flush()
+        except Exception:
+            pass
+        # 3) 專屬 event log — 長期統計頻率/位置分布
+        try:
+            with (TRANSFORMER_MODEL_PATH / "vclamp_events.log").open("a", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        except Exception:
+            pass
+        # 4) TensorBoard — 視覺化命中時間軸
+        if not hasattr(self, "_vclamp_total"):
+            self._vclamp_total = 0
+        self._vclamp_total += total
+        try:
+            self.tb_writer.add_scalar("vclamp/elements_this_step", total, self.total_it)
+            self.tb_writer.add_scalar("vclamp/elements_total", self._vclamp_total, self.total_it)
+            self.tb_writer.add_scalar("vclamp/params_this_step", len(detections), self.total_it)
+        except Exception:
+            pass
 
     def _module_grad_norm(self, module):
         """L2 norm of all gradients inside a module (post-backward, pre-clip)."""
