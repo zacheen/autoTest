@@ -493,6 +493,13 @@ class TransformerDiscreteAgent:
             _dbg_tensor("train_step.is_weights", is_weights)
             _dbg_tensor("train_step.discounts",  discounts)
 
+            # Stage 0: buffer sample — 命中代表 replay buffer 內容已壞(load 或 store 路徑)
+            self._assert_finite("stage0_sample", "state", state)
+            self._assert_finite("stage0_sample", "next_state", next_state)
+            self._assert_finite("stage0_sample", "reward", reward)
+            self._assert_finite("stage0_sample", "is_weights", is_weights)
+            self._assert_finite("stage0_sample", "discounts", discounts)
+
             action = action.long()
             row_idx = action[:, 0]
             col_idx = action[:, 1]
@@ -515,6 +522,10 @@ class TransformerDiscreteAgent:
                 next_features = self.backbone.get_features(next_proc)
                 _dbg_tensor("train_step.next_features", next_features)
                 _dbg("[train_step] after next backbone")
+                # Stage 1a: backbone forward on next_state — 命中代表 backbone weights 或
+                #           next_state 已壞;這條也是訓練中最早能偵測到 backbone 損毀的點
+                self._assert_finite("stage1a_target_backbone", "next_features", next_features)
+
                 next_online = self.q_network(next_features)
                 next_q_2d = next_online["q_values"]
                 _dbg_tensor("train_step.next_online.q_values", next_q_2d)
@@ -528,18 +539,28 @@ class TransformerDiscreteAgent:
                 next_target = self.q_target(next_features)
                 _dbg_tensor("train_step.next_target.quantiles", next_target["quantiles"])
                 _dbg("[train_step] after q_target")
+                # Stage 1b: q_target forward — 命中代表 q_target weights 已壞
+                self._assert_finite("stage1b_q_target", "next_target.quantiles", next_target["quantiles"])
+
                 next_target_quantiles = next_target["quantiles"][
                     torch.arange(batch_size, device=device), best_flat
                 ]
                 _dbg_tensor("train_step.next_target_quantiles", next_target_quantiles)
                 target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
                 _dbg_tensor("train_step.target_quantiles", target_quantiles)
+                # Stage 1c: target_quantiles 算完 — 命中代表 reward / discounts / done 異常
+                #           (如果 next_target_quantiles 在 stage1b 是 finite 的話)
+                self._assert_finite("stage1c_target_combine", "target_quantiles", target_quantiles)
             _dbg("[train_step] target branch done")
 
             _dbg("[train_step] before current backbone")
             features = self.backbone.get_features(state)
             _dbg_tensor("train_step.features", features)
             _dbg("[train_step] after current backbone")
+            # Stage 2: current backbone forward — 命中代表 backbone weights 或 state 已壞
+            #          (跟 stage1a 互相對照,可以判斷壞的是 backbone 還是 state)
+            self._assert_finite("stage2_current_backbone", "features", features)
+
             q_output = self.q_network(features)
             q_2d = q_output["q_values"]
             q_quantiles = q_output["quantiles"]
@@ -549,6 +570,15 @@ class TransformerDiscreteAgent:
             _dbg_tensor("train_step.q_quantiles", q_quantiles)
             _dbg_tensor("train_step.tau_hats", tau_hats)
             _dbg_tensor("train_step.fraction_probs", fraction_probs)
+            # Stage 3: q_network forward (FQF head 四個輸出分別檢)
+            #   - fraction_probs 壞 → fraction_proposal / softmax 入口問題
+            #   - tau_hats 壞     → cumsum / mean(基本上 follow fraction_probs)
+            #   - quantiles 壞    → cosine_embedding 或 value_head 問題
+            #   - q_values 壞     → 上面任一條
+            self._assert_finite("stage3_q_network", "fraction_probs", fraction_probs)
+            self._assert_finite("stage3_q_network", "tau_hats", tau_hats)
+            self._assert_finite("stage3_q_network", "quantiles", q_quantiles)
+            self._assert_finite("stage3_q_network", "q_values", q_2d)
             _dbg(f"[train_step] q_2d.shape={tuple(q_2d.shape)} q_quantiles.shape={tuple(q_quantiles.shape)}")
             q_taken = q_2d[
                 torch.arange(batch_size, device=device), row_idx, col_idx
@@ -569,7 +599,15 @@ class TransformerDiscreteAgent:
                 tau_hats=tau_hats.detach(),
                 return_stats=True,
             )
+            # Stage 4a: quantile huber loss — 命中通常代表 chosen_quantiles 或 target_quantiles
+            #            其中一個極端(如 td² overflow),內部 torch.where 雖能選 finite 分支,
+            #            但 backward 經 0×inf 仍會在 stage5 噴 NaN 到 grad
+            self._assert_finite("stage4a_quantile_loss", "per_sample_quantile_loss", per_sample_quantile_loss)
+
             entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
+            # Stage 4b: entropy — 命中代表 fraction_probs 含 NaN(stage3 應該先抓到)
+            self._assert_finite("stage4b_entropy", "entropy", entropy)
+
             per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy
             loss = (is_weights * per_sample_loss).mean()
             _dbg_tensor("train_step.loss", loss)
@@ -581,10 +619,13 @@ class TransformerDiscreteAgent:
                 fpn_norm_entropy_t = entropy.mean() / math.log(NUM_FQF_FRACTIONS)
                 fpn_tau_std_t = tau_hats.std(dim=1).mean()
 
+            # Stage 4c: 最終 loss — 既有的 NaN check,訊息升級成 stage tag 格式
             if not torch.isfinite(loss):
                 raise RuntimeError(
-                    f"Non-finite loss detected before backward: {loss.item()} "
-                    f"(quantile={per_sample_quantile_loss.mean().item()}, entropy={entropy.mean().item()})"
+                    f"[NaN-probe] non-finite at stage='stage4c_final_loss' tensor='loss' "
+                    f"step={self.total_it} value={loss.item()} "
+                    f"(quantile={per_sample_quantile_loss.mean().item()}, "
+                    f"entropy={entropy.mean().item()})"
                 )
 
             self.optimizer.zero_grad()
@@ -617,9 +658,17 @@ class TransformerDiscreteAgent:
             if extra_params_to_clip is not None:
                 all_params += list(extra_params_to_clip)
             _dbg("[train_step] before grad-finite check")
+            # Stage 5: backward 之後 — 命中代表 backward 路徑產生 NaN/Inf 梯度
+            #          常見原因:torch.where(td²) 在 td 過大時 backward 經 0×inf
             for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
                 if param.grad is not None and not torch.isfinite(param.grad).all():
-                    raise RuntimeError(f"Non-finite gradient detected in parameter: {name}")
+                    nan_n = int(torch.isnan(param.grad).sum().item())
+                    inf_n = int(torch.isinf(param.grad).sum().item())
+                    raise RuntimeError(
+                        f"[NaN-probe] non-finite at stage='stage5_post_backward' tensor='grad.{name}' "
+                        f"step={self.total_it} shape={tuple(param.grad.shape)} "
+                        f"nan={nan_n} inf={inf_n}"
+                    )
             _dbg("[train_step] after grad-finite check")
 
             # Pre-clip gradient norms — must be captured BEFORE clip_grad_norm_,
@@ -653,6 +702,18 @@ class TransformerDiscreteAgent:
             grad_clip_excess_norm = max(0.0, grad_norm_total_value - grad_clip_threshold)
             grad_clip_excess_ratio = grad_clip_excess_norm / (grad_clip_threshold + 1e-12)
 
+            # Stage 6: clip 之後再掃一次 grad — 抓 clip 內部 0×inf
+            #          (理論上 stage5 已先攔 inf,但 clip 自己 in-place 寫的也要驗一次)
+            for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
+                if param.grad is not None and not torch.isfinite(param.grad).all():
+                    nan_n = int(torch.isnan(param.grad).sum().item())
+                    inf_n = int(torch.isinf(param.grad).sum().item())
+                    raise RuntimeError(
+                        f"[NaN-probe] non-finite at stage='stage6_post_clip' tensor='grad.{name}' "
+                        f"step={self.total_it} shape={tuple(param.grad.shape)} "
+                        f"nan={nan_n} inf={inf_n}"
+                    )
+
             backbone_post = self._module_grad_norm(self.backbone)
             head_post = self._module_grad_norm(self.q_network)
             extras_post_sq = 0.0
@@ -669,6 +730,28 @@ class TransformerDiscreteAgent:
             self.optimizer.step()
             _dbg("[train_step] after optimizer.step")
             _dbg_mem("train_step after optimizer.step")
+
+            # Stage 7: optimizer.step 之後掃 weight — ★ 本次失敗最可能的源頭 ★
+            #          finite grad 進 AdamW 卻產生 NaN weight,常見原因:
+            #          (a) v 接近 denormal underflow → sqrt(v)+eps 異常小 → 巨大 update
+            #          (b) fused/non-fused kernel 罕見數值 edge case
+            #          (c) 硬體 transient bit flip(機率極低)
+            #          命中時:weight 已壞,但這一步的 grad / m / v 還在 optimizer state 裡,
+            #                  可以離線分析(crash 後 atexit 會把 optimizer state 寫到 .crash 檔)
+            for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
+                if not torch.isfinite(param.data).all():
+                    nan_n = int(torch.isnan(param.data).sum().item())
+                    inf_n = int(torch.isinf(param.data).sum().item())
+                    finite_mask = torch.isfinite(param.data)
+                    absmax = (
+                        float(param.data[finite_mask].abs().max().item())
+                        if finite_mask.any() else float("nan")
+                    )
+                    raise RuntimeError(
+                        f"[NaN-probe] non-finite at stage='stage7_post_step' tensor='weight.{name}' "
+                        f"step={self.total_it} shape={tuple(param.data.shape)} "
+                        f"nan={nan_n} inf={inf_n} finite_absmax={absmax:.4g}"
+                    )
         except Exception as exc:
             # ── 非 backward 區段的 CUDA crash（forward / loss / grad-check / clip / optimizer.step / 結尾 sync）──
             # tag 成 "non-backward CUDA crash" 方便和 backward 的 grep 區分，用來統計撞牆位置。
@@ -860,6 +943,49 @@ class TransformerDiscreteAgent:
         self.clear_blocked_actions()
 
     # ──────────────────────────── diagnostics helpers ──────────────────────
+
+    def _assert_finite(self, stage, name, tensor):
+        """訓練流程的 NaN/Inf probe:命中就 raise,訊息含 stage / tensor / step。
+
+        只檢 floating-point tensor — int/bool 用 isfinite 無意義。
+        每個 stage boundary 呼叫一次,GPU sync 開銷 ~50μs,可常駐。
+        """
+        if tensor is None:
+            return
+        if not tensor.dtype.is_floating_point:
+            return
+        if torch.isfinite(tensor).all():
+            return
+        nan_n = int(torch.isnan(tensor).sum().item())
+        inf_n = int(torch.isinf(tensor).sum().item())
+        finite_mask = torch.isfinite(tensor)
+        absmax = (
+            float(tensor[finite_mask].abs().max().item())
+            if finite_mask.any() else float("nan")
+        )
+        raise RuntimeError(
+            f"[NaN-probe] non-finite at stage='{stage}' tensor='{name}' "
+            f"step={self.total_it} shape={tuple(tensor.shape)} dtype={tensor.dtype} "
+            f"nan={nan_n} inf={inf_n} finite_absmax={absmax:.4g}"
+        )
+
+    def _scan_state_dict_finite(self, sd_label, state_dict):
+        """掃 state_dict 內所有 floating-point tensor,回傳 (key, nan, inf) 列表。
+
+        不 raise — caller 自己決定要 raise(load 路徑)還是改寫 .crash 檔(save 路徑)。
+        """
+        bad = []
+        for key, tensor in state_dict.items():
+            if not hasattr(tensor, "dtype"):
+                continue
+            if not tensor.dtype.is_floating_point:
+                continue
+            if torch.isfinite(tensor).all():
+                continue
+            nan_n = int(torch.isnan(tensor).sum().item())
+            inf_n = int(torch.isinf(tensor).sum().item())
+            bad.append((f"{sd_label}.{key}", nan_n, inf_n))
+        return bad
 
     def _module_grad_norm(self, module):
         """L2 norm of all gradients inside a module (post-backward, pre-clip)."""
@@ -1057,9 +1183,11 @@ class TransformerDiscreteAgent:
         # matching TB scalars from this point in training.
         self.tb_writer.flush()
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
-        torch.save(self.backbone.state_dict(), TRANSFORMER_MODEL_PATH / "backbone.pth")
-        torch.save(self.q_network.state_dict(), TRANSFORMER_MODEL_PATH / "fqf_network.pth")
-        torch.save(self.q_target.state_dict(), TRANSFORMER_MODEL_PATH / "fqf_target.pth")
+
+        backbone_sd = self.backbone.state_dict()
+        qnet_sd = self.q_network.state_dict()
+        qtarget_sd = self.q_target.state_dict()
+
         # AdaptiveEpsilonController.state_dict() 攤平成 epsilon / total_episodes
         # / total_wins / result_window 等 key，可在 load 時直接還原給 controller。
         payload = {
@@ -1069,7 +1197,33 @@ class TransformerDiscreteAgent:
             "algorithm": "FQF",
         }
         payload.update(self.epsilon_controller.state_dict())
-        torch.save(payload, TRANSFORMER_MODEL_PATH / "optimizer_state.pth")
+
+        # Save-time NaN probe:掃所有 state_dict,任一壞就拒絕 overwrite canonical 檔。
+        # 動機:atexit 在 NaN crash 後也會被 trigger,沒這層保護就會把磁碟上的好 checkpoint
+        #      蓋成壞的(就是失敗 run 把 1 個 NaN 寫進 backbone.pth 的那條路徑)。
+        bad = []
+        bad.extend(self._scan_state_dict_finite("backbone", backbone_sd))
+        bad.extend(self._scan_state_dict_finite("q_network", qnet_sd))
+        bad.extend(self._scan_state_dict_finite("q_target", qtarget_sd))
+
+        if bad:
+            suffix = f".crash_step{self.total_it}.pth"
+            print(f"[NaN-probe] _save_model: REFUSING to overwrite canonical checkpoints at step {self.total_it}")
+            print(f"[NaN-probe] non-finite tensors detected:")
+            for key, nan_n, inf_n in bad:
+                print(f"[NaN-probe]   {key} (nan={nan_n} inf={inf_n})")
+            torch.save(backbone_sd,  TRANSFORMER_MODEL_PATH / f"backbone{suffix}")
+            torch.save(qnet_sd,      TRANSFORMER_MODEL_PATH / f"fqf_network{suffix}")
+            torch.save(qtarget_sd,   TRANSFORMER_MODEL_PATH / f"fqf_target{suffix}")
+            torch.save(payload,      TRANSFORMER_MODEL_PATH / f"optimizer_state{suffix}")
+            print(f"[NaN-probe] wrote *{suffix} files for offline analysis;"
+                  f" canonical *.pth left untouched (last good state preserved)")
+            return
+
+        torch.save(backbone_sd, TRANSFORMER_MODEL_PATH / "backbone.pth")
+        torch.save(qnet_sd,     TRANSFORMER_MODEL_PATH / "fqf_network.pth")
+        torch.save(qtarget_sd,  TRANSFORMER_MODEL_PATH / "fqf_target.pth")
+        torch.save(payload,     TRANSFORMER_MODEL_PATH / "optimizer_state.pth")
 
     def save_persistent(self):
         buf = self.replay_buffer
@@ -1100,37 +1254,73 @@ class TransformerDiscreteAgent:
         print(f"[FQF] Reward bucket distribution: {dict(saved_buckets)}")
         print("--- save end ---------------")
 
+    def _raise_if_corrupt(self, label, path, state_dict):
+        """Load-time NaN probe — checkpoint 含 NaN/Inf 就 raise,阻止 silent resume。
+
+        將 raise 抽出來放到 try/except 之外,避免被原本「捕例外印 message 就吞掉」的
+        錯誤處理蓋掉。
+        """
+        bad = self._scan_state_dict_finite(label, state_dict)
+        if not bad:
+            return
+        lines = "\n".join(f"  {k} (nan={n} inf={i})" for k, n, i in bad)
+        raise RuntimeError(
+            f"[NaN-probe] disk checkpoint corrupt at {path}:\n{lines}\n"
+            f"Refusing to load. Options: (a) restore from a *.crash_step*.pth backup, "
+            f"(b) revert to an older checkpoint in git, (c) start training from scratch."
+        )
+
     def try_load_model(self):
         backbone_path = TRANSFORMER_MODEL_PATH / "backbone.pth"
         if backbone_path.exists():
+            backbone_state = None
             try:
                 backbone_state = torch.load(backbone_path, map_location=device, weights_only=True)
-                incompatible = self.backbone.load_backbone_state(backbone_state, strict=False)
-                print("[FQF] Loaded Backbone")
-                if incompatible.missing_keys:
-                    print(f"[FQF] Backbone missing keys: {incompatible.missing_keys}")
-                if incompatible.unexpected_keys:
-                    print(f"[FQF] Backbone unexpected keys: {incompatible.unexpected_keys}")
             except Exception as exc:
-                print(f"[FQF] Failed to load Backbone: {exc}")
+                print(f"[FQF] Failed to read Backbone: {exc}")
+            if backbone_state is not None:
+                self._raise_if_corrupt("backbone(disk)", backbone_path, backbone_state)
+                try:
+                    incompatible = self.backbone.load_backbone_state(backbone_state, strict=False)
+                    print("[FQF] Loaded Backbone")
+                    if incompatible.missing_keys:
+                        print(f"[FQF] Backbone missing keys: {incompatible.missing_keys}")
+                    if incompatible.unexpected_keys:
+                        print(f"[FQF] Backbone unexpected keys: {incompatible.unexpected_keys}")
+                except Exception as exc:
+                    print(f"[FQF] Failed to apply Backbone state: {exc}")
 
         q_path = TRANSFORMER_MODEL_PATH / "fqf_network.pth"
         if q_path.exists():
+            q_state = None
             try:
-                self.q_network.load_state_dict(torch.load(q_path, map_location=device, weights_only=True))
-                print("[FQF] Loaded FQF-Network")
+                q_state = torch.load(q_path, map_location=device, weights_only=True)
             except Exception as exc:
-                print(f"[FQF] Failed to load FQF-Network: {exc}")
+                print(f"[FQF] Failed to read FQF-Network: {exc}")
+            if q_state is not None:
+                self._raise_if_corrupt("q_network(disk)", q_path, q_state)
+                try:
+                    self.q_network.load_state_dict(q_state)
+                    print("[FQF] Loaded FQF-Network")
+                except Exception as exc:
+                    print(f"[FQF] Failed to apply FQF-Network state: {exc}")
         elif (TRANSFORMER_MODEL_PATH / "q_network.pth").exists():
             print("[FQF] Skip legacy q_network.pth because DDQN head shape is incompatible")
 
         q_target_path = TRANSFORMER_MODEL_PATH / "fqf_target.pth"
         if q_target_path.exists():
+            qt_state = None
             try:
-                self.q_target.load_state_dict(torch.load(q_target_path, map_location=device, weights_only=True))
-                print("[FQF] Loaded FQF-Target")
+                qt_state = torch.load(q_target_path, map_location=device, weights_only=True)
             except Exception as exc:
-                print(f"[FQF] Failed to load FQF-Target: {exc}")
+                print(f"[FQF] Failed to read FQF-Target: {exc}")
+            if qt_state is not None:
+                self._raise_if_corrupt("q_target(disk)", q_target_path, qt_state)
+                try:
+                    self.q_target.load_state_dict(qt_state)
+                    print("[FQF] Loaded FQF-Target")
+                except Exception as exc:
+                    print(f"[FQF] Failed to apply FQF-Target state: {exc}")
         elif (TRANSFORMER_MODEL_PATH / "q_target.pth").exists():
             print("[FQF] Skip legacy q_target.pth because DDQN head shape is incompatible")
 
