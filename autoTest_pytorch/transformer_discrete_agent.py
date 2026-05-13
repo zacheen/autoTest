@@ -970,7 +970,7 @@ class TransformerDiscreteAgent:
         )
 
     def _scan_state_dict_finite(self, sd_label, state_dict):
-        """掃 state_dict 內所有 floating-point tensor,回傳 (key, nan, inf) 列表。
+        """掃 state_dict 內所有 floating-point tensor,回傳 [(label, msg)] 列表。
 
         不 raise — caller 自己決定要 raise(load 路徑)還是改寫 .crash 檔(save 路徑)。
         """
@@ -984,7 +984,36 @@ class TransformerDiscreteAgent:
                 continue
             nan_n = int(torch.isnan(tensor).sum().item())
             inf_n = int(torch.isinf(tensor).sum().item())
-            bad.append((f"{sd_label}.{key}", nan_n, inf_n))
+            bad.append((f"{sd_label}.{key}", f"nan={nan_n} inf={inf_n}"))
+        return bad
+
+    def _scan_optimizer_state(self, label, opt_state_dict):
+        """掃 optimizer state_dict (nested: state[pid][key])。
+
+        檢查兩種異常:
+        (a) 任何 tensor 含 NaN/Inf
+        (b) exp_avg_sq < 0 — Adam 的 second moment 數學上不可能為負,出現必為
+            bit-level corruption(sign-bit flip 等),會讓 sqrt(v) 噴 NaN
+
+        回傳 [(label, message)] 列表。
+        """
+        bad = []
+        state = opt_state_dict.get("state", {}) if isinstance(opt_state_dict, dict) else {}
+        for pid, pstate in state.items():
+            if not isinstance(pstate, dict):
+                continue
+            for key, val in pstate.items():
+                if not isinstance(val, torch.Tensor):
+                    continue
+                if not val.dtype.is_floating_point:
+                    continue
+                if not torch.isfinite(val).all():
+                    nan_n = int(torch.isnan(val).sum().item())
+                    inf_n = int(torch.isinf(val).sum().item())
+                    bad.append((f"{label}.state[{pid}].{key}", f"nan={nan_n} inf={inf_n}"))
+                if key == "exp_avg_sq" and (val < 0).any().item():
+                    neg_n = int((val < 0).sum().item())
+                    bad.append((f"{label}.state[{pid}].{key}", f"negative={neg_n} (math-impossible)"))
         return bad
 
     def _module_grad_norm(self, module):
@@ -1201,17 +1230,19 @@ class TransformerDiscreteAgent:
         # Save-time NaN probe:掃所有 state_dict,任一壞就拒絕 overwrite canonical 檔。
         # 動機:atexit 在 NaN crash 後也會被 trigger,沒這層保護就會把磁碟上的好 checkpoint
         #      蓋成壞的(就是失敗 run 把 1 個 NaN 寫進 backbone.pth 的那條路徑)。
+        # 也掃 optimizer state — Adam 的 v 為負會在下次 load 後立刻引爆 NaN weight。
         bad = []
         bad.extend(self._scan_state_dict_finite("backbone", backbone_sd))
         bad.extend(self._scan_state_dict_finite("q_network", qnet_sd))
         bad.extend(self._scan_state_dict_finite("q_target", qtarget_sd))
+        bad.extend(self._scan_optimizer_state("optimizer", payload.get("optimizer", {})))
 
         if bad:
             suffix = f".crash_step{self.total_it}.pth"
             print(f"[NaN-probe] _save_model: REFUSING to overwrite canonical checkpoints at step {self.total_it}")
             print(f"[NaN-probe] non-finite tensors detected:")
-            for key, nan_n, inf_n in bad:
-                print(f"[NaN-probe]   {key} (nan={nan_n} inf={inf_n})")
+            for key, msg in bad:
+                print(f"[NaN-probe]   {key}: {msg}")
             torch.save(backbone_sd,  TRANSFORMER_MODEL_PATH / f"backbone{suffix}")
             torch.save(qnet_sd,      TRANSFORMER_MODEL_PATH / f"fqf_network{suffix}")
             torch.save(qtarget_sd,   TRANSFORMER_MODEL_PATH / f"fqf_target{suffix}")
@@ -1263,10 +1294,10 @@ class TransformerDiscreteAgent:
         bad = self._scan_state_dict_finite(label, state_dict)
         if not bad:
             return
-        lines = "\n".join(f"  {k} (nan={n} inf={i})" for k, n, i in bad)
+        lines = "\n".join(f"  {k}: {msg}" for k, msg in bad)
         raise RuntimeError(
             f"[NaN-probe] disk checkpoint corrupt at {path}:\n{lines}\n"
-            f"Refusing to load. Options: (a) restore from a *.crash_step*.pth backup, "
+            f"Refusing to load. Options: (a) run sanitize_checkpoint.py to clean, "
             f"(b) revert to an older checkpoint in git, (c) start training from scratch."
         )
 
@@ -1326,23 +1357,39 @@ class TransformerDiscreteAgent:
 
         opt_path = TRANSFORMER_MODEL_PATH / "optimizer_state.pth"
         if opt_path.exists():
+            opt_payload = None
             try:
-                state = torch.load(opt_path, map_location=device, weights_only=False)
-                self.optimizer.load_state_dict(state["optimizer"])
-                self.total_it = state["total_it"]
-                self.episode_count = state.get("episode_count", 0)
-                # 直接把整包 state 餵給 controller；它只挑自己認得的 key
-                # （epsilon / total_episodes / total_wins / result_window），
-                # 舊版只存 epsilon 也能用、新版補上 window 也能用。
-                self.epsilon_controller.load_state_dict(state, deque_cls=self.deque_cls)
-                print(
-                    f"[FQF] Loaded optimizer: total_it={self.total_it},"
-                    f" episode={self.episode_count}, epsilon={self.epsilon:.4f},"
-                    f" total_episodes={self.epsilon_controller.total_episodes},"
-                    f" wins={self.epsilon_controller.total_wins}"
-                )
+                opt_payload = torch.load(opt_path, map_location=device, weights_only=False)
             except Exception as exc:
-                print(f"[FQF] Failed to load optimizer state: {exc}")
+                print(f"[FQF] Failed to read optimizer state: {exc}")
+            if opt_payload is not None:
+                # Load-time probe for optimizer state — 掃 NaN/Inf 跟 exp_avg_sq < 0
+                # (本案就是後者:Adam 的 v 不能為負,出現必為 bit-level corruption,
+                #  會讓 AdamW 算 sqrt(negative)=NaN 後把 weight 寫壞)
+                bad = self._scan_optimizer_state("optimizer(disk)", opt_payload.get("optimizer", {}))
+                if bad:
+                    lines = "\n".join(f"  {k}: {msg}" for k, msg in bad)
+                    raise RuntimeError(
+                        f"[NaN-probe] disk optimizer state corrupt at {opt_path}:\n{lines}\n"
+                        f"Refusing to load. Run sanitize_checkpoint.py to clean,"
+                        f" or revert to an older checkpoint."
+                    )
+                try:
+                    self.optimizer.load_state_dict(opt_payload["optimizer"])
+                    self.total_it = opt_payload["total_it"]
+                    self.episode_count = opt_payload.get("episode_count", 0)
+                    # 直接把整包 state 餵給 controller；它只挑自己認得的 key
+                    # （epsilon / total_episodes / total_wins / result_window），
+                    # 舊版只存 epsilon 也能用、新版補上 window 也能用。
+                    self.epsilon_controller.load_state_dict(opt_payload, deque_cls=self.deque_cls)
+                    print(
+                        f"[FQF] Loaded optimizer: total_it={self.total_it},"
+                        f" episode={self.episode_count}, epsilon={self.epsilon:.4f},"
+                        f" total_episodes={self.epsilon_controller.total_episodes},"
+                        f" wins={self.epsilon_controller.total_wins}"
+                    )
+                except Exception as exc:
+                    print(f"[FQF] Failed to apply optimizer state: {exc}")
 
         training_state_path = TRANSFORMER_MODEL_PATH / "training_state.pth"
         if training_state_path.exists():
