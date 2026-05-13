@@ -71,8 +71,11 @@ _DBG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 _dbg_logger = _logging.getLogger("cuda_dbg.stage1")
 _dbg_logger.setLevel(_logging.DEBUG)
 _dbg_logger.propagate = False  # 不往 root logger 傳，避免 CMD 也印
+# Module-level handler:agent 還沒 instantiate 之前的 fallback 寫到 top-level。
+# delay=True 讓檔案只在真的有 emit 時才開出來(DEBUG_CUDA_SAMPLE=False + 沒 CUDA crash
+# 的情況下就不會留下空檔)。Agent __init__ 會把這個 handler 換成指到 archive dir 的。
 if not _dbg_logger.handlers:
-    _fh = _logging.FileHandler(_DBG_LOG_PATH, mode="a", encoding="utf-8")
+    _fh = _logging.FileHandler(_DBG_LOG_PATH, mode="a", encoding="utf-8", delay=True)
     _fh.setFormatter(_logging.Formatter("%(asctime)s %(message)s"))
     _dbg_logger.addHandler(_fh)
 
@@ -327,11 +330,31 @@ class TransformerDiscreteAgent:
         self.blocked_actions: set[int] = set()
 
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
-        self._io_log = open(TRANSFORMER_MODEL_PATH / "train_io_log.txt", "a", encoding="utf-8")
+
+        # Session / hour archive 目錄 ── 每次啟動一個 training_<ts>,每滿 1 hour 一個 hour_NN_<ts>。
+        # canonical *.pth 仍寫在 TRANSFORMER_MODEL_PATH 頂層(try_load_model 直接讀),
+        # 同時把同一份快照寫到 current_archive_dir,把當下時段的 logs 也都導到那邊去。
+        self._session_start = datetime.datetime.now()
+        self._session_timestamp = self._session_start.strftime("%Y%m%d_%H%M%S")
+        self.session_dir = TRANSFORMER_MODEL_PATH / f"training_{self._session_timestamp}"
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        self._hour_index = 0
+        self._hour_start = self._session_start
+        self.current_archive_dir = self._make_hour_dir(self._hour_index, self._session_start)
+        self.current_archive_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[FQF] Session archive: {self.session_dir}")
+        print(f"[FQF] Current hour:    {self.current_archive_dir}")
+
+        self._io_log = open(self.current_archive_dir / "train_io_log.txt", "a", encoding="utf-8")
         self._io_log.write(f"\n{'=' * 60}\n")
-        self._io_log.write(f"Session started: {datetime.datetime.now().isoformat()}\n")
+        self._io_log.write(f"Session started: {self._session_start.isoformat()}\n")
+        self._io_log.write(f"Hour 00 started: {self._session_start.isoformat()}\n")
         self._io_log.write(f"{'=' * 60}\n")
         self._io_log.flush()
+
+        # cuda_debug.log 也跟著 archive dir 走(module-level handler 預設指向 top-level,
+        # 在這裡 swap 成 current_archive_dir 的版本)
+        self._update_dbg_logger_path(self.current_archive_dir / "cuda_debug.log")
 
         # TensorBoard — own log_dir keyed by session timestamp, so the
         # training script (train_stage1_simple.py) can reuse it instead of
@@ -472,6 +495,8 @@ class TransformerDiscreteAgent:
         self.total_it += 1
         self.steps_since_resume += 1
         self._apply_lr_warmup()
+        # Wall-clock 滿 1 小時翻頁;io_log / vclamp / save 都會自動跟著新的 archive dir
+        self._maybe_rollover_archive_dir()
 
         try:
             _dbg(f"[train_step] ENTER total_it={self.total_it} buf_size={self.replay_buffer.size()}")
@@ -1091,9 +1116,9 @@ class TransformerDiscreteAgent:
             self._io_log.flush()
         except Exception:
             pass
-        # 3) 專屬 event log — 長期統計頻率/位置分布
+        # 3) 專屬 event log — 寫到當下 hour 資料夾(跟 io_log 同位置,方便對時)
         try:
-            with (TRANSFORMER_MODEL_PATH / "vclamp_events.log").open("a", encoding="utf-8") as f:
+            with (self.current_archive_dir / "vclamp_events.log").open("a", encoding="utf-8") as f:
                 f.write("\n".join(lines) + "\n")
         except Exception:
             pass
@@ -1107,6 +1132,72 @@ class TransformerDiscreteAgent:
             self.tb_writer.add_scalar("vclamp/params_this_step", len(detections), self.total_it)
         except Exception:
             pass
+
+    # ──────────────────────────── archive directory / hour rollover ──────
+
+    def _make_hour_dir(self, idx, start_dt):
+        """組 hour 資料夾路徑:training_<session>/hour_NN_<hour_start_ts>/"""
+        ts = start_dt.strftime("%Y%m%d_%H%M%S")
+        return self.session_dir / f"hour_{idx:02d}_{ts}"
+
+    def _update_dbg_logger_path(self, new_path):
+        """把 _dbg_logger 跟 ReplayBuffer 的 cuda_debug.log 路徑都重指到 new_path。
+
+        Module-level handler 是在 import 時建好的(指向 top-level),agent 起來之後
+        要重指到 archive dir。每次 hour rollover 也要再重指一次。delay=True 讓檔案
+        只在真的有 emit 時才開出來,避免每個 hour 資料夾留一個空 cuda_debug.log。
+        """
+        # 關掉現有所有 FileHandler 再 remove(避免 leak)
+        for h in list(_dbg_logger.handlers):
+            if isinstance(h, _logging.FileHandler):
+                try:
+                    h.flush()
+                    h.close()
+                except Exception:
+                    pass
+                _dbg_logger.removeHandler(h)
+        new_handler = _logging.FileHandler(new_path, mode="a", encoding="utf-8", delay=True)
+        new_handler.setFormatter(_logging.Formatter("%(asctime)s %(message)s"))
+        _dbg_logger.addHandler(new_handler)
+        # CategorizedReplayBuffer 也共用同一份路徑
+        _crb_module.DEBUG_CUDA_SAMPLE_LOG_PATH = new_path
+
+    def _maybe_rollover_archive_dir(self):
+        """Wall-clock 滿 1 小時就翻到下一個 hour 資料夾。
+
+        - 關掉目前的 io_log handle,在新 hour 資料夾重新開檔
+        - vclamp_events.log / training_log.csv 是 lazy-open(每次寫才開),
+          會自動跟著新的 current_archive_dir,不用在這裡顯式處理
+        - canonical *.pth 檔不動;_save_model 下次被叫到時自然會把 archive copy
+          寫到新的 hour 資料夾
+        """
+        now = datetime.datetime.now()
+        if (now - self._hour_start).total_seconds() < 3600:
+            return False
+
+        # close current io_log
+        try:
+            self._io_log.write(f"\n--- hour rollover at {now.isoformat()} ---\n")
+            self._io_log.close()
+        except Exception:
+            pass
+
+        self._hour_index += 1
+        self._hour_start = now
+        self.current_archive_dir = self._make_hour_dir(self._hour_index, now)
+        self.current_archive_dir.mkdir(parents=True, exist_ok=True)
+        # reopen io_log
+        self._io_log = open(self.current_archive_dir / "train_io_log.txt", "a", encoding="utf-8")
+        self._io_log.write(f"\n{'=' * 60}\n")
+        self._io_log.write(f"Hour {self._hour_index:02d} started: {now.isoformat()}\n")
+        self._io_log.write(f"{'=' * 60}\n")
+        self._io_log.flush()
+        # cuda_debug.log 也跟著翻頁(delay=True 所以沒 emit 就不會建檔)
+        self._update_dbg_logger_path(self.current_archive_dir / "cuda_debug.log")
+        print(f"[FQF] Hour rollover -> {self.current_archive_dir}")
+        return True
+
+    # ──────────────────────────── diagnostics helpers (cont.) ─────────────
 
     def _module_grad_norm(self, module):
         """L2 norm of all gradients inside a module (post-backward, pre-clip)."""
@@ -1348,6 +1439,19 @@ class TransformerDiscreteAgent:
         torch.save(qtarget_sd,  TRANSFORMER_MODEL_PATH / "fqf_target.pth")
         torch.save(payload,     TRANSFORMER_MODEL_PATH / "optimizer_state.pth")
 
+        # 同一份也寫到當下 hour 資料夾,做歷史快照(同一小時內多次 save 會 overwrite,
+        # 留下「該小時最後一次 save」的狀態 — 滿足「保留每次的訓練結果」)
+        try:
+            archive = self.current_archive_dir
+            archive.mkdir(parents=True, exist_ok=True)
+            torch.save(backbone_sd, archive / "backbone.pth")
+            torch.save(qnet_sd,     archive / "fqf_network.pth")
+            torch.save(qtarget_sd,  archive / "fqf_target.pth")
+            torch.save(payload,     archive / "optimizer_state.pth")
+        except Exception as exc:
+            # archive 失敗不擋 canonical save 的成功
+            print(f"[FQF] WARN: archive snapshot write failed: {exc}")
+
     def save_persistent(self):
         buf = self.replay_buffer
         total = buf.size()
@@ -1377,6 +1481,51 @@ class TransformerDiscreteAgent:
         print(f"[FQF] Reward bucket distribution: {dict(saved_buckets)}")
         print("--- save end ---------------")
 
+    def _find_latest_archive_path(self, filename):
+        """掃 TRANSFORMER_MODEL_PATH/training_*/hour_*_<ts>/<filename>,回傳時間最新那份。
+
+        排序鍵是 hour 資料夾名稱裡的 timestamp(我們 save 時嵌進去的,代表 hour 起始時間),
+        不靠 mtime — 後者會被 git checkout / cp 動到,不可靠。
+
+        找不到回傳 None。
+        """
+        candidates = []
+        for session_dir in TRANSFORMER_MODEL_PATH.glob("training_*"):
+            if not session_dir.is_dir():
+                continue
+            for hour_dir in session_dir.glob("hour_*"):
+                if not hour_dir.is_dir():
+                    continue
+                # name 格式:hour_NN_YYYYMMDD_HHMMSS,timestamp 從第 3 段開始
+                parts = hour_dir.name.split("_", 2)
+                if len(parts) < 3:
+                    continue
+                ts_str = parts[2]  # "YYYYMMDD_HHMMSS",字典序 = 時間序
+                path = hour_dir / filename
+                if path.exists():
+                    candidates.append((ts_str, path))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1]
+
+    def _resolve_load_path(self, canonical_path):
+        """Load path 決策:canonical 存在就用它;不存在就 fallback 到最新 archive。
+
+        Corrupt(NaN/Inf)的 canonical 不算「不存在」,會在 _raise_if_corrupt 那層攔下,
+        不會 silent 走 archive — 因為 corrupt 通常代表你需要主動處理(sanitize / rollback)。
+        """
+        if canonical_path.exists():
+            return canonical_path
+        archive_path = self._find_latest_archive_path(canonical_path.name)
+        if archive_path is not None:
+            print(
+                f"[FQF] canonical {canonical_path.name} missing, "
+                f"falling back to latest archive: {archive_path}"
+            )
+            return archive_path
+        return None
+
     def _raise_if_corrupt(self, label, path, state_dict):
         """Load-time NaN probe — checkpoint 含 NaN/Inf 就 raise,阻止 silent resume。
 
@@ -1394,8 +1543,8 @@ class TransformerDiscreteAgent:
         )
 
     def try_load_model(self):
-        backbone_path = TRANSFORMER_MODEL_PATH / "backbone.pth"
-        if backbone_path.exists():
+        backbone_path = self._resolve_load_path(TRANSFORMER_MODEL_PATH / "backbone.pth")
+        if backbone_path is not None:
             backbone_state = None
             try:
                 backbone_state = torch.load(backbone_path, map_location=device, weights_only=True)
@@ -1413,8 +1562,8 @@ class TransformerDiscreteAgent:
                 except Exception as exc:
                     print(f"[FQF] Failed to apply Backbone state: {exc}")
 
-        q_path = TRANSFORMER_MODEL_PATH / "fqf_network.pth"
-        if q_path.exists():
+        q_path = self._resolve_load_path(TRANSFORMER_MODEL_PATH / "fqf_network.pth")
+        if q_path is not None:
             q_state = None
             try:
                 q_state = torch.load(q_path, map_location=device, weights_only=True)
@@ -1430,8 +1579,8 @@ class TransformerDiscreteAgent:
         elif (TRANSFORMER_MODEL_PATH / "q_network.pth").exists():
             print("[FQF] Skip legacy q_network.pth because DDQN head shape is incompatible")
 
-        q_target_path = TRANSFORMER_MODEL_PATH / "fqf_target.pth"
-        if q_target_path.exists():
+        q_target_path = self._resolve_load_path(TRANSFORMER_MODEL_PATH / "fqf_target.pth")
+        if q_target_path is not None:
             qt_state = None
             try:
                 qt_state = torch.load(q_target_path, map_location=device, weights_only=True)
@@ -1447,8 +1596,8 @@ class TransformerDiscreteAgent:
         elif (TRANSFORMER_MODEL_PATH / "q_target.pth").exists():
             print("[FQF] Skip legacy q_target.pth because DDQN head shape is incompatible")
 
-        opt_path = TRANSFORMER_MODEL_PATH / "optimizer_state.pth"
-        if opt_path.exists():
+        opt_path = self._resolve_load_path(TRANSFORMER_MODEL_PATH / "optimizer_state.pth")
+        if opt_path is not None:
             opt_payload = None
             try:
                 opt_payload = torch.load(opt_path, map_location=device, weights_only=False)
