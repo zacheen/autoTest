@@ -1436,7 +1436,7 @@ class TransformerDiscreteAgent:
                 "total_it": self.total_it,
                 "episode_count": self.episode_count,
             },
-            TRANSFORMER_MODEL_PATH / "training_state.pth",
+            TRANSFORMER_MODEL_PATH / "replay_buffer.pth",
         )
 
         saved_rewards = defaultdict(int)
@@ -1585,7 +1585,15 @@ class TransformerDiscreteAgent:
             except Exception as exc:
                 print(f"[FQF] Failed to load optimizer state: {exc}")
 
-        training_state_path = TRANSFORMER_MODEL_PATH / "training_state.pth"
+        # 新檔名 replay_buffer.pth;若不存在但有舊檔 training_state.pth(rename 前的版本),
+        # 仍從舊檔載入(下次 save 會寫到新檔名,舊檔可以手動刪)
+        replay_buffer_path = TRANSFORMER_MODEL_PATH / "replay_buffer.pth"
+        legacy_path = TRANSFORMER_MODEL_PATH / "training_state.pth"
+        if not replay_buffer_path.exists() and legacy_path.exists():
+            print(f"[FQF] replay_buffer.pth not found, loading from legacy training_state.pth")
+            training_state_path = legacy_path
+        else:
+            training_state_path = replay_buffer_path
         if training_state_path.exists():
             try:
                 state = torch.load(training_state_path, map_location=device, weights_only=False)
