@@ -86,19 +86,16 @@ class VisualAgentCommonMixin:
             self._commit_n_step_transition(len(self.n_step_buffer))
 
     def _save_optimizer_state(self) -> None:
-        torch.save(
-            {
-                "optimizer": self.optimizer.state_dict(),
-                "scaler": self.scaler.state_dict(),
-                "total_it": self.total_it,
-                "episode_count": self.episode_count,
-                "epsilon": self.epsilon,
-                "total_episodes": self._total_episodes,
-                "total_wins": self._total_wins,
-                "result_window": list(self._result_window),
-            },
-            self._optimizer_state_path(),
-        )
+        # AdaptiveEpsilonController.state_dict() 攤平成 epsilon / total_episodes
+        # / total_wins / result_window 等 key，跟舊版存檔格式相容。
+        payload = {
+            "optimizer": self.optimizer.state_dict(),
+            "scaler": self.scaler.state_dict(),
+            "total_it": self.total_it,
+            "episode_count": self.episode_count,
+        }
+        payload.update(self.epsilon_controller.state_dict())
+        torch.save(payload, self._optimizer_state_path())
 
     def _load_optimizer_state(self) -> None:
         opt_path = self._optimizer_state_path()
@@ -109,14 +106,13 @@ class VisualAgentCommonMixin:
             self.optimizer.load_state_dict(state["optimizer"])
             self.total_it = state.get("total_it", 0)
             self.episode_count = state.get("episode_count", 0)
-            self.epsilon = state.get("epsilon", self.epsilon)
-            self._total_episodes = state.get("total_episodes", 0)
-            self._total_wins = state.get("total_wins", 0)
-            self._result_window = self.deque_cls(state.get("result_window", []), maxlen=100)
+            # AdaptiveEpsilonController 直接吃 state（key 名沿用舊版 flat 格式）
+            self.epsilon_controller.load_state_dict(state, deque_cls=self.deque_cls)
             print(
                 f"{self.log_prefix} Loaded optimizer: total_it={self.total_it}, "
-                f"episode={self.episode_count}, epsilon={self.epsilon:.4f}, "
-                f"total_episodes={self._total_episodes}, wins={self._total_wins}"
+                f"episode={self.episode_count}, epsilon={self.epsilon_controller.epsilon:.4f}, "
+                f"total_episodes={self.epsilon_controller.total_episodes}, "
+                f"wins={self.epsilon_controller.total_wins}"
             )
             if "scaler" in state and self.scaler.is_enabled():
                 try:

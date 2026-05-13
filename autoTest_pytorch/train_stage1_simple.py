@@ -327,6 +327,14 @@ def main():
         for episode in range(1, MAX_EPISODES + 1):
             stats = run_episode(logic, agent, add_noise=True)
 
+            # 先讓 AdaptiveEpsilonController 看到這場結果（更新 rolling window
+            # + 算出 next eps），on_episode_end 再把更新後的 epsilon 寫進 TB
+            # 並做 periodic save。順序與 v3 / Demo_test_Minesweeper 一致。
+            agent.log_episode_metrics(
+                win=stats['is_win'],
+                invalid_click_rate=stats['invalid_rate'],
+                reward_mean=stats['reward'],
+            )
             agent.on_episode_end()
 
             if stats['is_win']:

@@ -15,6 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 from model_structure.transformer_shared import EncoderDecoderTransformer, FQFQNetwork, FixedSinusoidalPositionEmbedding
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from model_structure.optimizer_factory import build_fqf_optimizer
+from model_structure.adaptive_epsilon import AdaptiveEpsilonController
 import model_structure.CategorizedReplayBuffer as _crb_module
 
 
@@ -310,9 +311,17 @@ class TransformerDiscreteAgent:
         self.n_step_gamma = MINESWEEPER_REWARD_CONFIG.gamma
         self.n_step_buffer = deque()
 
-        self.epsilon = 0.3
-        self.epsilon_min = 0.05
-        self.epsilon_decay_episodes = 5000
+        # ── adaptive epsilon ──
+        # 跟 v3 共用同一個 controller class，並用相同 wr / eps 範圍。Stage1 與
+        # stage2 對 minesweeper 6x6 的 reward signal 相同，所以套用一致的設定。
+        self.epsilon_controller = AdaptiveEpsilonController(
+            wr_min=0.1,
+            wr_max=0.85,
+            eps_min=0.001,
+            eps_max=0.30,
+            window_size=100,
+        )
+        self.deque_cls = deque  # 給 controller.load_state_dict() 用
 
         # episode-scoped blocked actions (v3 風格)：點過的格子在本 episode 內 mask 掉
         self.blocked_actions: set[int] = set()
@@ -351,6 +360,16 @@ class TransformerDiscreteAgent:
         atexit.register(self._close_io_log)
         atexit.register(self.save_persistent)
         atexit.register(self._save_model)
+
+    # epsilon 統一由 controller 管理；保留 self.epsilon 介面以相容
+    # select_action、TB log、save/load 等舊呼叫點。
+    @property
+    def epsilon(self) -> float:
+        return self.epsilon_controller.epsilon
+
+    @epsilon.setter
+    def epsilon(self, value: float) -> None:
+        self.epsilon_controller.epsilon = float(value)
 
     def clear_blocked_actions(self):
         self.blocked_actions.clear()
@@ -980,8 +999,8 @@ class TransformerDiscreteAgent:
     def on_episode_end(self):
         self._flush_n_step_buffer()
         self.episode_count += 1
-        decay_progress = min(self.episode_count / self.epsilon_decay_episodes, 1.0)
-        self.epsilon = self.epsilon_min + (0.3 - self.epsilon_min) * (1.0 - decay_progress)
+        # epsilon 已在 log_episode_metrics() 透過 controller.record_episode 更新好
+        self.tb_writer.add_scalar("episode/epsilon", self.epsilon, self.episode_count)
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
             print(
                 f"[FQF] Periodic save at episode {self.episode_count}"
@@ -989,6 +1008,28 @@ class TransformerDiscreteAgent:
             )
             self._save_model()
             self.save_persistent()
+
+    def log_episode_metrics(
+        self,
+        win: bool,
+        invalid_click_rate: float = 0.0,
+        reward_mean: float = 0.0,
+    ) -> None:
+        """記錄一場 episode 結果，並讓 controller 依 rolling win rate 更新 epsilon。
+
+        與 v3 / v2 介面一致：訓練腳本應在 `on_episode_end()` 之前呼叫一次。
+        """
+        next_eps = self.epsilon_controller.record_episode(win=win)
+        ep_idx = self.epsilon_controller.total_episodes
+        rolling_wr = self.epsilon_controller.rolling_win_rate()
+        overall_wr = self.epsilon_controller.overall_win_rate()
+
+        self.tb_writer.add_scalar("episode/reward_mean",        float(reward_mean),        ep_idx)
+        self.tb_writer.add_scalar("episode/win",                float(bool(win)),          ep_idx)
+        self.tb_writer.add_scalar("episode/invalid_click_rate", float(invalid_click_rate), ep_idx)
+        self.tb_writer.add_scalar("episode/win_rate_100",       rolling_wr,                ep_idx)
+        self.tb_writer.add_scalar("episode/win_rate_all",       overall_wr,                ep_idx)
+        self.tb_writer.add_scalar("episode/eps_next",           next_eps,                  ep_idx)
 
     # ──────────────────────────── lr warmup ────────────────────────────
 
@@ -1019,16 +1060,16 @@ class TransformerDiscreteAgent:
         torch.save(self.backbone.state_dict(), TRANSFORMER_MODEL_PATH / "backbone.pth")
         torch.save(self.q_network.state_dict(), TRANSFORMER_MODEL_PATH / "fqf_network.pth")
         torch.save(self.q_target.state_dict(), TRANSFORMER_MODEL_PATH / "fqf_target.pth")
-        torch.save(
-            {
-                "optimizer": self.optimizer.state_dict(),
-                "total_it": self.total_it,
-                "episode_count": self.episode_count,
-                "epsilon": self.epsilon,
-                "algorithm": "FQF",
-            },
-            TRANSFORMER_MODEL_PATH / "optimizer_state.pth",
-        )
+        # AdaptiveEpsilonController.state_dict() 攤平成 epsilon / total_episodes
+        # / total_wins / result_window 等 key，可在 load 時直接還原給 controller。
+        payload = {
+            "optimizer": self.optimizer.state_dict(),
+            "total_it": self.total_it,
+            "episode_count": self.episode_count,
+            "algorithm": "FQF",
+        }
+        payload.update(self.epsilon_controller.state_dict())
+        torch.save(payload, TRANSFORMER_MODEL_PATH / "optimizer_state.pth")
 
     def save_persistent(self):
         buf = self.replay_buffer
@@ -1100,11 +1141,15 @@ class TransformerDiscreteAgent:
                 self.optimizer.load_state_dict(state["optimizer"])
                 self.total_it = state["total_it"]
                 self.episode_count = state.get("episode_count", 0)
-                if "epsilon" in state:
-                    self.epsilon = state["epsilon"]
+                # 直接把整包 state 餵給 controller；它只挑自己認得的 key
+                # （epsilon / total_episodes / total_wins / result_window），
+                # 舊版只存 epsilon 也能用、新版補上 window 也能用。
+                self.epsilon_controller.load_state_dict(state, deque_cls=self.deque_cls)
                 print(
                     f"[FQF] Loaded optimizer: total_it={self.total_it},"
-                    f" episode={self.episode_count}, epsilon={self.epsilon:.4f}"
+                    f" episode={self.episode_count}, epsilon={self.epsilon:.4f},"
+                    f" total_episodes={self.epsilon_controller.total_episodes},"
+                    f" wins={self.epsilon_controller.total_wins}"
                 )
             except Exception as exc:
                 print(f"[FQF] Failed to load optimizer state: {exc}")

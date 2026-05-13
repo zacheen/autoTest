@@ -45,6 +45,7 @@ import model_structure.CategorizedReplayBuffer as _crb_module
 from model_structure.visual_agent_common import VisualAgentCommonMixin
 from model_structure.yolo_encoder_base import YOLOEncoderBase, DEFAULT_ENCODER_DIMS
 from model_structure.optimizer_factory import build_fqf_optimizer
+from model_structure.adaptive_epsilon import AdaptiveEpsilonController
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CHECKPOINT_RED = "\033[91;1m"
@@ -357,10 +358,15 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.recent_real_rewards = deque(maxlen=100)
 
         # ── adaptive epsilon ──
-        self.epsilon = 0.30
-        self._result_window: deque[int] = deque(maxlen=100)
-        self._total_wins = 0
-        self._total_episodes = 0
+        # 共用 controller，stage1 (TransformerDiscreteAgent) 也用同一個 class
+        # 並傳入相同參數，邏輯只維護在一處。
+        self.epsilon_controller = AdaptiveEpsilonController(
+            wr_min=0.1,
+            wr_max=0.85,
+            eps_min=0.001,
+            eps_max=0.30,
+            window_size=100,
+        )
 
         # ── blocked-action tracking (episode-scoped) ──
         self.blocked_actions: set[int] = set()
@@ -409,7 +415,21 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
     @property
     def episode_count_public(self) -> int:
-        return self._total_episodes
+        return self.epsilon_controller.total_episodes
+
+    # epsilon 由 controller 統一管理，但保留 self.epsilon 介面：
+    # 1) select_action / TB log / 印 log 都直接讀 self.epsilon
+    # 2) VisualAgentCommonMixin._load_optimizer_state 內有舊版 fallback 會
+    #    `self.epsilon = state.get("epsilon", self.epsilon)`，setter 把它導
+    #    回 controller。新版 load 路徑會走 epsilon_controller.load_state_dict
+    #    走整包還原，這個 setter 只是相容舊呼叫點。
+    @property
+    def epsilon(self) -> float:
+        return self.epsilon_controller.epsilon
+
+    @epsilon.setter
+    def epsilon(self, value: float) -> None:
+        self.epsilon_controller.epsilon = float(value)
 
     # ──────────────────────────── utilities ────────────────────────────
 
@@ -835,7 +855,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
     def reset_episode(self) -> None:
         self._flush_n_step_buffer()
         self.clear_blocked_actions(reason="episode reset")
-        next_episode_idx = self._total_episodes + 1
+        next_episode_idx = self.epsilon_controller.total_episodes + 1
         self._log_actions_this_episode = (
             self.action_log_every_n_episodes > 0
             and next_episode_idx % self.action_log_every_n_episodes == 0
@@ -846,7 +866,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
     def on_episode_end(self) -> None:
         self._flush_n_step_buffer()
         self.episode_count += 1
-        self.epsilon = self._adaptive_epsilon()
+        # epsilon 已在 log_episode_metrics() 透過 controller.record_episode 更新好
         self.tb_writer.add_scalar("episode/epsilon", self.epsilon, self.episode_count)
         self._save_model()
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
@@ -854,40 +874,26 @@ class VisualAgentV3(VisualAgentCommonMixin):
             self.save_persistent()
 
     def log_episode_metrics(self, win: bool, invalid_click_rate: float, reward_mean: float) -> None:
-        self._total_episodes += 1
-        self._total_wins += int(win)
-        self._result_window.append(int(win))
+        # 紀錄結果 + 更新 epsilon（controller 內部以 log-interpolation 算 next eps）
+        next_eps = self.epsilon_controller.record_episode(win=win)
+        ep_idx = self.epsilon_controller.total_episodes
+        rolling_wr = self.epsilon_controller.rolling_win_rate()
+        overall_wr = self.epsilon_controller.overall_win_rate()
 
-        rolling_wr = sum(self._result_window) / max(len(self._result_window), 1)
-        overall_wr = self._total_wins / max(self._total_episodes, 1)
-        next_eps = self._adaptive_epsilon()
-
-        self.tb_writer.add_scalar("episode/reward_mean",        float(reward_mean),        self._total_episodes)
-        self.tb_writer.add_scalar("episode/win",                float(bool(win)),          self._total_episodes)
-        self.tb_writer.add_scalar("episode/invalid_click_rate", float(invalid_click_rate),self._total_episodes)
-        self.tb_writer.add_scalar("episode/win_rate_100",       rolling_wr,                self._total_episodes)
-        self.tb_writer.add_scalar("episode/win_rate_all",       overall_wr,                self._total_episodes)
+        self.tb_writer.add_scalar("episode/reward_mean",        float(reward_mean),        ep_idx)
+        self.tb_writer.add_scalar("episode/win",                float(bool(win)),          ep_idx)
+        self.tb_writer.add_scalar("episode/invalid_click_rate", float(invalid_click_rate),ep_idx)
+        self.tb_writer.add_scalar("episode/win_rate_100",       rolling_wr,                ep_idx)
+        self.tb_writer.add_scalar("episode/win_rate_all",       overall_wr,                ep_idx)
         self.tb_writer.flush()
 
         status = "WIN " if win else "LOSE"
         print(
-            f"[V3] Ep {self._total_episodes}: {status} | "
+            f"[V3] Ep {ep_idx}: {status} | "
             f"invalid={invalid_click_rate:.1%} | reward={reward_mean:.3f} | "
             f"win_rate(last100)={rolling_wr:.1%} | win_rate(all)={overall_wr:.1%} | "
             f"eps(next)={next_eps:.4f}"
         )
-
-    def _adaptive_epsilon(
-        self,
-        wr_min: float = 0.1, wr_max: float = 0.85,
-        eps_min: float = 0.001, eps_max: float = 0.30,
-    ) -> float:
-        if not self._result_window:
-            return eps_max
-        wr = sum(self._result_window) / len(self._result_window)
-        wr = max(wr_min, min(wr_max, wr))
-        t = (wr - wr_min) / (wr_max - wr_min)
-        return math.exp(math.log(eps_max) + (math.log(eps_min) - math.log(eps_max)) * t)
 
     # ──────────────────────────── checkpoints ──────────────────────────
 

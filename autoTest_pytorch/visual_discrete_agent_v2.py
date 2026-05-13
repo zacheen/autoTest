@@ -51,6 +51,7 @@ from transformer_discrete_agent import (
 from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from model_structure.visual_agent_common import VisualAgentCommonMixin
+from model_structure.adaptive_epsilon import AdaptiveEpsilonController
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -200,10 +201,14 @@ class VisualAgentV2(VisualAgentCommonMixin):
         self.recent_real_rewards = deque(maxlen=100)
 
         # ── adaptive epsilon state (win-rate based) ──
-        self.epsilon = 0.30
-        self._result_window: deque[int] = deque(maxlen=100)
-        self._total_wins = 0
-        self._total_episodes = 0
+        # v2 沿用較寬的 wr_max=0.9（與 v3 的 0.85 不同）— 透過 controller 參數注入。
+        self.epsilon_controller = AdaptiveEpsilonController(
+            wr_min=0.1,
+            wr_max=0.9,
+            eps_min=0.001,
+            eps_max=0.30,
+            window_size=100,
+        )
 
         # ── blocked-action tracking ──
         self.blocked_actions: set[int] = set()
@@ -239,7 +244,15 @@ class VisualAgentV2(VisualAgentCommonMixin):
 
     @property
     def episode_count_public(self) -> int:
-        return self._total_episodes
+        return self.epsilon_controller.total_episodes
+
+    @property
+    def epsilon(self) -> float:
+        return self.epsilon_controller.epsilon
+
+    @epsilon.setter
+    def epsilon(self, value: float) -> None:
+        self.epsilon_controller.epsilon = float(value)
 
     # ──────────────────────────── utilities ────────────────────────────
 
@@ -567,7 +580,7 @@ class VisualAgentV2(VisualAgentCommonMixin):
     def on_episode_end(self) -> None:
         self._flush_n_step_buffer()
         self.episode_count += 1
-        self.epsilon = self._adaptive_epsilon()
+        # epsilon 已在 log_episode_metrics() 透過 controller.record_episode 更新好
         self.tb_writer.add_scalar("episode/epsilon", self.epsilon, self.episode_count)
         self._save_model()
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
@@ -575,41 +588,25 @@ class VisualAgentV2(VisualAgentCommonMixin):
             self.save_persistent()
 
     def log_episode_metrics(self, win: bool, invalid_click_rate: float, reward_mean: float) -> None:
-        self._total_episodes += 1
-        self._total_wins += int(win)
-        self._result_window.append(int(win))
+        next_eps = self.epsilon_controller.record_episode(win=win)
+        ep_idx = self.epsilon_controller.total_episodes
+        rolling_wr = self.epsilon_controller.rolling_win_rate()
+        overall_wr = self.epsilon_controller.overall_win_rate()
 
-        rolling_wr = sum(self._result_window) / max(len(self._result_window), 1)
-        overall_wr = self._total_wins / max(self._total_episodes, 1)
-        next_eps = self._adaptive_epsilon()
-
-        self.tb_writer.add_scalar("episode/reward_mean",        float(reward_mean),        self._total_episodes)
-        self.tb_writer.add_scalar("episode/win",                float(bool(win)),          self._total_episodes)
-        self.tb_writer.add_scalar("episode/invalid_click_rate", float(invalid_click_rate),self._total_episodes)
-        self.tb_writer.add_scalar("episode/win_rate_100",       rolling_wr,                self._total_episodes)
-        self.tb_writer.add_scalar("episode/win_rate_all",       overall_wr,                self._total_episodes)
+        self.tb_writer.add_scalar("episode/reward_mean",        float(reward_mean),        ep_idx)
+        self.tb_writer.add_scalar("episode/win",                float(bool(win)),          ep_idx)
+        self.tb_writer.add_scalar("episode/invalid_click_rate", float(invalid_click_rate),ep_idx)
+        self.tb_writer.add_scalar("episode/win_rate_100",       rolling_wr,                ep_idx)
+        self.tb_writer.add_scalar("episode/win_rate_all",       overall_wr,                ep_idx)
         self.tb_writer.flush()
 
         status = "WIN " if win else "LOSE"
         print(
-            f"[V2] Ep {self._total_episodes}: {status} | "
+            f"[V2] Ep {ep_idx}: {status} | "
             f"invalid={invalid_click_rate:.1%} | reward={reward_mean:.3f} | "
             f"win_rate(last100)={rolling_wr:.1%} | win_rate(all)={overall_wr:.1%} | "
             f"eps(next)={next_eps:.4f}"
         )
-
-    def _adaptive_epsilon(
-        self,
-        wr_min: float = 0.1, wr_max: float = 0.9,
-        eps_min: float = 0.001, eps_max: float = 0.30,
-    ) -> float:
-        """Log-interpolate epsilon from win_rate(last100)."""
-        if not self._result_window:
-            return eps_max
-        wr = sum(self._result_window) / len(self._result_window)
-        wr = max(wr_min, min(wr_max, wr))
-        t = (wr - wr_min) / (wr_max - wr_min)
-        return math.exp(math.log(eps_max) + (math.log(eps_min) - math.log(eps_max)) * t)
 
     # ──────────────────────────── checkpoints ──────────────────────────
 
