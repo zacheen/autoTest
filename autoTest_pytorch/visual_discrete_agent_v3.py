@@ -360,13 +360,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # ── adaptive epsilon ──
         # 共用 controller，stage1 (TransformerDiscreteAgent) 也用同一個 class
         # 並傳入相同參數，邏輯只維護在一處。
-        self.epsilon_controller = AdaptiveEpsilonController(
-            wr_min=0.1,
-            wr_max=0.85,
-            eps_min=0.001,
-            eps_max=0.30,
-            window_size=100,
-        )
+        self.epsilon_controller = AdaptiveEpsilonController()
 
         # ── blocked-action tracking (episode-scoped) ──
         self.blocked_actions: set[int] = set()

@@ -317,13 +317,7 @@ class TransformerDiscreteAgent:
         # ── adaptive epsilon ──
         # 跟 v3 共用同一個 controller class，並用相同 wr / eps 範圍。Stage1 與
         # stage2 對 minesweeper 6x6 的 reward signal 相同，所以套用一致的設定。
-        self.epsilon_controller = AdaptiveEpsilonController(
-            wr_min=0.1,
-            wr_max=0.85,
-            eps_min=0.001,
-            eps_max=0.30,
-            window_size=100,
-        )
+        self.epsilon_controller = AdaptiveEpsilonController()
         self.deque_cls = deque  # 給 controller.load_state_dict() 用
 
         # episode-scoped blocked actions (v3 風格)：點過的格子在本 episode 內 mask 掉

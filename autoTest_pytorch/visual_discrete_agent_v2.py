@@ -207,7 +207,6 @@ class VisualAgentV2(VisualAgentCommonMixin):
             wr_max=0.9,
             eps_min=0.001,
             eps_max=0.30,
-            window_size=100,
         )
 
         # ── blocked-action tracking ──
