@@ -23,7 +23,7 @@ class FQFOptimizerConfig:
     """
     lr_backbone: float = 5e-5
     lr_head: float = 5e-5
-    weight_decay: float = 0
+    weight_decay: float = 1e-5
     foreach: bool = False
     fused: bool = False
 

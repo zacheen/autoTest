@@ -29,9 +29,9 @@ class AdaptiveEpsilonController:
 
     def __init__(
         self,
-        wr_min: float = 0.1,
+        wr_min: float = 0.2,
         wr_max: float = 0.85,
-        eps_min: float = 0.001,
+        eps_min: float = 0.02, # Don’t be smaller than 0.02. The lack of bad-action data may cause the model to forget how to avoid poor actions.
         eps_max: float = 0.30,
         window_size: int = 100,
     ):

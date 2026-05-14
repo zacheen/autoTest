@@ -71,8 +71,11 @@ _DBG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 _dbg_logger = _logging.getLogger("cuda_dbg.stage1")
 _dbg_logger.setLevel(_logging.DEBUG)
 _dbg_logger.propagate = False  # 不往 root logger 傳，避免 CMD 也印
+# Module-level handler:agent 還沒 instantiate 之前的 fallback 寫到 top-level。
+# delay=True 讓檔案只在真的有 emit 時才開出來(DEBUG_CUDA_SAMPLE=False + 沒 CUDA crash
+# 的情況下就不會留下空檔)。Agent __init__ 會把這個 handler 換成指到 archive dir 的。
 if not _dbg_logger.handlers:
-    _fh = _logging.FileHandler(_DBG_LOG_PATH, mode="a", encoding="utf-8")
+    _fh = _logging.FileHandler(_DBG_LOG_PATH, mode="a", encoding="utf-8", delay=True)
     _fh.setFormatter(_logging.Formatter("%(asctime)s %(message)s"))
     _dbg_logger.addHandler(_fh)
 
@@ -314,24 +317,38 @@ class TransformerDiscreteAgent:
         # ── adaptive epsilon ──
         # 跟 v3 共用同一個 controller class，並用相同 wr / eps 範圍。Stage1 與
         # stage2 對 minesweeper 6x6 的 reward signal 相同，所以套用一致的設定。
-        self.epsilon_controller = AdaptiveEpsilonController(
-            wr_min=0.1,
-            wr_max=0.85,
-            eps_min=0.001,
-            eps_max=0.30,
-            window_size=100,
-        )
+        self.epsilon_controller = AdaptiveEpsilonController()
         self.deque_cls = deque  # 給 controller.load_state_dict() 用
 
         # episode-scoped blocked actions (v3 風格)：點過的格子在本 episode 內 mask 掉
         self.blocked_actions: set[int] = set()
 
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
-        self._io_log = open(TRANSFORMER_MODEL_PATH / "train_io_log.txt", "a", encoding="utf-8")
+
+        # Session / hour archive 目錄 ── 每次啟動一個 training_<ts>,每滿 1 hour 一個 hour_NN_<ts>。
+        # canonical *.pth 仍寫在 TRANSFORMER_MODEL_PATH 頂層(try_load_model 直接讀),
+        # 同時把同一份快照寫到 current_archive_dir,把當下時段的 logs 也都導到那邊去。
+        self._session_start = datetime.datetime.now()
+        self._session_timestamp = self._session_start.strftime("%Y%m%d_%H%M%S")
+        self.session_dir = TRANSFORMER_MODEL_PATH / f"training_{self._session_timestamp}"
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        self._hour_index = 0
+        self._hour_start = self._session_start
+        self.current_archive_dir = self._make_hour_dir(self._hour_index, self._session_start)
+        self.current_archive_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[FQF] Session archive: {self.session_dir}")
+        print(f"[FQF] Current hour:    {self.current_archive_dir}")
+
+        self._io_log = open(self.current_archive_dir / "train_io_log.txt", "a", encoding="utf-8")
         self._io_log.write(f"\n{'=' * 60}\n")
-        self._io_log.write(f"Session started: {datetime.datetime.now().isoformat()}\n")
+        self._io_log.write(f"Session started: {self._session_start.isoformat()}\n")
+        self._io_log.write(f"Hour 00 started: {self._session_start.isoformat()}\n")
         self._io_log.write(f"{'=' * 60}\n")
         self._io_log.flush()
+
+        # cuda_debug.log 也跟著 archive dir 走(module-level handler 預設指向 top-level,
+        # 在這裡 swap 成 current_archive_dir 的版本)
+        self._update_dbg_logger_path(self.current_archive_dir / "cuda_debug.log")
 
         # TensorBoard — own log_dir keyed by session timestamp, so the
         # training script (train_stage1_simple.py) can reuse it instead of
@@ -472,6 +489,8 @@ class TransformerDiscreteAgent:
         self.total_it += 1
         self.steps_since_resume += 1
         self._apply_lr_warmup()
+        # Wall-clock 滿 1 小時翻頁;io_log / vclamp / save 都會自動跟著新的 archive dir
+        self._maybe_rollover_archive_dir()
 
         try:
             _dbg(f"[train_step] ENTER total_it={self.total_it} buf_size={self.replay_buffer.size()}")
@@ -492,6 +511,13 @@ class TransformerDiscreteAgent:
             _dbg_tensor("train_step.done",       done)
             _dbg_tensor("train_step.is_weights", is_weights)
             _dbg_tensor("train_step.discounts",  discounts)
+
+            # Stage 0: buffer sample — 命中代表 replay buffer 內容已壞(load 或 store 路徑)
+            self._assert_finite("stage0_sample", "state", state)
+            self._assert_finite("stage0_sample", "next_state", next_state)
+            self._assert_finite("stage0_sample", "reward", reward)
+            self._assert_finite("stage0_sample", "is_weights", is_weights)
+            self._assert_finite("stage0_sample", "discounts", discounts)
 
             action = action.long()
             row_idx = action[:, 0]
@@ -515,6 +541,10 @@ class TransformerDiscreteAgent:
                 next_features = self.backbone.get_features(next_proc)
                 _dbg_tensor("train_step.next_features", next_features)
                 _dbg("[train_step] after next backbone")
+                # Stage 1a: backbone forward on next_state — 命中代表 backbone weights 或
+                #           next_state 已壞;這條也是訓練中最早能偵測到 backbone 損毀的點
+                self._assert_finite("stage1a_target_backbone", "next_features", next_features)
+
                 next_online = self.q_network(next_features)
                 next_q_2d = next_online["q_values"]
                 _dbg_tensor("train_step.next_online.q_values", next_q_2d)
@@ -528,18 +558,28 @@ class TransformerDiscreteAgent:
                 next_target = self.q_target(next_features)
                 _dbg_tensor("train_step.next_target.quantiles", next_target["quantiles"])
                 _dbg("[train_step] after q_target")
+                # Stage 1b: q_target forward — 命中代表 q_target weights 已壞
+                self._assert_finite("stage1b_q_target", "next_target.quantiles", next_target["quantiles"])
+
                 next_target_quantiles = next_target["quantiles"][
                     torch.arange(batch_size, device=device), best_flat
                 ]
                 _dbg_tensor("train_step.next_target_quantiles", next_target_quantiles)
                 target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
                 _dbg_tensor("train_step.target_quantiles", target_quantiles)
+                # Stage 1c: target_quantiles 算完 — 命中代表 reward / discounts / done 異常
+                #           (如果 next_target_quantiles 在 stage1b 是 finite 的話)
+                self._assert_finite("stage1c_target_combine", "target_quantiles", target_quantiles)
             _dbg("[train_step] target branch done")
 
             _dbg("[train_step] before current backbone")
             features = self.backbone.get_features(state)
             _dbg_tensor("train_step.features", features)
             _dbg("[train_step] after current backbone")
+            # Stage 2: current backbone forward — 命中代表 backbone weights 或 state 已壞
+            #          (跟 stage1a 互相對照,可以判斷壞的是 backbone 還是 state)
+            self._assert_finite("stage2_current_backbone", "features", features)
+
             q_output = self.q_network(features)
             q_2d = q_output["q_values"]
             q_quantiles = q_output["quantiles"]
@@ -549,6 +589,15 @@ class TransformerDiscreteAgent:
             _dbg_tensor("train_step.q_quantiles", q_quantiles)
             _dbg_tensor("train_step.tau_hats", tau_hats)
             _dbg_tensor("train_step.fraction_probs", fraction_probs)
+            # Stage 3: q_network forward (FQF head 四個輸出分別檢)
+            #   - fraction_probs 壞 → fraction_proposal / softmax 入口問題
+            #   - tau_hats 壞     → cumsum / mean(基本上 follow fraction_probs)
+            #   - quantiles 壞    → cosine_embedding 或 value_head 問題
+            #   - q_values 壞     → 上面任一條
+            self._assert_finite("stage3_q_network", "fraction_probs", fraction_probs)
+            self._assert_finite("stage3_q_network", "tau_hats", tau_hats)
+            self._assert_finite("stage3_q_network", "quantiles", q_quantiles)
+            self._assert_finite("stage3_q_network", "q_values", q_2d)
             _dbg(f"[train_step] q_2d.shape={tuple(q_2d.shape)} q_quantiles.shape={tuple(q_quantiles.shape)}")
             q_taken = q_2d[
                 torch.arange(batch_size, device=device), row_idx, col_idx
@@ -569,7 +618,15 @@ class TransformerDiscreteAgent:
                 tau_hats=tau_hats.detach(),
                 return_stats=True,
             )
+            # Stage 4a: quantile huber loss — 命中通常代表 chosen_quantiles 或 target_quantiles
+            #            其中一個極端(如 td² overflow),內部 torch.where 雖能選 finite 分支,
+            #            但 backward 經 0×inf 仍會在 stage5 噴 NaN 到 grad
+            self._assert_finite("stage4a_quantile_loss", "per_sample_quantile_loss", per_sample_quantile_loss)
+
             entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
+            # Stage 4b: entropy — 命中代表 fraction_probs 含 NaN(stage3 應該先抓到)
+            self._assert_finite("stage4b_entropy", "entropy", entropy)
+
             per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy
             loss = (is_weights * per_sample_loss).mean()
             _dbg_tensor("train_step.loss", loss)
@@ -581,10 +638,13 @@ class TransformerDiscreteAgent:
                 fpn_norm_entropy_t = entropy.mean() / math.log(NUM_FQF_FRACTIONS)
                 fpn_tau_std_t = tau_hats.std(dim=1).mean()
 
+            # Stage 4c: 最終 loss — 既有的 NaN check,訊息升級成 stage tag 格式
             if not torch.isfinite(loss):
                 raise RuntimeError(
-                    f"Non-finite loss detected before backward: {loss.item()} "
-                    f"(quantile={per_sample_quantile_loss.mean().item()}, entropy={entropy.mean().item()})"
+                    f"[NaN-probe] non-finite at stage='stage4c_final_loss' tensor='loss' "
+                    f"step={self.total_it} value={loss.item()} "
+                    f"(quantile={per_sample_quantile_loss.mean().item()}, "
+                    f"entropy={entropy.mean().item()})"
                 )
 
             self.optimizer.zero_grad()
@@ -617,9 +677,17 @@ class TransformerDiscreteAgent:
             if extra_params_to_clip is not None:
                 all_params += list(extra_params_to_clip)
             _dbg("[train_step] before grad-finite check")
+            # Stage 5: backward 之後 — 命中代表 backward 路徑產生 NaN/Inf 梯度
+            #          常見原因:torch.where(td²) 在 td 過大時 backward 經 0×inf
             for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
                 if param.grad is not None and not torch.isfinite(param.grad).all():
-                    raise RuntimeError(f"Non-finite gradient detected in parameter: {name}")
+                    nan_n = int(torch.isnan(param.grad).sum().item())
+                    inf_n = int(torch.isinf(param.grad).sum().item())
+                    raise RuntimeError(
+                        f"[NaN-probe] non-finite at stage='stage5_post_backward' tensor='grad.{name}' "
+                        f"step={self.total_it} shape={tuple(param.grad.shape)} "
+                        f"nan={nan_n} inf={inf_n}"
+                    )
             _dbg("[train_step] after grad-finite check")
 
             # Pre-clip gradient norms — must be captured BEFORE clip_grad_norm_,
@@ -653,6 +721,18 @@ class TransformerDiscreteAgent:
             grad_clip_excess_norm = max(0.0, grad_norm_total_value - grad_clip_threshold)
             grad_clip_excess_ratio = grad_clip_excess_norm / (grad_clip_threshold + 1e-12)
 
+            # Stage 6: clip 之後再掃一次 grad — 抓 clip 內部 0×inf
+            #          (理論上 stage5 已先攔 inf,但 clip 自己 in-place 寫的也要驗一次)
+            for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
+                if param.grad is not None and not torch.isfinite(param.grad).all():
+                    nan_n = int(torch.isnan(param.grad).sum().item())
+                    inf_n = int(torch.isinf(param.grad).sum().item())
+                    raise RuntimeError(
+                        f"[NaN-probe] non-finite at stage='stage6_post_clip' tensor='grad.{name}' "
+                        f"step={self.total_it} shape={tuple(param.grad.shape)} "
+                        f"nan={nan_n} inf={inf_n}"
+                    )
+
             backbone_post = self._module_grad_norm(self.backbone)
             head_post = self._module_grad_norm(self.q_network)
             extras_post_sq = 0.0
@@ -665,10 +745,36 @@ class TransformerDiscreteAgent:
             grad_post_total = (backbone_post ** 2 + head_post ** 2 + extras_post_sq) ** 0.5
 
             _dbg("[train_step] after clip_grad_norm_")
+            # Pre-step v-clamp:HW bit flip 把 v 翻成負 → sqrt(neg)=NaN → 下一步 weight=NaN。
+            # 在 optimizer.step() 之前 clamp,讓 Adam 永遠看到 v >= 0 的 invariant。
+            # 命中時詳細寫到 stdout / io_log / vclamp_events.log / TB,事後 grep 統計頻率。
+            self._clamp_optimizer_v_and_log()
             _dbg("[train_step] before optimizer.step")
             self.optimizer.step()
             _dbg("[train_step] after optimizer.step")
             _dbg_mem("train_step after optimizer.step")
+
+            # Stage 7: optimizer.step 之後掃 weight — ★ 本次失敗最可能的源頭 ★
+            #          finite grad 進 AdamW 卻產生 NaN weight,常見原因:
+            #          (a) v 接近 denormal underflow → sqrt(v)+eps 異常小 → 巨大 update
+            #          (b) fused/non-fused kernel 罕見數值 edge case
+            #          (c) 硬體 transient bit flip(機率極低)
+            #          命中時:weight 已壞,但這一步的 grad / m / v 還在 optimizer state 裡,
+            #                  可以離線分析(crash 後 atexit 會把 optimizer state 寫到 .crash 檔)
+            for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
+                if not torch.isfinite(param.data).all():
+                    nan_n = int(torch.isnan(param.data).sum().item())
+                    inf_n = int(torch.isinf(param.data).sum().item())
+                    finite_mask = torch.isfinite(param.data)
+                    absmax = (
+                        float(param.data[finite_mask].abs().max().item())
+                        if finite_mask.any() else float("nan")
+                    )
+                    raise RuntimeError(
+                        f"[NaN-probe] non-finite at stage='stage7_post_step' tensor='weight.{name}' "
+                        f"step={self.total_it} shape={tuple(param.data.shape)} "
+                        f"nan={nan_n} inf={inf_n} finite_absmax={absmax:.4g}"
+                    )
         except Exception as exc:
             # ── 非 backward 區段的 CUDA crash（forward / loss / grad-check / clip / optimizer.step / 結尾 sync）──
             # tag 成 "non-backward CUDA crash" 方便和 backward 的 grep 區分，用來統計撞牆位置。
@@ -860,6 +966,232 @@ class TransformerDiscreteAgent:
         self.clear_blocked_actions()
 
     # ──────────────────────────── diagnostics helpers ──────────────────────
+
+    def _assert_finite(self, stage, name, tensor):
+        """訓練流程的 NaN/Inf probe:命中就 raise,訊息含 stage / tensor / step。
+
+        只檢 floating-point tensor — int/bool 用 isfinite 無意義。
+        每個 stage boundary 呼叫一次,GPU sync 開銷 ~50μs,可常駐。
+        """
+        if tensor is None:
+            return
+        if not tensor.dtype.is_floating_point:
+            return
+        if torch.isfinite(tensor).all():
+            return
+        nan_n = int(torch.isnan(tensor).sum().item())
+        inf_n = int(torch.isinf(tensor).sum().item())
+        finite_mask = torch.isfinite(tensor)
+        absmax = (
+            float(tensor[finite_mask].abs().max().item())
+            if finite_mask.any() else float("nan")
+        )
+        raise RuntimeError(
+            f"[NaN-probe] non-finite at stage='{stage}' tensor='{name}' "
+            f"step={self.total_it} shape={tuple(tensor.shape)} dtype={tensor.dtype} "
+            f"nan={nan_n} inf={inf_n} finite_absmax={absmax:.4g}"
+        )
+
+    def _scan_state_dict_finite(self, sd_label, state_dict):
+        """掃 state_dict 內所有 floating-point tensor,回傳 [(label, msg)] 列表。
+
+        不 raise — caller 自己決定要 raise(load 路徑)還是改寫 .crash 檔(save 路徑)。
+        """
+        bad = []
+        for key, tensor in state_dict.items():
+            if not hasattr(tensor, "dtype"):
+                continue
+            if not tensor.dtype.is_floating_point:
+                continue
+            if torch.isfinite(tensor).all():
+                continue
+            nan_n = int(torch.isnan(tensor).sum().item())
+            inf_n = int(torch.isinf(tensor).sum().item())
+            bad.append((f"{sd_label}.{key}", f"nan={nan_n} inf={inf_n}"))
+        return bad
+
+    def _scan_optimizer_state(self, label, opt_state_dict):
+        """掃 optimizer state_dict (nested: state[pid][key])。
+
+        檢查兩種異常:
+        (a) 任何 tensor 含 NaN/Inf
+        (b) exp_avg_sq < 0 — Adam 的 second moment 數學上不可能為負,出現必為
+            bit-level corruption(sign-bit flip 等),會讓 sqrt(v) 噴 NaN
+
+        回傳 [(label, message)] 列表。
+        """
+        bad = []
+        state = opt_state_dict.get("state", {}) if isinstance(opt_state_dict, dict) else {}
+        for pid, pstate in state.items():
+            if not isinstance(pstate, dict):
+                continue
+            for key, val in pstate.items():
+                if not isinstance(val, torch.Tensor):
+                    continue
+                if not val.dtype.is_floating_point:
+                    continue
+                if not torch.isfinite(val).all():
+                    nan_n = int(torch.isnan(val).sum().item())
+                    inf_n = int(torch.isinf(val).sum().item())
+                    bad.append((f"{label}.state[{pid}].{key}", f"nan={nan_n} inf={inf_n}"))
+                if key == "exp_avg_sq" and (val < 0).any().item():
+                    neg_n = int((val < 0).sum().item())
+                    bad.append((f"{label}.state[{pid}].{key}", f"negative={neg_n} (math-impossible)"))
+        return bad
+
+    def _clamp_optimizer_v_and_log(self):
+        """Pre-step belt-and-suspenders:Adam 的 exp_avg_sq(v)若有負值就 in-place clamp。
+
+        動機:v 數學上恆 >= 0(β2·v_old + (1-β2)·grad²,兩項都非負)。若觀察到負值,
+              壓倒性是 consumer GPU 沒 ECC 的 VRAM transient bit flip(本案就是 sign-bit
+              翻轉:-5.66e-7 vs |v|.max()=9.03e-7 同數量級)。若不清掉,AdamW 下一步
+              算 sqrt(negative)=NaN,接著把 weight 寫成 NaN,就是 stage 7 攔到的爆點。
+
+        Self-healing(不 raise) — 把 HW transient 變成可繼續訓練的小事件;但每次命中
+        詳細寫四個地方,長期 grep 可以建出頻率/位置分布:
+          - stdout (訓練 console 立刻可見)
+          - self._io_log (跟其他 step 的 diagnostic 混在一起,容易對時間軸)
+          - models/stage1_transformer/vclamp_events.log (專屬 event log,好 grep)
+          - TensorBoard (vclamp/elements_this_step / elements_total / params_this_step)
+
+        命中位置會同步把 paired exp_avg(m)歸零,避免被汙染的 momentum 殘留繼續
+        把剛 reset 的 weight element 推向奇怪方向。
+        """
+        detections = []
+        # 用 named_parameters 是為了拿 human-readable 名稱寫 log
+        # (optimizer.state 的 key 是 param 物件本身,沒名字)
+        for source_name, module in (("backbone", self.backbone), ("q_network", self.q_network)):
+            for pname, p in module.named_parameters():
+                st = self.optimizer.state.get(p)
+                if st is None:
+                    continue
+                v = st.get("exp_avg_sq")
+                if not isinstance(v, torch.Tensor) or not v.dtype.is_floating_point:
+                    continue
+                neg_mask = v < 0
+                if not bool(neg_mask.any().item()):
+                    continue
+                neg_n = int(neg_mask.sum().item())
+                # 最多取 5 個位置 + 數值寫 log,避免大規模 corruption 時 log 爆炸
+                sample_pos = neg_mask.nonzero(as_tuple=False)[:5].tolist()
+                sample_vals = v[neg_mask][:5].tolist()
+                full_name = f"{source_name}.{pname}"
+                detections.append((full_name, tuple(v.shape), neg_n, sample_pos, sample_vals))
+                # In-place clamp v >= 0
+                v.clamp_(min=0)
+                # 同位置清 m
+                m = st.get("exp_avg")
+                if isinstance(m, torch.Tensor) and m.shape == v.shape:
+                    m[neg_mask] = 0.0
+
+        if not detections:
+            return
+
+        total = sum(d[2] for d in detections)
+        header = (
+            f"[vclamp] step={self.total_it} caught {len(detections)} param(s),"
+            f" {total} negative-v element(s) -- clamped to 0 (+ paired m zeroed)"
+        )
+        lines = [header]
+        for full_name, shape, neg_n, sample_pos, sample_vals in detections:
+            sample = ", ".join(
+                f"@{tuple(pos)}={val:.4e}" for pos, val in zip(sample_pos, sample_vals)
+            )
+            lines.append(
+                f"[vclamp]   {full_name} shape={shape} neg_count={neg_n} sample=[{sample}]"
+            )
+
+        # 1) stdout — 訓練 console 立刻看到
+        for line in lines:
+            print(line)
+        # 2) io_log — 跟訓練的 step diagnostic 混在一起對時間軸
+        try:
+            self._io_log.write("\n".join(lines) + "\n")
+            self._io_log.flush()
+        except Exception:
+            pass
+        # 3) 專屬 event log — 寫到當下 hour 資料夾(跟 io_log 同位置,方便對時)
+        try:
+            with (self.current_archive_dir / "vclamp_events.log").open("a", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        except Exception:
+            pass
+        # 4) TensorBoard — 視覺化命中時間軸
+        if not hasattr(self, "_vclamp_total"):
+            self._vclamp_total = 0
+        self._vclamp_total += total
+        try:
+            self.tb_writer.add_scalar("vclamp/elements_this_step", total, self.total_it)
+            self.tb_writer.add_scalar("vclamp/elements_total", self._vclamp_total, self.total_it)
+            self.tb_writer.add_scalar("vclamp/params_this_step", len(detections), self.total_it)
+        except Exception:
+            pass
+
+    # ──────────────────────────── archive directory / hour rollover ──────
+
+    def _make_hour_dir(self, idx, start_dt):
+        """組 hour 資料夾路徑:training_<session>/hour_NN_<hour_start_ts>/"""
+        ts = start_dt.strftime("%Y%m%d_%H%M%S")
+        return self.session_dir / f"hour_{idx:02d}_{ts}"
+
+    def _update_dbg_logger_path(self, new_path):
+        """把 _dbg_logger 跟 ReplayBuffer 的 cuda_debug.log 路徑都重指到 new_path。
+
+        Module-level handler 是在 import 時建好的(指向 top-level),agent 起來之後
+        要重指到 archive dir。每次 hour rollover 也要再重指一次。delay=True 讓檔案
+        只在真的有 emit 時才開出來,避免每個 hour 資料夾留一個空 cuda_debug.log。
+        """
+        # 關掉現有所有 FileHandler 再 remove(避免 leak)
+        for h in list(_dbg_logger.handlers):
+            if isinstance(h, _logging.FileHandler):
+                try:
+                    h.flush()
+                    h.close()
+                except Exception:
+                    pass
+                _dbg_logger.removeHandler(h)
+        new_handler = _logging.FileHandler(new_path, mode="a", encoding="utf-8", delay=True)
+        new_handler.setFormatter(_logging.Formatter("%(asctime)s %(message)s"))
+        _dbg_logger.addHandler(new_handler)
+        # CategorizedReplayBuffer 也共用同一份路徑
+        _crb_module.DEBUG_CUDA_SAMPLE_LOG_PATH = new_path
+
+    def _maybe_rollover_archive_dir(self):
+        """Wall-clock 滿 1 小時就翻到下一個 hour 資料夾。
+
+        - 關掉目前的 io_log handle,在新 hour 資料夾重新開檔
+        - vclamp_events.log / training_log.csv 是 lazy-open(每次寫才開),
+          會自動跟著新的 current_archive_dir,不用在這裡顯式處理
+        - canonical *.pth 檔不動;_save_model 下次被叫到時自然會把 archive copy
+          寫到新的 hour 資料夾
+        """
+        now = datetime.datetime.now()
+        if (now - self._hour_start).total_seconds() < 3600:
+            return False
+
+        # close current io_log
+        try:
+            self._io_log.write(f"\n--- hour rollover at {now.isoformat()} ---\n")
+            self._io_log.close()
+        except Exception:
+            pass
+
+        self._hour_index += 1
+        self._hour_start = now
+        self.current_archive_dir = self._make_hour_dir(self._hour_index, now)
+        self.current_archive_dir.mkdir(parents=True, exist_ok=True)
+        # reopen io_log
+        self._io_log = open(self.current_archive_dir / "train_io_log.txt", "a", encoding="utf-8")
+        self._io_log.write(f"\n{'=' * 60}\n")
+        self._io_log.write(f"Hour {self._hour_index:02d} started: {now.isoformat()}\n")
+        self._io_log.write(f"{'=' * 60}\n")
+        self._io_log.flush()
+        # cuda_debug.log 也跟著翻頁(delay=True 所以沒 emit 就不會建檔)
+        self._update_dbg_logger_path(self.current_archive_dir / "cuda_debug.log")
+        print(f"[FQF] Hour rollover -> {self.current_archive_dir}")
+        return True
+
+    # ──────────────────────────── diagnostics helpers (cont.) ─────────────
 
     def _module_grad_norm(self, module):
         """L2 norm of all gradients inside a module (post-backward, pre-clip)."""
@@ -1057,9 +1389,11 @@ class TransformerDiscreteAgent:
         # matching TB scalars from this point in training.
         self.tb_writer.flush()
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
-        torch.save(self.backbone.state_dict(), TRANSFORMER_MODEL_PATH / "backbone.pth")
-        torch.save(self.q_network.state_dict(), TRANSFORMER_MODEL_PATH / "fqf_network.pth")
-        torch.save(self.q_target.state_dict(), TRANSFORMER_MODEL_PATH / "fqf_target.pth")
+
+        backbone_sd = self.backbone.state_dict()
+        qnet_sd = self.q_network.state_dict()
+        qtarget_sd = self.q_target.state_dict()
+
         # AdaptiveEpsilonController.state_dict() 攤平成 epsilon / total_episodes
         # / total_wins / result_window 等 key，可在 load 時直接還原給 controller。
         payload = {
@@ -1069,7 +1403,48 @@ class TransformerDiscreteAgent:
             "algorithm": "FQF",
         }
         payload.update(self.epsilon_controller.state_dict())
-        torch.save(payload, TRANSFORMER_MODEL_PATH / "optimizer_state.pth")
+
+        # Save-time NaN probe:掃所有 state_dict,任一壞就拒絕 overwrite canonical 檔。
+        # 動機:atexit 在 NaN crash 後也會被 trigger,沒這層保護就會把磁碟上的好 checkpoint
+        #      蓋成壞的(就是失敗 run 把 1 個 NaN 寫進 backbone.pth 的那條路徑)。
+        # 也掃 optimizer state — Adam 的 v 為負會在下次 load 後立刻引爆 NaN weight。
+        bad = []
+        bad.extend(self._scan_state_dict_finite("backbone", backbone_sd))
+        bad.extend(self._scan_state_dict_finite("q_network", qnet_sd))
+        bad.extend(self._scan_state_dict_finite("q_target", qtarget_sd))
+        bad.extend(self._scan_optimizer_state("optimizer", payload.get("optimizer", {})))
+
+        if bad:
+            suffix = f".crash_step{self.total_it}.pth"
+            print(f"[NaN-probe] _save_model: REFUSING to overwrite canonical checkpoints at step {self.total_it}")
+            print(f"[NaN-probe] non-finite tensors detected:")
+            for key, msg in bad:
+                print(f"[NaN-probe]   {key}: {msg}")
+            torch.save(backbone_sd,  TRANSFORMER_MODEL_PATH / f"backbone{suffix}")
+            torch.save(qnet_sd,      TRANSFORMER_MODEL_PATH / f"fqf_network{suffix}")
+            torch.save(qtarget_sd,   TRANSFORMER_MODEL_PATH / f"fqf_target{suffix}")
+            torch.save(payload,      TRANSFORMER_MODEL_PATH / f"optimizer_state{suffix}")
+            print(f"[NaN-probe] wrote *{suffix} files for offline analysis;"
+                  f" canonical *.pth left untouched (last good state preserved)")
+            return
+
+        torch.save(backbone_sd, TRANSFORMER_MODEL_PATH / "backbone.pth")
+        torch.save(qnet_sd,     TRANSFORMER_MODEL_PATH / "fqf_network.pth")
+        torch.save(qtarget_sd,  TRANSFORMER_MODEL_PATH / "fqf_target.pth")
+        torch.save(payload,     TRANSFORMER_MODEL_PATH / "optimizer_state.pth")
+
+        # 同一份也寫到當下 hour 資料夾,做歷史快照(同一小時內多次 save 會 overwrite,
+        # 留下「該小時最後一次 save」的狀態 — 滿足「保留每次的訓練結果」)
+        try:
+            archive = self.current_archive_dir
+            archive.mkdir(parents=True, exist_ok=True)
+            torch.save(backbone_sd, archive / "backbone.pth")
+            torch.save(qnet_sd,     archive / "fqf_network.pth")
+            torch.save(qtarget_sd,  archive / "fqf_target.pth")
+            torch.save(payload,     archive / "optimizer_state.pth")
+        except Exception as exc:
+            # archive 失敗不擋 canonical save 的成功
+            print(f"[FQF] WARN: archive snapshot write failed: {exc}")
 
     def save_persistent(self):
         buf = self.replay_buffer
@@ -1086,7 +1461,7 @@ class TransformerDiscreteAgent:
                 "total_it": self.total_it,
                 "episode_count": self.episode_count,
             },
-            TRANSFORMER_MODEL_PATH / "training_state.pth",
+            TRANSFORMER_MODEL_PATH / "replay_buffer.pth",
         )
 
         saved_rewards = defaultdict(int)
@@ -1100,61 +1475,166 @@ class TransformerDiscreteAgent:
         print(f"[FQF] Reward bucket distribution: {dict(saved_buckets)}")
         print("--- save end ---------------")
 
+    def _find_latest_archive_path(self, filename):
+        """掃 TRANSFORMER_MODEL_PATH/training_*/hour_*_<ts>/<filename>,回傳時間最新那份。
+
+        排序鍵是 hour 資料夾名稱裡的 timestamp(我們 save 時嵌進去的,代表 hour 起始時間),
+        不靠 mtime — 後者會被 git checkout / cp 動到,不可靠。
+
+        找不到回傳 None。
+        """
+        candidates = []
+        for session_dir in TRANSFORMER_MODEL_PATH.glob("training_*"):
+            if not session_dir.is_dir():
+                continue
+            for hour_dir in session_dir.glob("hour_*"):
+                if not hour_dir.is_dir():
+                    continue
+                # name 格式:hour_NN_YYYYMMDD_HHMMSS,timestamp 從第 3 段開始
+                parts = hour_dir.name.split("_", 2)
+                if len(parts) < 3:
+                    continue
+                ts_str = parts[2]  # "YYYYMMDD_HHMMSS",字典序 = 時間序
+                path = hour_dir / filename
+                if path.exists():
+                    candidates.append((ts_str, path))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1]
+
+    def _resolve_load_path(self, canonical_path):
+        """Load path 決策:canonical 存在就用它;不存在就 fallback 到最新 archive。
+
+        Corrupt(NaN/Inf)的 canonical 不算「不存在」,會在 _raise_if_corrupt 那層攔下,
+        不會 silent 走 archive — 因為 corrupt 通常代表你需要主動處理(sanitize / rollback)。
+        """
+        if canonical_path.exists():
+            return canonical_path
+        archive_path = self._find_latest_archive_path(canonical_path.name)
+        if archive_path is not None:
+            print(
+                f"[FQF] canonical {canonical_path.name} missing, "
+                f"falling back to latest archive: {archive_path}"
+            )
+            return archive_path
+        return None
+
+    def _raise_if_corrupt(self, label, path, state_dict):
+        """Load-time NaN probe — checkpoint 含 NaN/Inf 就 raise,阻止 silent resume。
+
+        將 raise 抽出來放到 try/except 之外,避免被原本「捕例外印 message 就吞掉」的
+        錯誤處理蓋掉。
+        """
+        bad = self._scan_state_dict_finite(label, state_dict)
+        if not bad:
+            return
+        lines = "\n".join(f"  {k}: {msg}" for k, msg in bad)
+        raise RuntimeError(
+            f"[NaN-probe] disk checkpoint corrupt at {path}:\n{lines}\n"
+            f"Refusing to load. Options: (a) run sanitize_checkpoint.py to clean, "
+            f"(b) revert to an older checkpoint in git, (c) start training from scratch."
+        )
+
     def try_load_model(self):
-        backbone_path = TRANSFORMER_MODEL_PATH / "backbone.pth"
-        if backbone_path.exists():
+        backbone_path = self._resolve_load_path(TRANSFORMER_MODEL_PATH / "backbone.pth")
+        if backbone_path is not None:
+            backbone_state = None
             try:
                 backbone_state = torch.load(backbone_path, map_location=device, weights_only=True)
-                incompatible = self.backbone.load_backbone_state(backbone_state, strict=False)
-                print("[FQF] Loaded Backbone")
-                if incompatible.missing_keys:
-                    print(f"[FQF] Backbone missing keys: {incompatible.missing_keys}")
-                if incompatible.unexpected_keys:
-                    print(f"[FQF] Backbone unexpected keys: {incompatible.unexpected_keys}")
             except Exception as exc:
-                print(f"[FQF] Failed to load Backbone: {exc}")
+                print(f"[FQF] Failed to read Backbone: {exc}")
+            if backbone_state is not None:
+                self._raise_if_corrupt("backbone(disk)", backbone_path, backbone_state)
+                try:
+                    incompatible = self.backbone.load_backbone_state(backbone_state, strict=False)
+                    print("[FQF] Loaded Backbone")
+                    if incompatible.missing_keys:
+                        print(f"[FQF] Backbone missing keys: {incompatible.missing_keys}")
+                    if incompatible.unexpected_keys:
+                        print(f"[FQF] Backbone unexpected keys: {incompatible.unexpected_keys}")
+                except Exception as exc:
+                    print(f"[FQF] Failed to apply Backbone state: {exc}")
 
-        q_path = TRANSFORMER_MODEL_PATH / "fqf_network.pth"
-        if q_path.exists():
+        q_path = self._resolve_load_path(TRANSFORMER_MODEL_PATH / "fqf_network.pth")
+        if q_path is not None:
+            q_state = None
             try:
-                self.q_network.load_state_dict(torch.load(q_path, map_location=device, weights_only=True))
-                print("[FQF] Loaded FQF-Network")
+                q_state = torch.load(q_path, map_location=device, weights_only=True)
             except Exception as exc:
-                print(f"[FQF] Failed to load FQF-Network: {exc}")
+                print(f"[FQF] Failed to read FQF-Network: {exc}")
+            if q_state is not None:
+                self._raise_if_corrupt("q_network(disk)", q_path, q_state)
+                try:
+                    self.q_network.load_state_dict(q_state)
+                    print("[FQF] Loaded FQF-Network")
+                except Exception as exc:
+                    print(f"[FQF] Failed to apply FQF-Network state: {exc}")
         elif (TRANSFORMER_MODEL_PATH / "q_network.pth").exists():
             print("[FQF] Skip legacy q_network.pth because DDQN head shape is incompatible")
 
-        q_target_path = TRANSFORMER_MODEL_PATH / "fqf_target.pth"
-        if q_target_path.exists():
+        q_target_path = self._resolve_load_path(TRANSFORMER_MODEL_PATH / "fqf_target.pth")
+        if q_target_path is not None:
+            qt_state = None
             try:
-                self.q_target.load_state_dict(torch.load(q_target_path, map_location=device, weights_only=True))
-                print("[FQF] Loaded FQF-Target")
+                qt_state = torch.load(q_target_path, map_location=device, weights_only=True)
             except Exception as exc:
-                print(f"[FQF] Failed to load FQF-Target: {exc}")
+                print(f"[FQF] Failed to read FQF-Target: {exc}")
+            if qt_state is not None:
+                self._raise_if_corrupt("q_target(disk)", q_target_path, qt_state)
+                try:
+                    self.q_target.load_state_dict(qt_state)
+                    print("[FQF] Loaded FQF-Target")
+                except Exception as exc:
+                    print(f"[FQF] Failed to apply FQF-Target state: {exc}")
         elif (TRANSFORMER_MODEL_PATH / "q_target.pth").exists():
             print("[FQF] Skip legacy q_target.pth because DDQN head shape is incompatible")
 
-        opt_path = TRANSFORMER_MODEL_PATH / "optimizer_state.pth"
-        if opt_path.exists():
+        opt_path = self._resolve_load_path(TRANSFORMER_MODEL_PATH / "optimizer_state.pth")
+        if opt_path is not None:
+            opt_payload = None
             try:
-                state = torch.load(opt_path, map_location=device, weights_only=False)
-                self.optimizer.load_state_dict(state["optimizer"])
-                self.total_it = state["total_it"]
-                self.episode_count = state.get("episode_count", 0)
-                # 直接把整包 state 餵給 controller；它只挑自己認得的 key
-                # （epsilon / total_episodes / total_wins / result_window），
-                # 舊版只存 epsilon 也能用、新版補上 window 也能用。
-                self.epsilon_controller.load_state_dict(state, deque_cls=self.deque_cls)
-                print(
-                    f"[FQF] Loaded optimizer: total_it={self.total_it},"
-                    f" episode={self.episode_count}, epsilon={self.epsilon:.4f},"
-                    f" total_episodes={self.epsilon_controller.total_episodes},"
-                    f" wins={self.epsilon_controller.total_wins}"
-                )
+                opt_payload = torch.load(opt_path, map_location=device, weights_only=False)
             except Exception as exc:
-                print(f"[FQF] Failed to load optimizer state: {exc}")
+                print(f"[FQF] Failed to read optimizer state: {exc}")
+            if opt_payload is not None:
+                # Load-time probe for optimizer state — 掃 NaN/Inf 跟 exp_avg_sq < 0
+                # (本案就是後者:Adam 的 v 不能為負,出現必為 bit-level corruption,
+                #  會讓 AdamW 算 sqrt(negative)=NaN 後把 weight 寫壞)
+                bad = self._scan_optimizer_state("optimizer(disk)", opt_payload.get("optimizer", {}))
+                if bad:
+                    lines = "\n".join(f"  {k}: {msg}" for k, msg in bad)
+                    raise RuntimeError(
+                        f"[NaN-probe] disk optimizer state corrupt at {opt_path}:\n{lines}\n"
+                        f"Refusing to load. Run sanitize_checkpoint.py to clean,"
+                        f" or revert to an older checkpoint."
+                    )
+                try:
+                    self.optimizer.load_state_dict(opt_payload["optimizer"])
+                    self.total_it = opt_payload["total_it"]
+                    self.episode_count = opt_payload.get("episode_count", 0)
+                    # 直接把整包 state 餵給 controller；它只挑自己認得的 key
+                    # （epsilon / total_episodes / total_wins / result_window），
+                    # 舊版只存 epsilon 也能用、新版補上 window 也能用。
+                    self.epsilon_controller.load_state_dict(opt_payload, deque_cls=self.deque_cls)
+                    print(
+                        f"[FQF] Loaded optimizer: total_it={self.total_it},"
+                        f" episode={self.episode_count}, epsilon={self.epsilon:.4f},"
+                        f" total_episodes={self.epsilon_controller.total_episodes},"
+                        f" wins={self.epsilon_controller.total_wins}"
+                    )
+                except Exception as exc:
+                    print(f"[FQF] Failed to apply optimizer state: {exc}")
 
-        training_state_path = TRANSFORMER_MODEL_PATH / "training_state.pth"
+        # 新檔名 replay_buffer.pth;若不存在但有舊檔 training_state.pth(rename 前的版本),
+        # 仍從舊檔載入(下次 save 會寫到新檔名,舊檔可以手動刪)
+        replay_buffer_path = TRANSFORMER_MODEL_PATH / "replay_buffer.pth"
+        legacy_path = TRANSFORMER_MODEL_PATH / "training_state.pth"
+        if not replay_buffer_path.exists() and legacy_path.exists():
+            print(f"[FQF] replay_buffer.pth not found, loading from legacy training_state.pth")
+            training_state_path = legacy_path
+        else:
+            training_state_path = replay_buffer_path
         if training_state_path.exists():
             try:
                 state = torch.load(training_state_path, map_location=device, weights_only=False)

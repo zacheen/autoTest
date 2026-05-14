@@ -40,7 +40,7 @@ EVAL_OFFSET = 50  # 第一次 eval 在 ep 50,之後每 EVAL_INTERVAL 一次:50, 
 
 # ---------- 路徑 ----------
 TENSORBOARD_DIR = Path("./models/stage1_transformer/tensorboard")
-CSV_LOG_PATH = Path("./models/stage1_transformer/training_log.csv")
+# training_log.csv 路徑由 agent.current_archive_dir 動態決定(每 hour 翻頁)
 
 
 def action_to_grid(action, rows, cols):
@@ -267,13 +267,34 @@ class CSVLogger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.file = None
         self.writer = None
+        self._fieldnames = None
 
     def open(self, fieldnames):
+        self._fieldnames = fieldnames
         file_exists = self.path.exists() and self.path.stat().st_size > 0
         self.file = open(self.path, 'a', newline='', encoding='utf-8')
         self.writer = csv.DictWriter(self.file, fieldnames=fieldnames)
         if not file_exists:
             self.writer.writeheader()
+
+    def swap_to(self, new_path):
+        """Hour rollover:關掉目前的檔,在新路徑開新檔(同樣 fieldnames),寫 header。"""
+        new_path = Path(new_path)
+        if new_path == self.path:
+            return False
+        try:
+            if self.file:
+                self.file.close()
+        except Exception:
+            pass
+        self.path = new_path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        file_exists = self.path.exists() and self.path.stat().st_size > 0
+        self.file = open(self.path, 'a', newline='', encoding='utf-8')
+        self.writer = csv.DictWriter(self.file, fieldnames=self._fieldnames)
+        if not file_exists:
+            self.writer.writeheader()
+        return True
 
     def write(self, row):
         self.writer.writerow(row)
@@ -304,8 +325,10 @@ def main():
     print(f"TensorBoard: tensorboard --logdir {TENSORBOARD_DIR}")
     print(f"  Active run: {agent.tensorboard_log_dir}")
 
-    # CSV
-    csv_logger = CSVLogger(CSV_LOG_PATH)
+    # CSV — 寫到 agent 的當下 hour 資料夾。每滿 1 hour agent 會翻新資料夾,
+    # 主迴圈在每次 write 之前 check 一下,有翻就 swap CSV 檔。
+    csv_path = agent.current_archive_dir / "training_log.csv"
+    csv_logger = CSVLogger(csv_path)
     csv_fields = [
         'episode', 'reward', 'steps', 'is_win', 'invalid_rate',
         'valid_clicks', 'invalid_clicks',
@@ -314,7 +337,7 @@ def main():
         'timestamp',
     ]
     csv_logger.open(csv_fields)
-    print(f"CSV log: {CSV_LOG_PATH}")
+    print(f"CSV log: {csv_path}")
     print()
 
     recent_rewards = deque(maxlen=LOG_INTERVAL)
@@ -330,10 +353,14 @@ def main():
             # 先讓 AdaptiveEpsilonController 看到這場結果（更新 rolling window
             # + 算出 next eps），on_episode_end 再把更新後的 epsilon 寫進 TB
             # 並做 periodic save。順序與 v3 / Demo_test_Minesweeper 一致。
+            # NOTE: log_episode_metrics 期望的 reward_mean 是「每步平均 reward」，
+            # 跟 Stage 2 (Demo_test_Minesweeper) 的 average_reward() 語意一致。
+            # 不要傳 stats['reward']（那是整場總和）。
+            episode_reward_mean = stats['reward'] / max(stats['steps'], 1)
             agent.log_episode_metrics(
                 win=stats['is_win'],
                 invalid_click_rate=stats['invalid_rate'],
-                reward_mean=stats['reward'],
+                reward_mean=episode_reward_mean,
             )
             agent.on_episode_end()
 
@@ -348,9 +375,12 @@ def main():
             # `train/Q_loss` / `train/q_mean` tag names; the agent already
             # writes those per gradient step (different step axis) — sharing
             # the tag corrupts the curves with two interleaved step counters.
-            writer.add_scalar('episode/reward', stats['reward'], agent.episode_count)
+            writer.add_scalar('episode/reward_sum', stats['reward'], agent.episode_count)
             writer.add_scalar('episode/steps', stats['steps'], agent.episode_count)
-            writer.add_scalar('episode/invalid_rate', stats['invalid_rate'], agent.episode_count)
+            # NOTE: `episode/invalid_rate` 已由 log_episode_metrics 以
+            # `episode/invalid_click_rate` 名稱寫入（同值），不需在此重複寫。
+            # NOTE: `episode/reward_mean`（每步平均 reward）由 log_episode_metrics
+            # 寫入，這裡寫的 `episode/reward_sum` 是整場總和，兩者互補。
             if stats['Q_loss'] is not None:
                 writer.add_scalar('episode/Q_loss_avg', stats['Q_loss'], agent.episode_count)
                 writer.add_scalar('episode/q_mean_avg', stats['q_mean'], agent.episode_count)
@@ -393,6 +423,10 @@ def main():
                       f"Avg Steps: {eval_stats['avg_steps']:>5.1f} | "
                       f"Invalid Rate: {eval_stats['avg_invalid_rate']:.2%}")
 
+            # Hour rollover check:若 agent 已翻到下一個 hour 資料夾,把 CSV 也接過去
+            target_csv = agent.current_archive_dir / "training_log.csv"
+            if csv_logger.path != target_csv:
+                csv_logger.swap_to(target_csv)
             csv_logger.write(csv_row)
 
             # Console log
@@ -446,7 +480,7 @@ def main():
 
     finally:
         print(f"\nTensorBoard logs: {agent.tensorboard_log_dir}")
-        print(f"CSV log: {CSV_LOG_PATH}")
+        print(f"CSV log: {csv_logger.path}")
         csv_logger.close()
         # Don't close writer here — it's owned by the agent and will be
         # closed via the agent's atexit hook. Calling close() twice on the
