@@ -353,10 +353,14 @@ def main():
             # 先讓 AdaptiveEpsilonController 看到這場結果（更新 rolling window
             # + 算出 next eps），on_episode_end 再把更新後的 epsilon 寫進 TB
             # 並做 periodic save。順序與 v3 / Demo_test_Minesweeper 一致。
+            # NOTE: log_episode_metrics 期望的 reward_mean 是「每步平均 reward」，
+            # 跟 Stage 2 (Demo_test_Minesweeper) 的 average_reward() 語意一致。
+            # 不要傳 stats['reward']（那是整場總和）。
+            episode_reward_mean = stats['reward'] / max(stats['steps'], 1)
             agent.log_episode_metrics(
                 win=stats['is_win'],
                 invalid_click_rate=stats['invalid_rate'],
-                reward_mean=stats['reward'],
+                reward_mean=episode_reward_mean,
             )
             agent.on_episode_end()
 
@@ -371,9 +375,12 @@ def main():
             # `train/Q_loss` / `train/q_mean` tag names; the agent already
             # writes those per gradient step (different step axis) — sharing
             # the tag corrupts the curves with two interleaved step counters.
-            writer.add_scalar('episode/reward', stats['reward'], agent.episode_count)
+            writer.add_scalar('episode/reward_sum', stats['reward'], agent.episode_count)
             writer.add_scalar('episode/steps', stats['steps'], agent.episode_count)
-            writer.add_scalar('episode/invalid_rate', stats['invalid_rate'], agent.episode_count)
+            # NOTE: `episode/invalid_rate` 已由 log_episode_metrics 以
+            # `episode/invalid_click_rate` 名稱寫入（同值），不需在此重複寫。
+            # NOTE: `episode/reward_mean`（每步平均 reward）由 log_episode_metrics
+            # 寫入，這裡寫的 `episode/reward_sum` 是整場總和，兩者互補。
             if stats['Q_loss'] is not None:
                 writer.add_scalar('episode/Q_loss_avg', stats['Q_loss'], agent.episode_count)
                 writer.add_scalar('episode/q_mean_avg', stats['q_mean'], agent.episode_count)
