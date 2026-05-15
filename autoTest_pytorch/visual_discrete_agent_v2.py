@@ -52,6 +52,7 @@ from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from model_structure.visual_agent_common import VisualAgentCommonMixin
 from model_structure.adaptive_epsilon import AdaptiveEpsilonController
+from model_structure.history import TrainingHistory
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -202,12 +203,14 @@ class VisualAgentV2(VisualAgentCommonMixin):
 
         # ── adaptive epsilon state (win-rate based) ──
         # v2 沿用較寬的 wr_max=0.9（與 v3 的 0.85 不同）— 透過 controller 參數注入。
+        # Episode 結果累積/查詢交給 TrainingHistory,controller 只吃 win_rate。
         self.epsilon_controller = AdaptiveEpsilonController(
             wr_min=0.1,
             wr_max=0.9,
             eps_min=0.001,
             eps_max=0.30,
         )
+        self.training_history = TrainingHistory()
 
         # ── blocked-action tracking ──
         self.blocked_actions: set[int] = set()
@@ -243,7 +246,7 @@ class VisualAgentV2(VisualAgentCommonMixin):
 
     @property
     def episode_count_public(self) -> int:
-        return self.epsilon_controller.total_episodes
+        return self.training_history.total_episodes
 
     @property
     def epsilon(self) -> float:
@@ -579,7 +582,7 @@ class VisualAgentV2(VisualAgentCommonMixin):
     def on_episode_end(self) -> None:
         self._flush_n_step_buffer()
         self.episode_count += 1
-        # epsilon 已在 log_episode_metrics() 透過 controller.record_episode 更新好
+        # epsilon 已在 log_episode_metrics() 透過 history.record + controller.update 更新好
         self.tb_writer.add_scalar("episode/epsilon", self.epsilon, self.episode_count)
         self._save_model()
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
@@ -587,23 +590,24 @@ class VisualAgentV2(VisualAgentCommonMixin):
             self.save_persistent()
 
     def log_episode_metrics(self, win: bool, invalid_click_rate: float, reward_mean: float) -> None:
-        next_eps = self.epsilon_controller.record_episode(win=win)
-        ep_idx = self.epsilon_controller.total_episodes
-        rolling_wr = self.epsilon_controller.rolling_win_rate()
-        overall_wr = self.epsilon_controller.overall_win_rate()
+        # 1) 先把結果記到 history,2) 從 history 取 rolling win rate,
+        # 3) 用 win rate 餵 controller 更新 epsilon。
+        self.training_history.record(win=win)
+        ep_idx = self.training_history.total_episodes
+        rolling_wr = self.training_history.win_rate(window=100)
+        next_eps = self.epsilon_controller.update(rolling_wr)
 
         self.tb_writer.add_scalar("episode/reward_mean",        float(reward_mean),        ep_idx)
         self.tb_writer.add_scalar("episode/win",                float(bool(win)),          ep_idx)
         self.tb_writer.add_scalar("episode/invalid_click_rate", float(invalid_click_rate),ep_idx)
-        self.tb_writer.add_scalar("episode/win_rate_100",       rolling_wr,                ep_idx)
-        self.tb_writer.add_scalar("episode/win_rate_all",       overall_wr,                ep_idx)
+        self.tb_writer.add_scalar("episode/win_rate_recent",    rolling_wr,                ep_idx)
         self.tb_writer.flush()
 
         status = "WIN " if win else "LOSE"
         print(
             f"[V2] Ep {ep_idx}: {status} | "
             f"invalid={invalid_click_rate:.1%} | reward={reward_mean:.3f} | "
-            f"win_rate(last100)={rolling_wr:.1%} | win_rate(all)={overall_wr:.1%} | "
+            f"win_rate(recent)={rolling_wr:.1%} | "
             f"eps(next)={next_eps:.4f}"
         )
 

@@ -46,6 +46,7 @@ from model_structure.visual_agent_common import VisualAgentCommonMixin
 from model_structure.yolo_encoder_base import YOLOEncoderBase, DEFAULT_ENCODER_DIMS
 from model_structure.optimizer_factory import build_fqf_optimizer
 from model_structure.adaptive_epsilon import AdaptiveEpsilonController
+from model_structure.history import TrainingHistory
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CHECKPOINT_RED = "\033[91;1m"
@@ -358,9 +359,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.recent_real_rewards = deque(maxlen=100)
 
         # ── adaptive epsilon ──
-        # 共用 controller，stage1 (TransformerDiscreteAgent) 也用同一個 class
-        # 並傳入相同參數，邏輯只維護在一處。
+        # 共用 controller,stage1 (TransformerDiscreteAgent) 也用同一個 class。
+        # Episode 結果累積/查詢交給 TrainingHistory,controller 只吃 win_rate。
         self.epsilon_controller = AdaptiveEpsilonController()
+        self.training_history = TrainingHistory()
 
         # ── blocked-action tracking (episode-scoped) ──
         self.blocked_actions: set[int] = set()
@@ -409,7 +411,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
     @property
     def episode_count_public(self) -> int:
-        return self.epsilon_controller.total_episodes
+        return self.training_history.total_episodes
 
     # epsilon 由 controller 統一管理，但保留 self.epsilon 介面：
     # 1) select_action / TB log / 印 log 都直接讀 self.epsilon
@@ -849,7 +851,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
     def reset_episode(self) -> None:
         self._flush_n_step_buffer()
         self.clear_blocked_actions(reason="episode reset")
-        next_episode_idx = self.epsilon_controller.total_episodes + 1
+        next_episode_idx = self.training_history.total_episodes + 1
         self._log_actions_this_episode = (
             self.action_log_every_n_episodes > 0
             and next_episode_idx % self.action_log_every_n_episodes == 0
@@ -860,7 +862,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
     def on_episode_end(self) -> None:
         self._flush_n_step_buffer()
         self.episode_count += 1
-        # epsilon 已在 log_episode_metrics() 透過 controller.record_episode 更新好
+        # epsilon 已在 log_episode_metrics() 透過 history.record + controller.update 更新好
         self.tb_writer.add_scalar("episode/epsilon", self.epsilon, self.episode_count)
         self._save_model()
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
@@ -868,24 +870,24 @@ class VisualAgentV3(VisualAgentCommonMixin):
             self.save_persistent()
 
     def log_episode_metrics(self, win: bool, invalid_click_rate: float, reward_mean: float) -> None:
-        # 紀錄結果 + 更新 epsilon（controller 內部以 log-interpolation 算 next eps）
-        next_eps = self.epsilon_controller.record_episode(win=win)
-        ep_idx = self.epsilon_controller.total_episodes
-        rolling_wr = self.epsilon_controller.rolling_win_rate()
-        overall_wr = self.epsilon_controller.overall_win_rate()
+        # 1) 先把結果記到 history,2) 從 history 取 rolling win rate,
+        # 3) 用 win rate 餵 controller 更新 epsilon (log-interpolation)。
+        self.training_history.record(win=win)
+        ep_idx = self.training_history.total_episodes
+        rolling_wr = self.training_history.win_rate(window=100)
+        next_eps = self.epsilon_controller.update(rolling_wr)
 
         self.tb_writer.add_scalar("episode/reward_mean",        float(reward_mean),        ep_idx)
         self.tb_writer.add_scalar("episode/win",                float(bool(win)),          ep_idx)
         self.tb_writer.add_scalar("episode/invalid_click_rate", float(invalid_click_rate),ep_idx)
-        self.tb_writer.add_scalar("episode/win_rate_100",       rolling_wr,                ep_idx)
-        self.tb_writer.add_scalar("episode/win_rate_all",       overall_wr,                ep_idx)
+        self.tb_writer.add_scalar("episode/win_rate_recent",    rolling_wr,                ep_idx)
         self.tb_writer.flush()
 
         status = "WIN " if win else "LOSE"
         print(
             f"[V3] Ep {ep_idx}: {status} | "
             f"invalid={invalid_click_rate:.1%} | reward={reward_mean:.3f} | "
-            f"win_rate(last100)={rolling_wr:.1%} | win_rate(all)={overall_wr:.1%} | "
+            f"win_rate(recent)={rolling_wr:.1%} | "
             f"eps(next)={next_eps:.4f}"
         )
 

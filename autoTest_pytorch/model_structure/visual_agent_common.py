@@ -29,6 +29,9 @@ class VisualAgentCommonMixin:
     def _training_state_path(self) -> Path:
         return self.model_path / "training_state.pth"
 
+    def _training_history_path(self) -> Path:
+        return self.model_path / "training_history.pth"
+
     def store_transition(
         self,
         state: torch.Tensor,
@@ -86,8 +89,8 @@ class VisualAgentCommonMixin:
             self._commit_n_step_transition(len(self.n_step_buffer))
 
     def _save_optimizer_state(self) -> None:
-        # AdaptiveEpsilonController.state_dict() 攤平成 epsilon / total_episodes
-        # / total_wins / result_window 等 key，跟舊版存檔格式相容。
+        # optimizer state 只含 optimizer / scaler / total_it / episode_count / epsilon。
+        # Episode 結果累積/查詢搬到 TrainingHistory,寫到獨立檔 training_history.pth。
         payload = {
             "optimizer": self.optimizer.state_dict(),
             "scaler": self.scaler.state_dict(),
@@ -96,6 +99,12 @@ class VisualAgentCommonMixin:
         }
         payload.update(self.epsilon_controller.state_dict())
         torch.save(payload, self._optimizer_state_path())
+
+        # TrainingHistory 走獨立檔,跟 optimizer state 解耦。
+        try:
+            torch.save(self.training_history.state_dict(), self._training_history_path())
+        except Exception as exc:
+            print(f"{self.log_prefix} Failed to save training_history: {exc}")
 
     def _load_optimizer_state(self) -> None:
         opt_path = self._optimizer_state_path()
@@ -106,13 +115,18 @@ class VisualAgentCommonMixin:
             self.optimizer.load_state_dict(state["optimizer"])
             self.total_it = state.get("total_it", 0)
             self.episode_count = state.get("episode_count", 0)
-            # AdaptiveEpsilonController 直接吃 state（key 名沿用舊版 flat 格式）
-            self.epsilon_controller.load_state_dict(state, deque_cls=self.deque_cls)
+            # AdaptiveEpsilonController 只剩 epsilon 一個 key。
+            self.epsilon_controller.load_state_dict(state)
+
+            # TrainingHistory:優先用獨立檔;舊 checkpoint 還沒拆檔時,
+            # 從 optimizer state 撈 legacy 扁平 keys (result_window /
+            # total_episodes) 餵進去,完成一次性 migration。
+            self._load_training_history(legacy_state=state)
+
             print(
                 f"{self.log_prefix} Loaded optimizer: total_it={self.total_it}, "
                 f"episode={self.episode_count}, epsilon={self.epsilon_controller.epsilon:.4f}, "
-                f"total_episodes={self.epsilon_controller.total_episodes}, "
-                f"wins={self.epsilon_controller.total_wins}"
+                f"total_episodes={self.training_history.total_episodes}"
             )
             if "scaler" in state and self.scaler.is_enabled():
                 try:
@@ -125,6 +139,37 @@ class VisualAgentCommonMixin:
                 self._log_checkpoint_message(message, warning=True)
             else:
                 print(f"{self.log_prefix} {message}")
+
+    def _load_training_history(self, legacy_state: dict | None = None) -> None:
+        """Load TrainingHistory:獨立檔優先,舊 flat optimizer state 是 fallback。
+
+        legacy_state 是當前 optimizer state 的 dict (load 流程順手帶進來);
+        若新獨立檔不存在但 legacy_state 含有舊扁平 keys,撈出來做 migration。
+        """
+        history_path = self._training_history_path()
+        if history_path.exists():
+            try:
+                hist_state = torch.load(
+                    history_path, map_location=self.device, weights_only=False
+                )
+                self.training_history.load_state_dict(
+                    hist_state, deque_cls=self.deque_cls
+                )
+                return
+            except Exception as exc:
+                print(f"{self.log_prefix} Failed to load training_history.pth: {exc}")
+                # 落到下面 legacy fallback
+        if legacy_state and any(
+            k in legacy_state for k in ("result_window", "total_episodes")
+        ):
+            legacy = {
+                "results": legacy_state.get("result_window", []),
+                "total_episodes": legacy_state.get("total_episodes", 0),
+            }
+            self.training_history.load_state_dict(legacy, deque_cls=self.deque_cls)
+            print(
+                f"{self.log_prefix} Migrated legacy training history from optimizer state"
+            )
 
     def save_persistent(self) -> None:
         buf = self.replay_buffer

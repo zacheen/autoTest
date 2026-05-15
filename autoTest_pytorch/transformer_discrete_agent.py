@@ -16,6 +16,7 @@ from model_structure.transformer_shared import EncoderDecoderTransformer, FQFQNe
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from model_structure.optimizer_factory import build_fqf_optimizer
 from model_structure.adaptive_epsilon import AdaptiveEpsilonController
+from model_structure.history import TrainingHistory
 import model_structure.CategorizedReplayBuffer as _crb_module
 
 
@@ -316,10 +317,12 @@ class TransformerDiscreteAgent:
         self.n_step_buffer = deque()
 
         # ── adaptive epsilon ──
-        # 跟 v3 共用同一個 controller class，並用相同 wr / eps 範圍。Stage1 與
-        # stage2 對 minesweeper 6x6 的 reward signal 相同，所以套用一致的設定。
+        # 跟 v3 共用同一個 controller class,並用相同 wr / eps 範圍。Stage1 與
+        # stage2 對 minesweeper 6x6 的 reward signal 相同,所以套用一致的設定。
+        # Episode 結果累積/查詢交給 TrainingHistory,controller 只吃 win_rate。
         self.epsilon_controller = AdaptiveEpsilonController()
-        self.deque_cls = deque  # 給 controller.load_state_dict() 用
+        self.training_history = TrainingHistory()
+        self.deque_cls = deque  # 給 training_history.load_state_dict() 用
 
         # episode-scoped blocked actions (v3 風格)：點過的格子在本 episode 內 mask 掉
         self.blocked_actions: set[int] = set()
@@ -1333,7 +1336,7 @@ class TransformerDiscreteAgent:
     def on_episode_end(self):
         self._flush_n_step_buffer()
         self.episode_count += 1
-        # epsilon 已在 log_episode_metrics() 透過 controller.record_episode 更新好
+        # epsilon 已在 log_episode_metrics() 透過 history.record + controller.update 更新好
         self.tb_writer.add_scalar("episode/epsilon", self.epsilon, self.episode_count)
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
             print(
@@ -1349,20 +1352,21 @@ class TransformerDiscreteAgent:
         invalid_click_rate: float = 0.0,
         reward_mean: float = 0.0,
     ) -> None:
-        """記錄一場 episode 結果，並讓 controller 依 rolling win rate 更新 epsilon。
+        """記錄一場 episode 結果,並依 rolling win rate 更新 epsilon。
 
-        與 v3 / v2 介面一致：訓練腳本應在 `on_episode_end()` 之前呼叫一次。
+        與 v3 / v2 介面一致:訓練腳本應在 `on_episode_end()` 之前呼叫一次。
+        流程:1) 結果記到 TrainingHistory,2) 從 history 取 rolling win rate,
+        3) 把 win rate 餵給 controller 算 next epsilon。
         """
-        next_eps = self.epsilon_controller.record_episode(win=win)
-        ep_idx = self.epsilon_controller.total_episodes
-        rolling_wr = self.epsilon_controller.rolling_win_rate()
-        overall_wr = self.epsilon_controller.overall_win_rate()
+        self.training_history.record(win=win)
+        ep_idx = self.training_history.total_episodes
+        rolling_wr = self.training_history.win_rate(window=100)
+        next_eps = self.epsilon_controller.update(rolling_wr)
 
         self.tb_writer.add_scalar("episode/reward_mean",        float(reward_mean),        ep_idx)
         self.tb_writer.add_scalar("episode/win",                float(bool(win)),          ep_idx)
         self.tb_writer.add_scalar("episode/invalid_click_rate", float(invalid_click_rate), ep_idx)
-        self.tb_writer.add_scalar("episode/win_rate_100",       rolling_wr,                ep_idx)
-        self.tb_writer.add_scalar("episode/win_rate_all",       overall_wr,                ep_idx)
+        self.tb_writer.add_scalar("episode/win_rate_recent",    rolling_wr,                ep_idx)
         self.tb_writer.add_scalar("episode/eps_next",           next_eps,                  ep_idx)
 
     # ──────────────────────────── lr warmup ────────────────────────────
@@ -1396,8 +1400,9 @@ class TransformerDiscreteAgent:
         qnet_sd = self.q_network.state_dict()
         qtarget_sd = self.q_target.state_dict()
 
-        # AdaptiveEpsilonController.state_dict() 攤平成 epsilon / total_episodes
-        # / total_wins / result_window 等 key，可在 load 時直接還原給 controller。
+        # optimizer state 只含 optimizer / total_it / episode_count / algorithm / epsilon。
+        # Episode 結果累積/查詢搬到 TrainingHistory,寫到獨立檔 training_history.pth
+        # (見下方 torch.save)。
         payload = {
             "optimizer": self.optimizer.state_dict(),
             "total_it": self.total_it,
@@ -1405,6 +1410,7 @@ class TransformerDiscreteAgent:
             "algorithm": "FQF",
         }
         payload.update(self.epsilon_controller.state_dict())
+        training_history_sd = self.training_history.state_dict()
 
         # ── RNG state snapshot ─────────────────────────────────────────
         # Save 全部 4 個 RNG source 的 state,給 restart 後完整還原。
@@ -1444,20 +1450,22 @@ class TransformerDiscreteAgent:
                   f" canonical *.pth left untouched (last good state preserved)")
             return
 
-        torch.save(backbone_sd, TRANSFORMER_MODEL_PATH / "backbone.pth")
-        torch.save(qnet_sd,     TRANSFORMER_MODEL_PATH / "fqf_network.pth")
-        torch.save(qtarget_sd,  TRANSFORMER_MODEL_PATH / "fqf_target.pth")
-        torch.save(payload,     TRANSFORMER_MODEL_PATH / "optimizer_state.pth")
+        torch.save(backbone_sd,        TRANSFORMER_MODEL_PATH / "backbone.pth")
+        torch.save(qnet_sd,            TRANSFORMER_MODEL_PATH / "fqf_network.pth")
+        torch.save(qtarget_sd,         TRANSFORMER_MODEL_PATH / "fqf_target.pth")
+        torch.save(payload,            TRANSFORMER_MODEL_PATH / "optimizer_state.pth")
+        torch.save(training_history_sd, TRANSFORMER_MODEL_PATH / "training_history.pth")
 
         # 同一份也寫到當下 hour 資料夾,做歷史快照(同一小時內多次 save 會 overwrite,
         # 留下「該小時最後一次 save」的狀態 — 滿足「保留每次的訓練結果」)
         try:
             archive = self.current_archive_dir
             archive.mkdir(parents=True, exist_ok=True)
-            torch.save(backbone_sd, archive / "backbone.pth")
-            torch.save(qnet_sd,     archive / "fqf_network.pth")
-            torch.save(qtarget_sd,  archive / "fqf_target.pth")
-            torch.save(payload,     archive / "optimizer_state.pth")
+            torch.save(backbone_sd,         archive / "backbone.pth")
+            torch.save(qnet_sd,             archive / "fqf_network.pth")
+            torch.save(qtarget_sd,          archive / "fqf_target.pth")
+            torch.save(payload,             archive / "optimizer_state.pth")
+            torch.save(training_history_sd, archive / "training_history.pth")
         except Exception as exc:
             # archive 失敗不擋 canonical save 的成功
             print(f"[FQF] WARN: archive snapshot write failed: {exc}")
@@ -1535,6 +1543,38 @@ class TransformerDiscreteAgent:
             )
             return archive_path
         return None
+
+    def _load_training_history(self, legacy_state: dict | None = None) -> None:
+        """Load TrainingHistory:獨立檔 training_history.pth 優先,
+        舊扁平 optimizer state 是 fallback (一次性 migration)。
+
+        Canonical 不存在會自動 fallback 到最新 archive (走 _resolve_load_path),
+        跟其他 checkpoint 的 load 路徑一致。
+        """
+        history_path = self._resolve_load_path(
+            TRANSFORMER_MODEL_PATH / "training_history.pth"
+        )
+        if history_path is not None:
+            try:
+                hist_state = torch.load(
+                    history_path, map_location=device, weights_only=False
+                )
+                self.training_history.load_state_dict(
+                    hist_state, deque_cls=self.deque_cls
+                )
+                return
+            except Exception as exc:
+                print(f"[FQF] Failed to load training_history.pth: {exc}")
+                # 落到下面 legacy fallback
+        if legacy_state and any(
+            k in legacy_state for k in ("result_window", "total_episodes")
+        ):
+            legacy = {
+                "results": legacy_state.get("result_window", []),
+                "total_episodes": legacy_state.get("total_episodes", 0),
+            }
+            self.training_history.load_state_dict(legacy, deque_cls=self.deque_cls)
+            print("[FQF] Migrated legacy training history from optimizer state")
 
     def _raise_if_corrupt(self, label, path, state_dict):
         """Load-time NaN probe — checkpoint 含 NaN/Inf 就 raise,阻止 silent resume。
@@ -1629,15 +1669,14 @@ class TransformerDiscreteAgent:
                     self.optimizer.load_state_dict(opt_payload["optimizer"])
                     self.total_it = opt_payload["total_it"]
                     self.episode_count = opt_payload.get("episode_count", 0)
-                    # 直接把整包 state 餵給 controller；它只挑自己認得的 key
-                    # （epsilon / total_episodes / total_wins / result_window），
-                    # 舊版只存 epsilon 也能用、新版補上 window 也能用。
-                    self.epsilon_controller.load_state_dict(opt_payload, deque_cls=self.deque_cls)
+                    # Controller 只剩 epsilon 一個 key;TrainingHistory 走獨立檔,
+                    # 舊 checkpoint 把 history 攤平存在 opt_payload 的情況用 fallback。
+                    self.epsilon_controller.load_state_dict(opt_payload)
+                    self._load_training_history(legacy_state=opt_payload)
                     print(
                         f"[FQF] Loaded optimizer: total_it={self.total_it},"
                         f" episode={self.episode_count}, epsilon={self.epsilon:.4f},"
-                        f" total_episodes={self.epsilon_controller.total_episodes},"
-                        f" wins={self.epsilon_controller.total_wins}"
+                        f" total_episodes={self.training_history.total_episodes}"
                     )
                     # ── RNG state restore ──────────────────────────────
                     # 還原 save 那刻的 random / numpy / torch / cuda RNG state,
