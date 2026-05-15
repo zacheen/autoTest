@@ -32,6 +32,7 @@ TARGET_UPDATE_FREQ = 50
 N_STEP = 1
 NUM_FQF_FRACTIONS = 8
 FQF_ENTROPY_COEF = 1e-3
+MINIMUM_DATA_SIZE = min(PER_CAPACITY, SAVE_CAPACITY*4)-1  # below this amount, won't start training
 GRAD_CLIP_NORM = 5.0
 # Heavy diagnostics — log less frequently to avoid TensorBoard bloat / overhead.
 HISTOGRAM_EVERY = 200          # per-layer weight/grad norms
@@ -483,7 +484,8 @@ class TransformerDiscreteAgent:
         extra_params_to_clip : optional iterable of extra parameters to include in the
                                gradient-norm clip (e.g. YOLO parameters).
         """
-        if self.replay_buffer.size() < BATCH_SIZE:
+        buf_size = self.replay_buffer.size()
+        if buf_size < MINIMUM_DATA_SIZE:
             return None
 
         self.total_it += 1
@@ -493,7 +495,7 @@ class TransformerDiscreteAgent:
         self._maybe_rollover_archive_dir()
 
         try:
-            _dbg(f"[train_step] ENTER total_it={self.total_it} buf_size={self.replay_buffer.size()}")
+            _dbg(f"[train_step] ENTER total_it={self.total_it} buf_size={buf_size}")
             _dbg_mem("train_step ENTER")
             _dbg("[train_step] before replay_buffer.sample")
             state, action, next_state, reward, done, per_indices, is_weights, discounts, n_steps = self.replay_buffer.sample(
