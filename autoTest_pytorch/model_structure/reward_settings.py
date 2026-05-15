@@ -29,5 +29,5 @@ MINESWEEPER_REWARD_CONFIG = RewardConfig(
     invalid_click = -0.75, # discrete invalid_click can be bigger than lose
     lose = -0.7,
     win = 1,
-    gamma = 0.99,
+    gamma = 0.9,
 )
