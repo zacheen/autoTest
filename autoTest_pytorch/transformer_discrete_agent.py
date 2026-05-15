@@ -1404,6 +1404,20 @@ class TransformerDiscreteAgent:
         }
         payload.update(self.epsilon_controller.state_dict())
 
+        # ── RNG state snapshot ─────────────────────────────────────────
+        # Save 全部 4 個 RNG source 的 state,給 restart 後完整還原。
+        # 不存的話,restart 會用全新的 seed,讓 Minesweeper 板生成、ε-random
+        # action、replay buffer 取樣等等都跟 save 那刻不同 → trajectory 跟
+        # buffer 內舊 transition 屬於不同分布 → 立即訓練時 bootstrap 矛盾
+        # 造成 win rate drop。實驗(seed 42 跑兩次得到 bit-identical 結果)
+        # 確認 RNG 控制可達成完整 determinism。
+        payload["rng_state"] = {
+            "python_random": random.getstate(),
+            "numpy":         np.random.get_state(),
+            "torch_cpu":     torch.get_rng_state(),
+            "cuda":          torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        }
+
         # Save-time NaN probe:掃所有 state_dict,任一壞就拒絕 overwrite canonical 檔。
         # 動機:atexit 在 NaN crash 後也會被 trigger,沒這層保護就會把磁碟上的好 checkpoint
         #      蓋成壞的(就是失敗 run 把 1 個 NaN 寫進 backbone.pth 的那條路徑)。
@@ -1623,6 +1637,55 @@ class TransformerDiscreteAgent:
                         f" total_episodes={self.epsilon_controller.total_episodes},"
                         f" wins={self.epsilon_controller.total_wins}"
                     )
+                    # ── RNG state restore ──────────────────────────────
+                    # 還原 save 那刻的 random / numpy / torch / cuda RNG state,
+                    # 讓 restart 後 trajectory 跟 save 那刻完整延續(避免 buffer
+                    # 內舊 transition 跟新 trajectory 分布不一致導致 bootstrap 矛盾)。
+                    # 舊 checkpoint 沒 rng_state 欄位時 silent skip,保持向下相容。
+                    # 注意:torch.load(map_location=device) 會把整個 payload 的
+                    # tensor 都搬到 device。torch.set_rng_state() 一定要 CPU
+                    # ByteTensor,所以要 .cpu() 後再傳。
+                    rng_state = opt_payload.get("rng_state")
+                    if rng_state:
+                        restored = []
+                        try:
+                            random.setstate(rng_state["python_random"])
+                            restored.append("python_random")
+                        except (KeyError, TypeError, ValueError) as exc:
+                            print(f"[RNG] failed to restore python random: {exc}")
+                        try:
+                            np.random.set_state(rng_state["numpy"])
+                            restored.append("numpy")
+                        except (KeyError, TypeError, ValueError) as exc:
+                            print(f"[RNG] failed to restore numpy: {exc}")
+                        try:
+                            torch_cpu_state = rng_state["torch_cpu"]
+                            if torch.is_tensor(torch_cpu_state):
+                                torch_cpu_state = torch_cpu_state.cpu()
+                            torch.set_rng_state(torch_cpu_state)
+                            restored.append("torch_cpu")
+                        except (KeyError, TypeError, RuntimeError) as exc:
+                            print(f"[RNG] failed to restore torch cpu: {exc}")
+                        cuda_state = rng_state.get("cuda")
+                        if cuda_state is not None and torch.cuda.is_available():
+                            try:
+                                # cuda RNG state 是 list[Tensor],每張 GPU 一個。
+                                # 強制每個 element 都搬到 CPU。
+                                cuda_state_cpu = [
+                                    s.cpu() if torch.is_tensor(s) else s
+                                    for s in cuda_state
+                                ]
+                                torch.cuda.set_rng_state_all(cuda_state_cpu)
+                                restored.append("cuda")
+                            except (TypeError, RuntimeError) as exc:
+                                print(f"[RNG] failed to restore cuda: {exc}")
+                        print(f"[RNG] Restored RNG state: {', '.join(restored)}")
+                    else:
+                        print(
+                            f"[RNG] No rng_state in checkpoint (legacy save) —"
+                            f" restart will use fresh RNG,trajectory 不會跟 save"
+                            f" 那刻延續(這是 win rate drop 的根因,新 save 會修)"
+                        )
                 except Exception as exc:
                     print(f"[FQF] Failed to apply optimizer state: {exc}")
 
