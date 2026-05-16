@@ -364,6 +364,13 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.epsilon_controller = AdaptiveEpsilonController()
         self.training_history = TrainingHistory()
 
+        # Lazy-captured at first train_step: if the loaded TrainingHistory shows last
+        # win_rate(window=100) > 0.5, we additionally gate training on the replay buffer
+        # having all 4 classes filled to their 12.5% soft-floor quota. Fresh runs
+        # (history empty → win_rate=0) and weak resumes skip this gate.
+        # Captured once and frozen for the whole session.
+        self._class_quota_gate_enabled: bool | None = None
+
         # ── blocked-action tracking (episode-scoped) ──
         self.blocked_actions: set[int] = set()
 
@@ -597,6 +604,14 @@ class VisualAgentV3(VisualAgentCommonMixin):
     def train_step(self):
         buf_size = self.replay_buffer.size()
         if buf_size < MINIMUM_DATA_SIZE:
+            return None
+
+        # Capture-once class_quota gate decision based on loaded training_history.
+        # Only enforce balanced-data warmup when resuming from a session that was already
+        # performing well (win_rate > 50%); fresh / weak runs proceed without this gate.
+        if self._class_quota_gate_enabled is None:
+            self._class_quota_gate_enabled = self.training_history.win_rate(window=100) > 0.5
+        if self._class_quota_gate_enabled and not self.replay_buffer.is_class_quota_filled():
             return None
 
         self.total_it += 1

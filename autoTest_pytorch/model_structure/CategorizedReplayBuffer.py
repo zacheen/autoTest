@@ -639,6 +639,25 @@ class CategorizedReplayBuffer:
                 counts["progress"] = counts.get("progress", 0) + 1
         return counts
 
+    @property
+    def class_quota(self) -> int:
+        """Per-class soft-floor quota used by ``top_k_balanced`` and ``sample()``.
+
+        With 4 classes and a 50% balanced share, this equals ``max_size // 8``
+        (i.e. 12.5% of buffer capacity per class).
+        """
+        return max(1, (self.max_size // 2) // len(self.REWARD_TYPES))
+
+    def is_class_quota_filled(self) -> bool:
+        """True iff every reward_type bucket has at least ``class_quota`` entries.
+
+        Useful as a training-readiness gate on top of ``MINIMUM_DATA_SIZE``: ensures
+        the buffer can actually deliver a balanced batch (each class can fill its
+        12.5% soft-floor slot in ``sample()``).
+        """
+        quota = self.class_quota
+        return all(count >= quota for count in self.bucket_sizes().values())
+
     def get_all_entries(self):
         """Returns internal objects suitable for RAM persistent saving. 
         Note this won't move disk files, just the internal state index."""
