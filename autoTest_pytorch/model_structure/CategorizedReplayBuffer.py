@@ -27,14 +27,22 @@ def _dbg_log(msg: str) -> None:
 
 class CategorizedReplayBuffer:
     """A generic Categorized Replay Buffer.
-    
+
     Supports:
-    1. Categorized Bucketing based on reward thresholds (win/lose/progress/invalid/other).
+    1. Categorized Bucketing based on reward thresholds (win / lose / invalid / progress).
     2. RAM-based storage (for small states) or Disk-backed storage (for memory-heavy images).
-    3. Age-decay priority for preventing stale strong experiences from taking up priority.
+    3. Two-axis priority decay:
+       - age_decay   : suppresses stale entries over time
+       - sample_decay: suppresses entries that keep getting sampled with high TD-error
+                       (Method B defense against stochastic-transition traps)
+    4. 50% balanced + 50% PER allocation for BOTH eviction (``top_k_balanced``) and
+       sampling (``sample``):
+       - Balanced half: each class gets a soft floor (12.5% of slots with 4 classes).
+       - PER half: pure priority-weighted, cross-class. Slack from empty/starved
+         classes flows here automatically.
     """
 
-    REWARD_TYPES = ("win", "lose", "invalid", "progress", "other")
+    REWARD_TYPES = ("win", "lose", "invalid", "progress")
 
     def __init__(
         self,
@@ -52,6 +60,7 @@ class CategorizedReplayBuffer:
         priority_eps: float = 1e-3,
         age_decay: float = 0.002,
         max_age: int = 2000,
+        sample_decay: float = 0.05,
         beta_start: float = 0.4,
     ):
         """
@@ -65,11 +74,18 @@ class CategorizedReplayBuffer:
             overflow_margin: Amount of items past max_size before a full prune is triggered.
             alpha: Priority coefficient (0 = uniform, 1 = full priority).
             uniform_mix: Ratio of completely random items selected per bucket before priority is considered.
+                Applied to the BALANCED half of sample()/top_k_balanced; PER half is pure priority.
             priority_min: Lowest possible priority score an item can have.
             priority_max: Cap on initial priority values.
             priority_eps: Small epsilon added to TD Error to prevent 0 priority.
             age_decay: Decay factor removing priority based on how many inserts occurred since entry.
             max_age: Hard age limit in insert steps. Entries older than this get zero effective priority.
+            sample_decay: Method B — divide effective priority by (1 + sample_decay × sample_count).
+                sample_count is bumped every time an entry is selected via the PER (priority-weighted)
+                branch in ``_sample_from_bucket`` — uniform-mix picks don't count. This slow-cools
+                entries that PER keeps favoring (stochastic-trap or hard-but-persistent transitions)
+                so they don't dominate the buffer or the batch indefinitely. Learned entries are
+                naturally protected: low priority → low PER pick rate → sample_count stays small.
             beta_start: Initial Importance Sampling weight factor.
         """
         self.max_size = max_size
@@ -95,6 +111,7 @@ class CategorizedReplayBuffer:
         self.age_decay = age_decay
         self.max_age = int(max_age) if max_age is not None else 0
         # if max_age = 0, it means no "force" age remove
+        self.sample_decay = float(sample_decay)
         self.beta = beta_start
 
         self.size_count = 0
@@ -104,7 +121,11 @@ class CategorizedReplayBuffer:
 
 
     def _reward_type(self, reward, done):
-        """Categorize the reward into a specific bucket type (e.g., win, lose, progress)."""
+        """Categorize the reward into one of: win, lose, invalid, progress.
+
+        Boundary case ``reward == invalid_threshold`` is folded into ``progress``
+        (it's a "no penalty" reward — closer to a valid step than to an invalid one).
+        """
         reward = float(reward)
         if done and reward >= self.win_threshold:
             return "win"
@@ -112,9 +133,7 @@ class CategorizedReplayBuffer:
             return "lose"
         if reward < self.invalid_threshold:
             return "invalid"
-        if reward > self.invalid_threshold:
-            return "progress"
-        return "other"
+        return "progress"
 
     def _save_tensor(self, tensor, root_name, storage_id):
         """Save a tensor either to disk or keep it in memory based on storage mode."""
@@ -157,44 +176,70 @@ class CategorizedReplayBuffer:
             self._safe_unlink(entry.get("next_state"))
 
     def _effective_priority(self, entry):
-        """Calculate the current priority of an entry after applying age decay."""
+        """Calculate the current priority of an entry after applying age + sample-count decay.
+
+        Two cooling factors:
+            - age_decay × age            : time since entry was stored
+            - sample_decay × sample_count: how many times PER has selected this entry
+              (bumped in ``_sample_from_bucket`` at priority-pick time; uniform-mix picks
+              and safety-padding picks don't contribute). Main defense against
+              stochastic-trap entries — they keep getting PER-selected, sample_count
+              grows, effective priority decays, eventually they stop dominating.
+              Learned entries are self-protected: low priority → rarely PER-picked
+              → sample_count stays small.
+        """
         base_priority = float(np.clip(entry.get("priority", 1.0), self.priority_min, self.priority_max))
         age = max(0, self.insert_counter - entry.get("insert_order", 0))
         if self.max_age > 0 and age > self.max_age:
             return 0.0
-        aged_priority = base_priority / (1.0 + self.age_decay * age)
-        return aged_priority
+        sample_count = int(entry.get("sample_count", 0))
+        age_factor = 1.0 + self.age_decay * age
+        sample_factor = 1.0 + self.sample_decay * sample_count
+        return base_priority / age_factor / sample_factor
 
     def top_k_balanced(self, k):
-        """Select up to ``k`` entries with bucket balance + priority ranking.
+        """Select up to ``k`` entries via 50% balanced (soft floor per class) + 50% PER.
 
-        1. Each ``reward_type`` bucket keeps top ``k // len(REWARD_TYPES)``
-           entries by ``_effective_priority``.
-        2. Remaining slots are filled from cross-bucket leftovers, again
-           ranked by ``_effective_priority``.
+        Phase 1 — Balanced (50% of ``k``):
+            Each ``reward_type`` bucket keeps top ``(k // 2) // len(REWARD_TYPES)``
+            entries by ``_effective_priority``. With 4 classes that's a 12.5%
+            soft floor per class — buckets with fewer entries leave slack for
+            Phase 2 rather than being padded.
+
+        Phase 2 — PER (remaining ~50% of ``k`` + Phase-1 slack):
+            All entries NOT picked in Phase 1 are pooled and ranked by
+            ``_effective_priority`` globally; top remaining slots fill in.
+            This is where high-priority "model hasn't learned" entries get
+            extra representation regardless of class.
 
         Pure function: does NOT mutate ``self.index`` or touch disk files.
         Returns a list of entry-dict references (aliases into ``self.index``).
-        Returned length is ``min(k, size_count)``; may be smaller if some
-        buckets are empty AND there aren't enough leftovers to backfill.
+        Returned length is ``min(k, size_count)``.
         """
         if k <= 0 or self.size_count == 0:
             return []
         if k >= self.size_count:
             return list(self.index)
 
-        bucket_quota = max(1, k // len(self.REWARD_TYPES))
+        balanced_share = k // 2
+        per_class_quota = max(1, balanced_share // len(self.REWARD_TYPES))
+
         grouped_entries = {reward_type: [] for reward_type in self.REWARD_TYPES}
         for entry in self.index:
-            grouped_entries.setdefault(entry["reward_type"], []).append(entry)
+            rt = entry.get("reward_type")
+            if rt in grouped_entries:
+                grouped_entries[rt].append(entry)
+            else:
+                # Legacy entries with unknown / dropped "other" reward_type → treat as progress
+                grouped_entries["progress"].append(entry)
 
         survivors = []
         leftovers = []
         for reward_type in self.REWARD_TYPES:
             entries = grouped_entries.get(reward_type, [])
             entries.sort(key=self._effective_priority, reverse=True)
-            survivors.extend(entries[:bucket_quota])
-            leftovers.extend(entries[bucket_quota:])
+            survivors.extend(entries[:per_class_quota])
+            leftovers.extend(entries[per_class_quota:])
 
         remaining_slots = max(0, k - len(survivors))
         if remaining_slots > 0 and leftovers:
@@ -252,25 +297,25 @@ class CategorizedReplayBuffer:
                     next_state_dst = persistent_dir / f"next_state_{save_idx}.pt"
                     shutil.copy2(str(next_src), str(next_state_dst))
 
+            tail_reward = float(old_entry.get("tail_reward", old_entry["reward"]))
+            legacy_rt = old_entry.get("reward_type")
+            if legacy_rt not in self.REWARD_TYPES:
+                # Legacy "other" or missing → re-categorize against the 4-class scheme
+                legacy_rt = self._reward_type(tail_reward, bool(old_entry["done"]))
             exported.append({
                 "storage_id": save_idx,
                 "state": str(state_dst),
                 "action": old_entry["action"],
                 "next_state": str(next_state_dst) if next_state_dst else None,
                 "reward": old_entry["reward"],
-                "tail_reward": float(old_entry.get("tail_reward", old_entry["reward"])),
+                "tail_reward": tail_reward,
                 "done": old_entry["done"],
                 "discount": float(old_entry.get("discount", 1.0)),
                 "n_steps": int(old_entry.get("n_steps", 1)),
                 "priority": float(old_entry.get("priority", self.priority_min)),
-                "reward_type": old_entry.get(
-                    "reward_type",
-                    self._reward_type(
-                        float(old_entry.get("tail_reward", old_entry["reward"])),
-                        bool(old_entry["done"]),
-                    ),
-                ),
+                "reward_type": legacy_rt,
                 "insert_order": save_idx + 1,
+                "sample_count": int(old_entry.get("sample_count", 0)),
             })
             save_idx += 1
 
@@ -293,12 +338,24 @@ class CategorizedReplayBuffer:
             if entry["storage_id"] not in selected_ids:
                 self._delete_entry_files(entry)
 
-    def _sample_from_bucket(self, entries, count):
-        """Sample a specific number of entries from a single category bucket."""
+    def _sample_from_bucket(self, entries, count, use_uniform=True):
+        """Sample ``count`` entries from ``entries`` (a single bucket OR pooled leftover).
+
+        Args:
+            entries: list of entry dicts to sample from.
+            count: number of entries to return.
+            use_uniform: if True, the first ``round(count * uniform_mix)`` picks are
+                pure random (without replacement) for exploration, then the rest are
+                priority-weighted. If False, sampling is purely priority-weighted —
+                used by the PER half of ``sample()`` / leftover pass in storage.
+        """
         if count <= 0 or not entries:
             return []
 
-        num_uniform = min(len(entries), int(round(count * self.uniform_mix)))
+        if use_uniform:
+            num_uniform = min(len(entries), int(round(count * self.uniform_mix)))
+        else:
+            num_uniform = 0
         num_priority = max(0, count - num_uniform)
 
         chosen = []
@@ -318,7 +375,7 @@ class CategorizedReplayBuffer:
             # Apply alpha exponent
             priorities = np.power(np.maximum(priorities, self.priority_min), self.alpha)
             prob_sum = priorities.sum()
-            
+
             if prob_sum <= 0 or not np.isfinite(prob_sum):
                 priority_pick = random.choices(available, k=min(num_priority, len(available)))
             else:
@@ -331,9 +388,15 @@ class CategorizedReplayBuffer:
                     p=probabilities,
                 )
                 priority_pick = [available[int(idx)] for idx in np.atleast_1d(indices)]
+            # Method B — bump sample_count for every PER-selected entry.
+            # Uniform picks above and safety padding below are NOT bumped (they don't represent
+            # "PER kept favoring this entry"). Learned entries are naturally protected because
+            # their low priority means they rarely land in priority_pick.
+            for entry in priority_pick:
+                entry["sample_count"] = int(entry.get("sample_count", 0)) + 1
             chosen.extend(priority_pick)
 
-        # Safety padding
+        # Safety padding — these are uniform-random fallbacks, not PER picks → no sample_count bump
         while len(chosen) < count:
             chosen.append(random.choice(entries))
 
@@ -374,6 +437,7 @@ class CategorizedReplayBuffer:
             "reward_type": self._reward_type(bucket_reward, done),
             "priority": float(np.clip(abs(float(reward)) + 1.0, self.priority_min, self.priority_max)),
             "insert_order": self.insert_counter,
+            "sample_count": 0,  # Method B: bumps in _sample_from_bucket every time this entry is PER-selected
         }
 
         self.index.append(entry)
@@ -381,7 +445,11 @@ class CategorizedReplayBuffer:
         self._prune_if_needed()
 
     def update_priorities(self, sample_indices, td_errors):
-        """Update priorities using TD-error."""
+        """Update priorities using TD-error.
+
+        Note: ``sample_count`` is bumped at PER pick time in ``_sample_from_bucket``,
+        NOT here — so this function only refreshes ``priority`` from the latest TD-error.
+        """
         if sample_indices is None or td_errors is None:
             return
 
@@ -393,44 +461,79 @@ class CategorizedReplayBuffer:
             self.index[int(idx)]["priority"] = float(np.clip(priority, self.priority_min, self.priority_max))
 
     def sample(self, batch_size, beta=None, device="cpu", include_extra=False):
-        """Sample a batch of transitions. Returns importance sampling weights if beta is used.
-        
+        """Sample a batch via 50% balanced (soft floor per class, with uniform_mix)
+        + 50% PER (pure-priority leftover pool, no uniform_mix).
+
+        Phase 1 — Balanced half:
+            ``batch_size // 2`` slots, split into ``per_class_count = (batch_size // 2) // 4``
+            per reward_type. Each non-empty class contributes up to ``per_class_count``
+            entries via ``_sample_from_bucket(use_uniform=True)`` — the uniform_mix
+            piece gives exploration noise within each class.
+
+        Phase 2 — PER half:
+            All entries not yet picked are pooled and sampled by
+            ``_sample_from_bucket(use_uniform=False)`` — pure priority weighting,
+            cross-class. Soft-floor slack from Phase 1 (empty / starved classes)
+            flows into this pool automatically.
+
         Note for specific models:
-        Visual Agent typically doesn't use IS weights (ignores it), 
+        Visual Agent typically doesn't use IS weights (ignores it),
         Transformer Agent heavily relies on them.
         """
         if self.size_count <= 0:
             raise RuntimeError("CategorizedReplayBuffer is empty")
-            
+
         use_beta = beta if beta is not None else self.beta
+
+        # === Phase 1: Balanced half ===
+        balanced_total = batch_size // 2
+        per_class_count = max(1, balanced_total // len(self.REWARD_TYPES))
 
         grouped_indices = {reward_type: [] for reward_type in self.REWARD_TYPES}
         for idx, entry in enumerate(self.index):
-            grouped_indices.setdefault(entry["reward_type"], []).append(idx)
+            rt = entry.get("reward_type")
+            if rt in grouped_indices:
+                grouped_indices[rt].append(idx)
+            else:
+                # Legacy "other" / unknown reward_type → fold into progress
+                grouped_indices["progress"].append(idx)
 
-        non_empty_groups = [indices for indices in grouped_indices.values() if indices]
-        base_count = max(1, batch_size // max(1, len(non_empty_groups)))
         selected_indices = []
+        selected_storage_ids = set()
 
-        # Try to pull evenly across available groups
-        for indices in non_empty_groups:
-            take = min(base_count, len(indices))
-            bucket_entries = [self.index[idx] for idx in indices]
-            sampled_entries = self._sample_from_bucket(bucket_entries, take)
-            selected_indices.extend(
-                next(i for i in indices if self.index[i]["storage_id"] == entry["storage_id"])
-                for entry in sampled_entries
-            )
+        for reward_type in self.REWARD_TYPES:
+            indices = grouped_indices[reward_type]
+            if not indices:
+                continue
+            take = min(per_class_count, len(indices))
+            bucket_entries = [self.index[i] for i in indices]
+            id_to_idx = {self.index[i]["storage_id"]: i for i in indices}
+            sampled_entries = self._sample_from_bucket(bucket_entries, take, use_uniform=True)
+            for entry in sampled_entries:
+                sid = entry["storage_id"]
+                if sid in id_to_idx:
+                    selected_indices.append(id_to_idx[sid])
+                    selected_storage_ids.add(sid)
 
-        # Pad remaining if unevenly divided
+        # === Phase 2: PER half — fill remaining slots from leftover pool by pure priority ===
+        per_remaining = batch_size - len(selected_indices)
+        if per_remaining > 0:
+            leftover_indices = [
+                i for i, entry in enumerate(self.index)
+                if entry["storage_id"] not in selected_storage_ids
+            ]
+            if leftover_indices:
+                leftover_entries = [self.index[i] for i in leftover_indices]
+                id_to_idx = {self.index[i]["storage_id"]: i for i in leftover_indices}
+                per_sampled = self._sample_from_bucket(leftover_entries, per_remaining, use_uniform=False)
+                for entry in per_sampled:
+                    sid = entry["storage_id"]
+                    if sid in id_to_idx:
+                        selected_indices.append(id_to_idx[sid])
+
+        # Safety padding — should rarely trigger (size_count < batch_size case)
         while len(selected_indices) < batch_size:
-            fallback_entry = self._sample_from_bucket(self.index, 1)[0]
-            selected_indices.append(
-                next(
-                    i for i, entry in enumerate(self.index)
-                    if entry["storage_id"] == fallback_entry["storage_id"]
-                )
-            )
+            selected_indices.append(random.randint(0, len(self.index) - 1))
 
         selected_indices = selected_indices[:batch_size]
 
@@ -528,11 +631,12 @@ class CategorizedReplayBuffer:
         """
         counts = {reward_type: 0 for reward_type in self.REWARD_TYPES}
         for entry in self.index:
-            rt = entry.get("reward_type", "other")
+            rt = entry.get("reward_type")
             if rt in counts:
                 counts[rt] += 1
             else:
-                counts[rt] = counts.get(rt, 0) + 1
+                # Legacy / unknown reward_type — count under progress to avoid silent loss
+                counts["progress"] = counts.get("progress", 0) + 1
         return counts
 
     def get_all_entries(self):
@@ -541,7 +645,14 @@ class CategorizedReplayBuffer:
         return self.index
 
     def load_from_entries(self, entries):
-        """Load from a persistent index map structure in RAM"""
+        """Load from a persistent index map structure in RAM。
+
+        Backward compatibility:
+            - Legacy entries without ``sample_count`` get default 0 (so they start fresh
+              in the Method-B decay scheme).
+            - Legacy entries with ``reward_type == "other"`` (or any value outside the
+              current 4-class REWARD_TYPES) get re-categorized via ``_reward_type()``.
+        """
         normalized_entries = []
         for entry in entries:
             normalized_entry = dict(entry)
@@ -549,6 +660,14 @@ class CategorizedReplayBuffer:
                 normalized_entry["state"] = self._load_tensor(normalized_entry["state"])
             if normalized_entry.get("next_state") is not None:
                 normalized_entry["next_state"] = self._load_tensor(normalized_entry["next_state"])
+            # Migrate legacy reward_type ("other" / missing) to the 4-class scheme
+            if normalized_entry.get("reward_type") not in self.REWARD_TYPES:
+                tail_reward = float(normalized_entry.get("tail_reward", normalized_entry.get("reward", 0.0)))
+                normalized_entry["reward_type"] = self._reward_type(
+                    tail_reward, bool(normalized_entry.get("done", False))
+                )
+            # Default Method-B sample_count for legacy entries
+            normalized_entry.setdefault("sample_count", 0)
             normalized_entries.append(normalized_entry)
         self.index = normalized_entries
         self.size_count = len(self.index)
