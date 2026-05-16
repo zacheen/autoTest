@@ -440,12 +440,11 @@ def main():
                 writer.add_scalar('train/avg_reward_50', avg_reward, agent.episode_count)
                 writer.add_scalar('train/win_rate_50', win_rate, agent.episode_count)
 
-                overall_wr = total_wins / episode * 100
-                print(f"[Ep {episode:>6d}] "
+                now_str = datetime.datetime.now().strftime("%H:%M")
+                print(f"[{now_str}] "
+                      f"[Ep {episode:>6d}] "
                       f"Avg Reward: {avg_reward:>7.2f} | "
                       f"Win Rate(50): {win_rate:>5.1f}% | "
-                      f"Overall WR: {overall_wr:>5.1f}% | "
-                      f"Total Wins: {total_wins} | "
                       f"Speed: {eps_per_sec:.1f} ep/s | "
                       f"Epsilon: {agent.epsilon:.4f}")
 
