@@ -339,6 +339,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
             priority_max=VISUAL_PRIORITY_MAX,
             priority_eps=VISUAL_PRIORITY_EPS,
             age_decay=VISUAL_AGE_DECAY,
+            quota_check_class="win",  # Minesweeper: win is the rare-event bottleneck class
         )
 
         # ── image preprocessing ──

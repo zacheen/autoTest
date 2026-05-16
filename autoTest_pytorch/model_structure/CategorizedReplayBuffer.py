@@ -61,6 +61,7 @@ class CategorizedReplayBuffer:
         age_decay: float = 0.002,
         max_age: int = 2000,
         sample_decay: float = 0.05,
+        quota_check_class: str | None = None,
         beta_start: float = 0.4,
     ):
         """
@@ -86,6 +87,12 @@ class CategorizedReplayBuffer:
                 entries that PER keeps favoring (stochastic-trap or hard-but-persistent transitions)
                 so they don't dominate the buffer or the batch indefinitely. Learned entries are
                 naturally protected: low priority → low PER pick rate → sample_count stays small.
+            quota_check_class: name of the reward_type that ``is_class_quota_filled`` should
+                gate on. If None (default), the gate requires EVERY class to reach the 12.5%
+                soft-floor quota. If set to e.g. ``"win"``, only that class is checked — useful
+                when one class is the known rare-event bottleneck (e.g. wins in Minesweeper)
+                and you don't want pruning equilibrium to artificially delay training.
+                Must be a member of ``REWARD_TYPES`` or None.
             beta_start: Initial Importance Sampling weight factor.
         """
         self.max_size = max_size
@@ -112,6 +119,12 @@ class CategorizedReplayBuffer:
         self.max_age = int(max_age) if max_age is not None else 0
         # if max_age = 0, it means no "force" age remove
         self.sample_decay = float(sample_decay)
+        if quota_check_class is not None and quota_check_class not in self.REWARD_TYPES:
+            raise ValueError(
+                f"quota_check_class must be one of {self.REWARD_TYPES} or None, "
+                f"got {quota_check_class!r}"
+            )
+        self.quota_check_class = quota_check_class
         self.beta = beta_start
 
         self.size_count = 0
@@ -649,14 +662,22 @@ class CategorizedReplayBuffer:
         return max(1, (self.max_size // 2) // len(self.REWARD_TYPES))
 
     def is_class_quota_filled(self) -> bool:
-        """True iff every reward_type bucket has at least ``class_quota`` entries.
+        """True iff the gated class(es) have at least ``class_quota`` entries.
 
-        Useful as a training-readiness gate on top of ``MINIMUM_DATA_SIZE``: ensures
-        the buffer can actually deliver a balanced batch (each class can fill its
-        12.5% soft-floor slot in ``sample()``).
+        Behaviour depends on ``self.quota_check_class``:
+            - ``None`` (default): EVERY reward_type must reach quota — conservative,
+              but pruning equilibrium can drag the loosest class out by a lot.
+            - ``"<class_name>"``: ONLY that class is checked. Use this when you know
+              one rare class is the true bottleneck (e.g. ``"win"`` in Minesweeper)
+              and don't want other classes' pruning dynamics to delay training.
+
+        Used as a training-readiness gate on top of ``MINIMUM_DATA_SIZE``.
         """
         quota = self.class_quota
-        return all(count >= quota for count in self.bucket_sizes().values())
+        counts = self.bucket_sizes()
+        if self.quota_check_class is not None:
+            return counts.get(self.quota_check_class, 0) >= quota
+        return all(count >= quota for count in counts.values())
 
     def get_all_entries(self):
         """Returns internal objects suitable for RAM persistent saving. 

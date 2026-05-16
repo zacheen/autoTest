@@ -307,7 +307,8 @@ class TransformerDiscreteAgent:
             lose_threshold=MINESWEEPER_REWARD_CONFIG.replay_lose_threshold,
             invalid_threshold=MINESWEEPER_REWARD_CONFIG.replay_invalid_threshold,
             alpha=PER_ALPHA,
-            beta_start=PER_BETA_START
+            beta_start=PER_BETA_START,
+            quota_check_class="win",  # Minesweeper: win is the rare-event bottleneck class
         )
         self.total_it = 0
         self.steps_since_resume = 0  # 每次啟動重置；用於 resume LR warmup（不存檔）
