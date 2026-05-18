@@ -260,7 +260,7 @@ class TransformerActorNetwork(nn.Module):
 def _quantile_huber_loss(current_quantiles, target_quantiles, tau_hats, return_stats=False):
     td = target_quantiles.unsqueeze(1) - current_quantiles.unsqueeze(2)
     abs_td = td.abs()
-    huber = torch.where(abs_td <= 1.0, 0.5 * td.pow(2), abs_td - 0.5)
+    huber = torch.where(abs_td <= 1.0, 0.5 * abs_td.pow(2), abs_td - 0.5)
     tau = tau_hats.unsqueeze(2)
     quantile_weight = (tau - (td.detach() < 0).float()).abs()
     loss = (quantile_weight * huber).sum(dim=2).mean(dim=1, keepdim=True)
