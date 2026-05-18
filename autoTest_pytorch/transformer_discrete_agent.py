@@ -3,6 +3,7 @@ import datetime
 import logging as _logging
 import math
 import random
+import sys
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from model_structure.optimizer_factory import build_fqf_optimizer
 from model_structure.adaptive_epsilon import AdaptiveEpsilonController
 from model_structure.history import TrainingHistory
+from model_structure.hyperparameter_dump import dump_hyperparameters
 import model_structure.CategorizedReplayBuffer as _crb_module
 
 
@@ -351,6 +353,22 @@ class TransformerDiscreteAgent:
         self.current_archive_dir.mkdir(parents=True, exist_ok=True)
         print(f"[FQF] Session archive: {self.session_dir}")
         print(f"[FQF] Current hour:    {self.current_archive_dir}")
+
+        try:
+            dump_hyperparameters(
+                out_path=self.session_dir / "hyperparameters.txt",
+                modules=[sys.modules[__name__]],
+                dataclass_instances={"reward_config": MINESWEEPER_REWARD_CONFIG},
+                instance_attrs={
+                    "epsilon_controller": (
+                        self.epsilon_controller,
+                        ["wr_min", "wr_max", "eps_min", "eps_max"],
+                    ),
+                    "optimizer (AdamW)": self.optimizer,
+                },
+            )
+        except Exception as exc:
+            print(f"[FQF] hyperparameters dump failed: {exc}")
 
         self._io_log = open(self.current_archive_dir / "train_io_log.txt", "a", encoding="utf-8")
         self._io_log.write(f"\n{'=' * 60}\n")
