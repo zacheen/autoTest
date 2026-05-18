@@ -373,6 +373,7 @@ class TransformerDiscreteAgent:
         self.tb_writer = SummaryWriter(log_dir=str(self.tensorboard_log_dir))
         print(f"[FQF] TensorBoard: tensorboard --logdir {tb_root}")
         print(f"[FQF] Current run: {self.tensorboard_log_dir}")
+        self._write_metric_docs()
 
         self.try_load_model()
 
@@ -868,11 +869,8 @@ class TransformerDiscreteAgent:
                 target_quantiles.float().std() if target_quantiles.numel() > 1 else _zero,
                 td_error.mean(),
                 td_error.max(),
-                reward.float().mean(),
-                done.float().mean(),
                 entropy.mean(),
                 is_weights.float().mean(),
-                is_weights.float().max(),
                 fpn_norm_entropy_t,
                 fpn_tau_std_t,
             ]).cpu().tolist()
@@ -881,8 +879,7 @@ class TransformerDiscreteAgent:
                 q0_min, q0_max,
                 target_q_mean, target_q_std,
                 td_error_mean, td_error_max,
-                batch_reward_mean, batch_done_rate,
-                entropy_value, is_weight_mean, is_weight_max,
+                entropy_value, is_weight_mean,
                 fpn_norm_entropy, fpn_tau_std,
             ) = _stats
 
@@ -945,15 +942,11 @@ class TransformerDiscreteAgent:
         self.tb_writer.add_scalar("train/td_error_mean", td_error_mean, step)
         self.tb_writer.add_scalar("train/td_error_max", td_error_max, step)
         self.tb_writer.add_scalar("train/frac_huber_clipped", frac_huber_clipped, step)
-        self.tb_writer.add_scalar("train/batch_reward_mean", batch_reward_mean, step)
-        self.tb_writer.add_scalar("train/batch_done_rate", batch_done_rate, step)
         self.tb_writer.add_scalar("train/epsilon", self.epsilon, step)
-        self.tb_writer.add_scalar("train/lr", self.optimizer.param_groups[0]["lr"], step)
         self.tb_writer.add_scalar("fpn/norm_entropy", fpn_norm_entropy, step)
         self.tb_writer.add_scalar("fpn/tau_std", fpn_tau_std, step)
         self.tb_writer.add_scalar("grad/total_pre_clip", grad_norm_total_value, step)
         self.tb_writer.add_scalar("grad/total_post_clip", grad_post_total, step)
-        self.tb_writer.add_scalar("grad/clip_threshold", grad_clip_threshold, step)
         self.tb_writer.add_scalar("grad/clip_percent", grad_clip_percent, step)
         self.tb_writer.add_scalar("grad/clip_excess_norm", grad_clip_excess_norm, step)
         self.tb_writer.add_scalar("grad/clip_excess_ratio", grad_clip_excess_ratio, step)
@@ -964,7 +957,6 @@ class TransformerDiscreteAgent:
         self.tb_writer.add_scalar("grad_pre/extras", extras_pre, step)
         self.tb_writer.add_scalar("grad_post/extras", extras_post, step)
         self.tb_writer.add_scalar("train/is_weight_mean", is_weight_mean, step)
-        self.tb_writer.add_scalar("train/is_weight_max", is_weight_max, step)
 
         # Per-layer weight/grad norms — collected pre-clip inside the try
         # block above; written here so we never leave orphan rows on a
@@ -988,6 +980,23 @@ class TransformerDiscreteAgent:
         self.clear_blocked_actions()
 
     # ──────────────────────────── diagnostics helpers ──────────────────────
+
+    def _write_metric_docs(self):
+        """把 metric 解讀表寫到 TensorBoard 的 TEXT 分頁,只寫一次。"""
+        is_weight_mean_doc = (
+            "**`train/is_weight_mean`** — PER importance-sampling weight 平均值 "
+            "(已 normalize by max,所以 max 恆為 1.0,只看 mean)。\n\n"
+            "| 數值區間 | 代表 | 該擔心嗎? |\n"
+            "|---|---|---|\n"
+            "| 接近 1.0 | priorities 很平均,PER 幾乎退化成 uniform replay | "
+            "PER 沒在工作,可能 TD-error 都差不多 |\n"
+            "| 中間 (0.3 ~ 0.8) | 健康,有偏抽但 bias correction 足夠 | 正常 |\n"
+            "| 接近 0 | priorities 高度集中,少數樣本主宰梯度 | "
+            "可能 over-fit 那幾個 hard sample |\n\n"
+            "搭配 β annealing 看走勢:β 上升時 mean 應緩慢下降;若反向上升 "
+            "代表 priority 分佈在塌掉。"
+        )
+        self.tb_writer.add_text("docs/is_weight_mean", is_weight_mean_doc, 0)
 
     def _assert_finite(self, stage, name, tensor):
         """訓練流程的 NaN/Inf probe:命中就 raise,訊息含 stage / tensor / step。
@@ -1378,13 +1387,11 @@ class TransformerDiscreteAgent:
         self.training_history.record(win=win)
         ep_idx = self.training_history.total_episodes
         rolling_wr = self.training_history.win_rate(window=100)
-        next_eps = self.epsilon_controller.update(rolling_wr)
+        self.epsilon_controller.update(rolling_wr)
 
         self.tb_writer.add_scalar("episode/reward_mean",        float(reward_mean),        ep_idx)
-        self.tb_writer.add_scalar("episode/win",                float(bool(win)),          ep_idx)
         self.tb_writer.add_scalar("episode/invalid_click_rate", float(invalid_click_rate), ep_idx)
         self.tb_writer.add_scalar("episode/win_rate_recent",    rolling_wr,                ep_idx)
-        self.tb_writer.add_scalar("episode/eps_next",           next_eps,                  ep_idx)
 
     # ──────────────────────────── lr warmup ────────────────────────────
 
