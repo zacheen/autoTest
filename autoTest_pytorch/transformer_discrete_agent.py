@@ -311,6 +311,9 @@ class TransformerDiscreteAgent:
             alpha=PER_ALPHA,
             beta_start=PER_BETA_START,
             quota_check_class="win",  # Minesweeper: win is the rare-event bottleneck class
+            # Spread-decay calibrated from observed inference quantile spreads (median ~0.115,
+            # p90 ~0.378). Starts disabled — latched ON by train_step once win_rate(100) > 0.4.
+            spread_decay=2.0,
         )
         self.total_it = 0
         self.steps_since_resume = 0  # 每次啟動重置；用於 resume LR warmup（不存檔）
@@ -527,6 +530,15 @@ class TransformerDiscreteAgent:
         if self._class_quota_gate_enabled and not self.replay_buffer.is_class_quota_filled():
             return None
 
+        # Spread-decay latch — independent of class_quota gate. Live-checked every train_step
+        # until it flips ON, then stays ON for the rest of the session (monotone). Activates
+        # when win_rate crosses 40% on the assumption that by then the model has matured
+        # enough that "wide quantile spread" mostly reflects environment stochasticity
+        # rather than under-learning.
+        if not self.replay_buffer.enable_spread_decay:
+            if self.training_history.win_rate(window=100) > 0.4:
+                self.replay_buffer.enable_spread_decay = True
+
         self.total_it += 1
         self.steps_since_resume += 1
         self._apply_lr_warmup()
@@ -652,6 +664,11 @@ class TransformerDiscreteAgent:
             with torch.no_grad():
                 target_mean = target_quantiles.mean(dim=1, keepdim=True)
                 td_error = (q_taken - target_mean).abs().detach()
+                # Per-sample quantile spread for the chosen action — feeds the buffer's
+                # spread_decay modifier in _effective_priority (only consulted when the
+                # buffer-side latch enable_spread_decay is True; we always compute and
+                # write the value so the latch flip doesn't have a cold-start period).
+                chosen_q_spread = chosen_quantiles.std(dim=1).detach()
 
             per_sample_quantile_loss, frac_huber_clipped = _quantile_huber_loss(
                 current_quantiles=chosen_quantiles,
@@ -846,7 +863,11 @@ class TransformerDiscreteAgent:
             log_unhandled_exception(f"train_step total_it={self.total_it}")
             raise
 
-        self.replay_buffer.update_priorities(per_indices, td_error.squeeze(-1).cpu().numpy())
+        self.replay_buffer.update_priorities(
+            per_indices,
+            td_error.squeeze(-1).cpu().numpy(),
+            quantile_spreads=chosen_q_spread.cpu().numpy(),
+        )
 
         if self.total_it % TARGET_UPDATE_FREQ == 0:
             self.q_target.load_state_dict(self.q_network.state_dict())

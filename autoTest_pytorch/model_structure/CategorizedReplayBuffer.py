@@ -31,11 +31,14 @@ class CategorizedReplayBuffer:
     Supports:
     1. Categorized Bucketing based on reward thresholds (win / lose / invalid / progress).
     2. RAM-based storage (for small states) or Disk-backed storage (for memory-heavy images).
-    3. Priority decay:
-       - age_decay   : suppresses stale entries over time (always on)
-       - sample_decay: optional Method B defense against stochastic-transition traps,
-                       toggled by ``enable_sample_decay`` (default OFF — disabled because
-                       in practice it didn't measurably help training in this codebase).
+    3. Priority decay (accumulator pattern in ``_effective_priority``):
+       - age_decay    : suppresses stale entries over time (always on)
+       - sample_decay : optional Method B defense against stochastic-transition traps via
+                        repeated-pick counting, toggled by ``enable_sample_decay`` (default OFF).
+       - spread_decay : optional defense via FQF quantile-spread signal, toggled by
+                        ``enable_spread_decay`` (default OFF, intended to be latched ON by the
+                        agent once win_rate > 40%). Wide quantile spread = model believes the
+                        outcome is stochastic → decay more.
     4. 50% balanced + 50% PER allocation for BOTH eviction (``top_k_balanced``) and
        sampling (``sample``):
        - Balanced half: each class gets a soft floor (12.5% of slots with 4 classes).
@@ -63,6 +66,8 @@ class CategorizedReplayBuffer:
         max_age: int = 2000,
         enable_sample_decay: bool = False,
         sample_decay: float = 0.05,
+        enable_spread_decay: bool = False,
+        spread_decay: float = 2.0,
         quota_check_class: str | None = None,
         beta_start: float = 0.4,
     ):
@@ -94,6 +99,22 @@ class CategorizedReplayBuffer:
                 that PER keeps favoring (stochastic-trap or hard-but-persistent transitions) so
                 they don't dominate the buffer or the batch indefinitely. Learned entries are
                 naturally protected: low priority → low PER pick rate → sample_count stays small.
+            enable_spread_decay: master switch for the FQF quantile-spread decay (default False).
+                Designed to be latched ON by the agent when win_rate crosses some threshold
+                (e.g. > 40%), once the model has matured enough that "wide quantile spread" mostly
+                reflects environment stochasticity rather than "deterministic but not yet learned".
+                When False, ``quantile_spread`` is still written to entries by ``update_priorities``
+                (so data is available for inspection / future latch flip), but never used in
+                ``_effective_priority`` — buffer behaves like a plain PER buffer w.r.t. spread.
+            spread_decay: divide effective priority by (1 + spread_decay × quantile_spread).
+                Only takes effect when ``enable_spread_decay=True``. ``quantile_spread`` is the
+                std of the 8 quantile values that FQF predicted for the chosen (state, action);
+                it's updated whenever the entry is sampled and trained on (via the buffer's
+                ``update_priorities`` extended signature). Wide spread = model thinks the outcome
+                is stochastic = decay more (don't waste PER picks on inherently noisy entries).
+                Narrow spread = model thinks deterministic = decay less (let PER keep learning).
+                Default 2.0 calibrated from observed inference spread distribution
+                (median ≈ 0.115, p90 ≈ 0.378), giving ~19% decay at typical and ~43% at p90.
             quota_check_class: name of the reward_type that ``is_class_quota_filled`` should
                 gate on. If None (default), the gate requires EVERY class to reach the 12.5%
                 soft-floor quota. If set to e.g. ``"win"``, only that class is checked — useful
@@ -127,6 +148,8 @@ class CategorizedReplayBuffer:
         # if max_age = 0, it means no "force" age remove
         self.enable_sample_decay = bool(enable_sample_decay)
         self.sample_decay = float(sample_decay)
+        self.enable_spread_decay = bool(enable_spread_decay)
+        self.spread_decay = float(spread_decay)
         if quota_check_class is not None and quota_check_class not in self.REWARD_TYPES:
             raise ValueError(
                 f"quota_check_class must be one of {self.REWARD_TYPES} or None, "
@@ -206,11 +229,14 @@ class CategorizedReplayBuffer:
         touching the rest of the function.
 
         Cooling factors currently wired in:
-            - age_decay × age            : time since entry was stored (always on)
-            - sample_decay × sample_count: how many times PER has selected this entry
+            - age_decay × age              : time since entry was stored (always on)
+            - sample_decay × sample_count  : how many times PER has selected this entry
               — ONLY applied when ``self.enable_sample_decay`` is True (Method B switch).
-              Defense against stochastic-trap entries; disabled by default because the
-              empirical effect on training was small and it complicated priority dynamics.
+              Defense against stochastic-trap entries; disabled by default.
+            - spread_decay × quantile_spread: FQF-predicted quantile std for this entry
+              — ONLY applied when ``self.enable_spread_decay`` is True. Wide spread =
+              model believes outcome is stochastic → decay more. ``quantile_spread`` is
+              updated by ``update_priorities`` whenever the entry is sampled.
         """
         priority = float(np.clip(entry.get("priority", 1.0), self.priority_min, self.priority_max))
         age = max(0, self.insert_counter - entry.get("insert_order", 0))
@@ -223,7 +249,12 @@ class CategorizedReplayBuffer:
             sample_count = int(entry.get("sample_count", 0))
             sample_factor = 1.0 + self.sample_decay * sample_count
             priority = priority / sample_factor
-            
+
+        if self.enable_spread_decay:
+            quantile_spread = float(entry.get("quantile_spread", 0.0))
+            spread_factor = 1.0 + self.spread_decay * quantile_spread
+            priority = priority / spread_factor
+
         return priority
 
     def top_k_balanced(self, k):
@@ -345,6 +376,7 @@ class CategorizedReplayBuffer:
                 "reward_type": legacy_rt,
                 "insert_order": save_idx + 1,
                 "sample_count": int(old_entry.get("sample_count", 0)),
+                "quantile_spread": float(old_entry.get("quantile_spread", 0.0)),
             })
             save_idx += 1
 
@@ -469,27 +501,49 @@ class CategorizedReplayBuffer:
             "priority": float(np.clip(abs(float(reward)) + 1.0, self.priority_min, self.priority_max)),
             "insert_order": self.insert_counter,
             "sample_count": 0,  # Method B counter — only bumped when self.enable_sample_decay is True
+            "quantile_spread": 0.0,  # FQF quantile std — updated by update_priorities when sampled
         }
 
         self.index.append(entry)
         self.size_count = len(self.index)
         self._prune_if_needed()
 
-    def update_priorities(self, sample_indices, td_errors):
-        """Update priorities using TD-error.
+    def update_priorities(self, sample_indices, td_errors, quantile_spreads=None):
+        """Update priorities (and optional quantile_spread) from training-time signals.
+
+        Args:
+            sample_indices: indices returned by the matching ``sample()`` call.
+            td_errors: per-sample |TD-error| (tensor or sequence), aligned with sample_indices.
+            quantile_spreads: optional per-sample ``chosen_quantiles.std(dim=1)`` values
+                (tensor or sequence). When provided, written to each entry's
+                ``quantile_spread`` field so ``_effective_priority`` can pick it up
+                when ``self.enable_spread_decay`` is True. We write the value
+                regardless of the switch state — so flipping the switch later
+                doesn't reset spread history.
 
         Note: ``sample_count`` is bumped at PER pick time in ``_sample_from_bucket``,
-        NOT here — so this function only refreshes ``priority`` from the latest TD-error.
+        NOT here — so this function only refreshes ``priority`` and ``quantile_spread``.
         """
         if sample_indices is None or td_errors is None:
             return
 
         td_values = td_errors.detach().float().view(-1).cpu().tolist() if torch.is_tensor(td_errors) else td_errors
-        for idx, td_error in zip(sample_indices, td_values):
+
+        if quantile_spreads is None:
+            spread_values = [None] * len(td_values)
+        elif torch.is_tensor(quantile_spreads):
+            spread_values = quantile_spreads.detach().float().view(-1).cpu().tolist()
+        else:
+            spread_values = list(quantile_spreads)
+
+        for idx, td_error, spread in zip(sample_indices, td_values, spread_values):
             if not (0 <= int(idx) < len(self.index)):
                 continue
             priority = abs(float(td_error)) + self.priority_eps
-            self.index[int(idx)]["priority"] = float(np.clip(priority, self.priority_min, self.priority_max))
+            entry = self.index[int(idx)]
+            entry["priority"] = float(np.clip(priority, self.priority_min, self.priority_max))
+            if spread is not None:
+                entry["quantile_spread"] = float(spread)
 
     def sample(self, batch_size, beta=None, device="cpu", include_extra=False):
         """Sample a batch via 50% balanced (soft floor per class, with uniform_mix)
@@ -708,6 +762,8 @@ class CategorizedReplayBuffer:
         Backward compatibility:
             - Legacy entries without ``sample_count`` get default 0 (so they start fresh
               in the Method-B decay scheme).
+            - Legacy entries without ``quantile_spread`` get default 0.0 (no spread decay
+              until they're re-sampled and the FQF spread is recomputed).
             - Legacy entries with ``reward_type == "other"`` (or any value outside the
               current 4-class REWARD_TYPES) get re-categorized via ``_reward_type()``.
         """
@@ -724,8 +780,9 @@ class CategorizedReplayBuffer:
                 normalized_entry["reward_type"] = self._reward_type(
                     tail_reward, bool(normalized_entry.get("done", False))
                 )
-            # Default Method-B sample_count for legacy entries
+            # Default Method-B sample_count + quantile_spread for legacy entries
             normalized_entry.setdefault("sample_count", 0)
+            normalized_entry.setdefault("quantile_spread", 0.0)
             normalized_entries.append(normalized_entry)
         self.index = normalized_entries
         self.size_count = len(self.index)
