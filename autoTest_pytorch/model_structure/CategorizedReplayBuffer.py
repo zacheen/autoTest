@@ -31,10 +31,11 @@ class CategorizedReplayBuffer:
     Supports:
     1. Categorized Bucketing based on reward thresholds (win / lose / invalid / progress).
     2. RAM-based storage (for small states) or Disk-backed storage (for memory-heavy images).
-    3. Two-axis priority decay:
-       - age_decay   : suppresses stale entries over time
-       - sample_decay: suppresses entries that keep getting sampled with high TD-error
-                       (Method B defense against stochastic-transition traps)
+    3. Priority decay:
+       - age_decay   : suppresses stale entries over time (always on)
+       - sample_decay: optional Method B defense against stochastic-transition traps,
+                       toggled by ``enable_sample_decay`` (default OFF — disabled because
+                       in practice it didn't measurably help training in this codebase).
     4. 50% balanced + 50% PER allocation for BOTH eviction (``top_k_balanced``) and
        sampling (``sample``):
        - Balanced half: each class gets a soft floor (12.5% of slots with 4 classes).
@@ -60,6 +61,7 @@ class CategorizedReplayBuffer:
         priority_eps: float = 1e-3,
         age_decay: float = 0.002,
         max_age: int = 2000,
+        enable_sample_decay: bool = False,
         sample_decay: float = 0.05,
         quota_check_class: str | None = None,
         beta_start: float = 0.4,
@@ -81,11 +83,16 @@ class CategorizedReplayBuffer:
             priority_eps: Small epsilon added to TD Error to prevent 0 priority.
             age_decay: Decay factor removing priority based on how many inserts occurred since entry.
             max_age: Hard age limit in insert steps. Entries older than this get zero effective priority.
+            enable_sample_decay: master switch for the Method-B sample-count decay (default False).
+                When False, ``sample_count`` is NEVER bumped and ``_effective_priority`` ignores
+                the sample-count divisor — behaves like a plain PER buffer. When True, see
+                ``sample_decay`` below for the decay mechanic.
             sample_decay: Method B — divide effective priority by (1 + sample_decay × sample_count).
-                sample_count is bumped every time an entry is selected via the PER (priority-weighted)
-                branch in ``_sample_from_bucket`` — uniform-mix picks don't count. This slow-cools
-                entries that PER keeps favoring (stochastic-trap or hard-but-persistent transitions)
-                so they don't dominate the buffer or the batch indefinitely. Learned entries are
+                Only takes effect when ``enable_sample_decay=True``. sample_count is bumped every
+                time an entry is selected via the PER (priority-weighted) branch in
+                ``_sample_from_bucket`` — uniform-mix picks don't count. This slow-cools entries
+                that PER keeps favoring (stochastic-trap or hard-but-persistent transitions) so
+                they don't dominate the buffer or the batch indefinitely. Learned entries are
                 naturally protected: low priority → low PER pick rate → sample_count stays small.
             quota_check_class: name of the reward_type that ``is_class_quota_filled`` should
                 gate on. If None (default), the gate requires EVERY class to reach the 12.5%
@@ -118,6 +125,7 @@ class CategorizedReplayBuffer:
         self.age_decay = age_decay
         self.max_age = int(max_age) if max_age is not None else 0
         # if max_age = 0, it means no "force" age remove
+        self.enable_sample_decay = bool(enable_sample_decay)
         self.sample_decay = float(sample_decay)
         if quota_check_class is not None and quota_check_class not in self.REWARD_TYPES:
             raise ValueError(
@@ -189,26 +197,34 @@ class CategorizedReplayBuffer:
             self._safe_unlink(entry.get("next_state"))
 
     def _effective_priority(self, entry):
-        """Calculate the current priority of an entry after applying age + sample-count decay.
+        """Calculate the current priority of an entry after applying age (and optional)
+        cooling factors.
 
-        Two cooling factors:
-            - age_decay × age            : time since entry was stored
+        Accumulator pattern — start with ``base_priority / age_factor`` as the baseline
+        ``score``, then stack additional divisors on it whenever a feature switch is on.
+        New PER modifiers can be added below as new ``if self.<switch>:`` blocks without
+        touching the rest of the function.
+
+        Cooling factors currently wired in:
+            - age_decay × age            : time since entry was stored (always on)
             - sample_decay × sample_count: how many times PER has selected this entry
-              (bumped in ``_sample_from_bucket`` at priority-pick time; uniform-mix picks
-              and safety-padding picks don't contribute). Main defense against
-              stochastic-trap entries — they keep getting PER-selected, sample_count
-              grows, effective priority decays, eventually they stop dominating.
-              Learned entries are self-protected: low priority → rarely PER-picked
-              → sample_count stays small.
+              — ONLY applied when ``self.enable_sample_decay`` is True (Method B switch).
+              Defense against stochastic-trap entries; disabled by default because the
+              empirical effect on training was small and it complicated priority dynamics.
         """
-        base_priority = float(np.clip(entry.get("priority", 1.0), self.priority_min, self.priority_max))
+        priority = float(np.clip(entry.get("priority", 1.0), self.priority_min, self.priority_max))
         age = max(0, self.insert_counter - entry.get("insert_order", 0))
         if self.max_age > 0 and age > self.max_age:
             return 0.0
-        sample_count = int(entry.get("sample_count", 0))
         age_factor = 1.0 + self.age_decay * age
-        sample_factor = 1.0 + self.sample_decay * sample_count
-        return base_priority / age_factor / sample_factor
+        priority = priority / age_factor
+
+        if self.enable_sample_decay:
+            sample_count = int(entry.get("sample_count", 0))
+            sample_factor = 1.0 + self.sample_decay * sample_count
+            priority = priority / sample_factor
+            
+        return priority
 
     def top_k_balanced(self, k):
         """Select up to ``k`` entries via 50% balanced (soft floor per class) + 50% PER.
@@ -401,12 +417,14 @@ class CategorizedReplayBuffer:
                     p=probabilities,
                 )
                 priority_pick = [available[int(idx)] for idx in np.atleast_1d(indices)]
-            # Method B — bump sample_count for every PER-selected entry.
-            # Uniform picks above and safety padding below are NOT bumped (they don't represent
-            # "PER kept favoring this entry"). Learned entries are naturally protected because
-            # their low priority means they rarely land in priority_pick.
-            for entry in priority_pick:
-                entry["sample_count"] = int(entry.get("sample_count", 0)) + 1
+            # Method B (only when self.enable_sample_decay is True) — bump sample_count for
+            # every PER-selected entry. Uniform picks above and safety padding below are NOT
+            # bumped (they don't represent "PER kept favoring this entry"). When the switch
+            # is off, sample_count stays at 0 for every entry and ``_effective_priority``
+            # also ignores the divisor — buffer behaves like a plain PER buffer.
+            if self.enable_sample_decay:
+                for entry in priority_pick:
+                    entry["sample_count"] = int(entry.get("sample_count", 0)) + 1
             chosen.extend(priority_pick)
 
         # Safety padding — these are uniform-random fallbacks, not PER picks → no sample_count bump
@@ -450,7 +468,7 @@ class CategorizedReplayBuffer:
             "reward_type": self._reward_type(bucket_reward, done),
             "priority": float(np.clip(abs(float(reward)) + 1.0, self.priority_min, self.priority_max)),
             "insert_order": self.insert_counter,
-            "sample_count": 0,  # Method B: bumps in _sample_from_bucket every time this entry is PER-selected
+            "sample_count": 0,  # Method B counter — only bumped when self.enable_sample_decay is True
         }
 
         self.index.append(entry)
