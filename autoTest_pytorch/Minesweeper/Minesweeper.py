@@ -2,7 +2,11 @@ import tkinter as tk
 from tkinter import messagebox
 import time
 
-from MinesweeperLogic import MinesweeperLogic
+from MinesweeperLogic import MinesweeperLogic, get_board_config
+
+# 給玩家看的難度按鈕(順序 = 顯示順序)。"training" 那個 RL preset 不放這裡。
+_GUI_DIFFICULTIES = ("Beginner", "Intermediate", "Expert")
+
 
 class Minesweeper:
     def __init__(self, root, stop_event=None):
@@ -15,13 +19,6 @@ class Minesweeper:
         # Configure root grid weights for expansion
         self.root.grid_rowconfigure(2, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
-
-        # Game parameters
-        self.difficulties = {
-            'Beginner': {'rows': 9, 'cols': 9, 'mines': 10},
-            'Intermediate': {'rows': 16, 'cols': 16, 'mines': 40},
-            'Expert': {'rows': 16, 'cols': 30, 'mines': 99}
-        }
 
         self.current_difficulty = 'Beginner'
         self.setup_game()
@@ -43,10 +40,10 @@ class Minesweeper:
             widget.destroy()
 
         # Get game parameters
-        params = self.difficulties[self.current_difficulty]
-        self.rows = params['rows']
-        self.cols = params['cols']
-        self.mines_count = params['mines']
+        params = get_board_config(self.current_difficulty)
+        self.rows = params.rows
+        self.cols = params.cols
+        self.mines_count = params.mines
 
         # 建立遊戲邏輯層
         self.logic = MinesweeperLogic(self.rows, self.cols, self.mines_count)
@@ -89,7 +86,7 @@ class Minesweeper:
         new_game_btn.pack(side=tk.LEFT, padx=5)
 
         # Difficulty buttons
-        for difficulty in self.difficulties.keys():
+        for difficulty in _GUI_DIFFICULTIES:
             btn = tk.Button(
                 button_container,
                 text=difficulty,

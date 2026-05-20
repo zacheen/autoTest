@@ -15,11 +15,12 @@ import os
 import csv
 import time
 import datetime
+
 import numpy as np
 import torch
 from pathlib import Path
 
-from Minesweeper.MinesweeperLogic import MinesweeperLogic
+from Minesweeper.MinesweeperLogic import MinesweeperLogic, get_board_config
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from transformer_discrete_agent import (
     TransformerDiscreteAgent,
@@ -30,10 +31,13 @@ from transformer_discrete_agent import (
     TRANSFORMER_NUM_LAYERS,
 )
 
+
+# ---------- 棋盤難度 ----------
+# preset 集中在 Minesweeper/MinesweeperLogic.py 的 DIFFICULTIES;train 在這裡只
+# 挑一個 preset。改盤面難度只動下面這行字串就好。
+GRID_CONFIG = get_board_config("training")
+
 # ---------- 訓練參數 ----------
-GRID_ROWS = 6
-GRID_COLS = 6
-GRID_MINES = 4
 MAX_EPISODES = 100000
 MAX_STEPS_PER_EPISODE = 200
 LOG_INTERVAL = 50
@@ -133,7 +137,7 @@ def run_demo_episode(f, logic, agent, mode="validation"):
         total_reward += reward
 
         if not result.changed:
-            agent.block_action_for_state(state, row * GRID_COLS + col)
+            agent.block_action_for_state(state, row * GRID_CONFIG.cols + col)
 
         done = result.game_over or result.win
         step += 1
@@ -204,7 +208,7 @@ def run_episode(logic, agent, add_noise=True):
             valid_clicks += 1
         else:
             invalid_clicks += 1
-            agent.block_action_for_state(state, row * GRID_COLS + col)
+            agent.block_action_for_state(state, row * GRID_CONFIG.cols + col)
 
         done = result.game_over or result.win
         is_win = result.win
@@ -313,10 +317,10 @@ class CSVLogger:
 
 def main():
     print("=" * 60)
-    num_actions = GRID_ROWS * GRID_COLS
+    num_actions = GRID_CONFIG.rows * GRID_CONFIG.cols
     print(f"  Stage 1 FQF: Grid State → Transformer → FQF Q-Network → {num_actions} actions")
     print("=" * 60)
-    print(f"Grid: {GRID_ROWS}x{GRID_COLS}, Mines: {GRID_MINES}")
+    print(f"Grid: {GRID_CONFIG.rows}x{GRID_CONFIG.cols}, Mines: {GRID_CONFIG.mines}")
     print(
         f"Architecture: {num_actions} tokens × {GRID_STATE_CHANNELS}-d → "
         f"Transformer(d={TRANSFORMER_D_MODEL}, h={TRANSFORMER_NHEAD}, "
@@ -325,8 +329,8 @@ def main():
     print(f"Max episodes: {MAX_EPISODES}")
     print()
 
-    logic = MinesweeperLogic(rows=GRID_ROWS, cols=GRID_COLS, mines_count=GRID_MINES)
-    agent = TransformerDiscreteAgent(grid_h=GRID_ROWS, grid_w=GRID_COLS)
+    logic = MinesweeperLogic(rows=GRID_CONFIG.rows, cols=GRID_CONFIG.cols, mines_count=GRID_CONFIG.mines)
+    agent = TransformerDiscreteAgent(grid_h=GRID_CONFIG.rows, grid_w=GRID_CONFIG.cols)
 
     # TensorBoard — reuse the writer the agent created in __init__ so that
     # train-step diagnostics (td_error / grad / weights drift) land in the

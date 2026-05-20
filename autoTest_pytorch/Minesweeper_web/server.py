@@ -1,7 +1,7 @@
 import sys
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Dict, Optional, Tuple
@@ -15,18 +15,35 @@ MINESWEEPER_DIR = CURRENT_DIR.parent / "Minesweeper"
 if str(MINESWEEPER_DIR) not in sys.path:
     sys.path.insert(0, str(MINESWEEPER_DIR))
 
-from MinesweeperLogic import MinesweeperLogic  # noqa: E402
+from MinesweeperLogic import MinesweeperLogic, DIFFICULTIES, get_board_config  # noqa: E402
 
 
 app = Flask(__name__, static_folder=str(CURRENT_DIR / "static"), static_url_path="/static")
 session_lock = Lock()
 
-DIFFICULTIES = {
-    "Training 6x6": {"rows": 6, "cols": 6, "mines": 4},
-    "Beginner": {"rows": 9, "cols": 9, "mines": 10},
-    "Intermediate": {"rows": 16, "cols": 16, "mines": 40},
-    "Expert": {"rows": 16, "cols": 30, "mines": 99},
+
+# 對外(前端、API)的顯示標籤 ↔ 內部 DIFFICULTIES key。
+# 只有 RL training preset 兩邊不同(對外 "Training 6x6"、對內 "training");
+# 其餘 Beginner / Intermediate / Expert 兩邊一致。要加新 alias 只動 _INTERNAL_TO_EXTERNAL。
+_INTERNAL_TO_EXTERNAL: Dict[str, str] = {
+    "training": "Training 6x6",
 }
+# 從 shared DIFFICULTIES 推 external 名單,沒列在上面 alias 表的維持 identity。
+_EXTERNAL_TO_INTERNAL: Dict[str, str] = {
+    _INTERNAL_TO_EXTERNAL.get(internal_key, internal_key): internal_key
+    for internal_key in DIFFICULTIES
+}
+_DEFAULT_EXTERNAL_DIFFICULTY = _INTERNAL_TO_EXTERNAL.get("training", "training")
+
+
+def _to_internal(display_name: str) -> Optional[str]:
+    """API 收到的顯示名稱 → shared DIFFICULTIES 的 key。未知/內部 key 都回 None。"""
+    return _EXTERNAL_TO_INTERNAL.get(display_name)
+
+
+def _to_external(internal_name: str) -> str:
+    """內部 key → API 顯示名稱。"""
+    return _INTERNAL_TO_EXTERNAL.get(internal_name, internal_name)
 
 
 @dataclass
@@ -43,12 +60,13 @@ class GameSession:
 games: Dict[str, GameSession] = {}
 
 
-def _build_game(difficulty: str) -> GameSession:
-    params = DIFFICULTIES[difficulty]
+def _build_game(internal_difficulty: str) -> GameSession:
+    """internal_difficulty 必須是 DIFFICULTIES 裡的 key(已透過 _to_internal 換好)。"""
+    params = get_board_config(internal_difficulty)
     return GameSession(
         game_id=str(uuid.uuid4()),
-        difficulty=difficulty,
-        logic=MinesweeperLogic(params["rows"], params["cols"], params["mines"]),
+        difficulty=internal_difficulty,  # 內部 key,輸出時 _serialize_game 會轉成 display
+        logic=MinesweeperLogic(params.rows, params.cols, params.mines),
         created_at=time.time(),
     )
 
@@ -117,7 +135,7 @@ def _serialize_game(game: GameSession) -> dict:
 
     return {
         "game_id": game.game_id,
-        "difficulty": game.difficulty,
+        "difficulty": _to_external(game.difficulty),
         "status": _status_for(game),
         "rows": game.logic.rows,
         "cols": game.logic.cols,
@@ -141,19 +159,25 @@ def index():
 
 @app.get("/api/difficulties")
 def get_difficulties():
-    return jsonify({"difficulties": DIFFICULTIES})
+    # 對外 key 用 display label,value 用舊版 dict shape 讓前端不必改。
+    payload = {
+        _to_external(internal_key): asdict(config)
+        for internal_key, config in DIFFICULTIES.items()
+    }
+    return jsonify({"difficulties": payload})
 
 
 @app.post("/api/games")
 def create_game():
     payload = request.get_json(silent=True) or {}
-    difficulty = payload.get("difficulty", "Training 6x6")
+    display_name = payload.get("difficulty", _DEFAULT_EXTERNAL_DIFFICULTY)
+    internal_difficulty = _to_internal(display_name)
 
-    if difficulty not in DIFFICULTIES:
+    if internal_difficulty is None:
         return _json_error("Unknown difficulty.", 400)
 
     with session_lock:
-        game = _build_game(difficulty)
+        game = _build_game(internal_difficulty)
         games[game.game_id] = game
 
     response = jsonify(_serialize_game(game))

@@ -19,26 +19,22 @@ import torch
 from pathlib import Path
 from collections import defaultdict
 
-from Minesweeper.MinesweeperLogic import MinesweeperLogic
+from Minesweeper.MinesweeperLogic import MinesweeperLogic, BoardConfig
 from RL_Agent import GRID_STATE_CHANNELS, device
 from transformer_discrete_agent import TRANSFORMER_MODEL_PATH, TransformerActorNetwork
+# Probe 跟 train 用同一份難度設定 — train 決定挑哪個 preset。
+from train_stage1_simple import GRID_CONFIG
 
 REPORT_PATH = TRANSFORMER_MODEL_PATH / 'probe_report.txt'
 SEEDS = [42, 123, 7]
 NUM_EXTRA_CLICKS = 3  # 第一次點擊後再多點幾下產生 frontier
-
-# Probe board size — 跟 train_stage1_simple.py 的 GRID_ROWS / GRID_COLS 對齊。
-# 改了 grid 大小時要同步改這裡(或改成 import GRID_ROWS / GRID_COLS)。
-PROBE_GRID_ROWS = 6
-PROBE_GRID_COLS = 6
-PROBE_GRID_MINES = 4
 
 
 # ============================================================
 # Helpers
 # ============================================================
 
-def get_neighbors(r, c, rows=PROBE_GRID_ROWS, cols=PROBE_GRID_COLS):
+def get_neighbors(r, c, rows, cols):
     """取得 (r, c) 的合法鄰居座標。"""
     neighbors = []
     for dr in [-1, 0, 1]:
@@ -51,14 +47,14 @@ def get_neighbors(r, c, rows=PROBE_GRID_ROWS, cols=PROBE_GRID_COLS):
     return neighbors
 
 
-def create_game_state(seed):
+def create_game_state(seed: int, config: BoardConfig):
     """建立一個有 frontier 的遊戲局面。
 
     Returns:
         (logic, state_tensor)
     """
     random.seed(seed)
-    logic = MinesweeperLogic(rows=PROBE_GRID_ROWS, cols=PROBE_GRID_COLS, mines_count=PROBE_GRID_MINES)
+    logic = MinesweeperLogic(rows=config.rows, cols=config.cols, mines_count=config.mines)
     # 第一次點擊中央，觸發 flood-fill
     logic.click(logic.rows // 2, logic.cols // 2)
 
@@ -364,7 +360,7 @@ def analyze_q_values(backbone, q_network, state_tensor, logic, f):
 # Verdict
 # ============================================================
 
-def generate_verdict(attn_metrics_list, q_metrics_list, f):
+def generate_verdict(attn_metrics_list, q_metrics_list, f, config: BoardConfig):
     """根據所有 probe 結果產生診斷結論。"""
     f.write("\n" + "=" * 55 + "\n")
     f.write("  DIAGNOSTIC VERDICT\n")
@@ -417,7 +413,7 @@ def generate_verdict(attn_metrics_list, q_metrics_list, f):
 
     # Overall — entropy target 用 log(num_cells) 而不是寫死,跟 attention probe 的 uniform 一致
     entropy_target = (
-        valid_attn[0]['uniform_entropy'] if valid_attn else float(np.log(PROBE_GRID_ROWS * PROBE_GRID_COLS))
+        valid_attn[0]['uniform_entropy'] if valid_attn else float(np.log(config.rows * config.cols))
     )
     f.write(f"\n  POSSIBLE ROOT CAUSES:\n")
     f.write(f"    1. Attention entropy 遠低於 uniform({entropy_target:.2f}) — exploration / 注意力散布不足\n")
@@ -466,7 +462,7 @@ def main():
         q_metrics_list = []
 
         for seed in SEEDS:
-            logic, state = create_game_state(seed)
+            logic, state = create_game_state(seed, GRID_CONFIG)
 
             f.write(f"\n{'='*55}\n")
             f.write(f"  Seed {seed}\n")
@@ -496,7 +492,7 @@ def main():
             q_metrics_list.append(q_m)
 
         # Verdict
-        generate_verdict(attn_metrics_list, q_metrics_list, f)
+        generate_verdict(attn_metrics_list, q_metrics_list, f, GRID_CONFIG)
 
     print(f"\nReport saved to: {REPORT_PATH}")
     print("Done.")

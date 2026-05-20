@@ -24,6 +24,34 @@ CH_MINE = 11
 NUM_CHANNELS = 12
 
 
+# ---------- Board difficulty presets ----------
+@dataclass(frozen=True)
+class BoardConfig:
+    """棋盤難度設定(rows × cols + mine 數)。"""
+    rows: int
+    cols: int
+    mines: int
+
+
+DIFFICULTIES: dict[str, BoardConfig] = {
+    # RL 訓練用的小盤,經驗上 6×6/4 可以快速收斂用來驗 pipeline。
+    "training":     BoardConfig(rows=6,  cols=6,  mines=4),
+    # 標準 Minesweeper 三難度
+    "Beginner":     BoardConfig(rows=9,  cols=9,  mines=10),
+    "Intermediate": BoardConfig(rows=16, cols=16, mines=40),
+    "Expert":       BoardConfig(rows=16, cols=30, mines=99),
+}
+
+
+def get_board_config(name: str) -> BoardConfig:
+    """根據難度名稱回傳對應 BoardConfig。未知名稱 raise KeyError 並列出可用 preset。"""
+    if name not in DIFFICULTIES:
+        raise KeyError(
+            f"Unknown difficulty {name!r}. Available: {sorted(DIFFICULTIES.keys())}"
+        )
+    return DIFFICULTIES[name]
+
+
 @dataclass
 class ClickResult:
     """左鍵點擊的回傳結果。"""
