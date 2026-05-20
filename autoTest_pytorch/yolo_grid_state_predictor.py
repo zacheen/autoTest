@@ -654,6 +654,7 @@ class YOLOGridStateTrainer:
     TOTAL_EPOCHS  = 50
     VAL_RATIO     = 0.15
     SEED          = 42
+    GRAD_CLIP_NORM = 1.0   # clip_grad_norm_ 的 max_norm;太寬會炸 gradient,太緊收斂慢
     # DataLoader 並行讀取數量。
     # 0 = 主進程序列讀取（GPU 使用率低）；2~4 = worker 預取，GPU 利用率高。
     # Windows 需要 if __name__ guard（已有），可安全設為 2。
@@ -820,7 +821,7 @@ class YOLOGridStateTrainer:
                 loss = self.loss_fn(logits, label)
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.GRAD_CLIP_NORM)
                 self.optimizer.step()
             else:
                 with torch.no_grad():

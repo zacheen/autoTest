@@ -35,6 +35,7 @@ TARGET_UPDATE_FREQ = 50
 N_STEP = 1
 NUM_FQF_FRACTIONS = 8
 FQF_ENTROPY_COEF = 1e-3
+FQF_HUBER_KAPPA = 1.0
 MINIMUM_DATA_SIZE = min(PER_CAPACITY, SAVE_CAPACITY*4)-1  # below this amount, won't start training
 GRAD_CLIP_NORM = 8.0
 # Heavy diagnostics — log less frequently to avoid TensorBoard bloat / overhead.
@@ -262,12 +263,16 @@ class TransformerActorNetwork(nn.Module):
 def _quantile_huber_loss(current_quantiles, target_quantiles, tau_hats, return_stats=False):
     td = target_quantiles.unsqueeze(1) - current_quantiles.unsqueeze(2)
     abs_td = td.abs()
-    huber = torch.where(abs_td <= 1.0, 0.5 * abs_td.pow(2), abs_td - 0.5)
+    huber = torch.where(
+        abs_td <= FQF_HUBER_KAPPA,
+        0.5 * abs_td.pow(2),
+        FQF_HUBER_KAPPA * abs_td - 0.5 * FQF_HUBER_KAPPA ** 2,
+    )
     tau = tau_hats.unsqueeze(2)
     quantile_weight = (tau - (td.detach() < 0).float()).abs()
     loss = (quantile_weight * huber).sum(dim=2).mean(dim=1, keepdim=True)
     if return_stats:
-        frac_clipped = (abs_td > 1.0).float().mean().item()
+        frac_clipped = (abs_td > FQF_HUBER_KAPPA).float().mean().item()
         return loss, frac_clipped
     return loss
 
