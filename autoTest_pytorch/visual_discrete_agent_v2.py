@@ -75,7 +75,7 @@ VISUAL_WARMUP_STEPS = 1000   # 不到這個數量不開始訓練
 
 # ── training hyper-params ────────────────────────────────────────────
 VISUAL_N_STEP = 1
-VISUAL_GRAD_CLIP_NORM = 1.0
+VISUAL_GRAD_CLIP_NORM = 10.0
 TRAIN_EVERY_N_STEPS = 1
 TARGET_UPDATE_FREQ = 50
 SAVE_EVERY_N_EPISODES = 50

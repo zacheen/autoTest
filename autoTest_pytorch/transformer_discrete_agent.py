@@ -36,7 +36,7 @@ N_STEP = 1
 NUM_FQF_FRACTIONS = 8
 FQF_ENTROPY_COEF = 1e-3
 MINIMUM_DATA_SIZE = min(PER_CAPACITY, SAVE_CAPACITY*4)-1  # below this amount, won't start training
-GRAD_CLIP_NORM = 5.0
+GRAD_CLIP_NORM = 8.0
 # Heavy diagnostics — log less frequently to avoid TensorBoard bloat / overhead.
 HISTOGRAM_EVERY = 200          # per-layer weight/grad norms
 WEIGHT_DISTANCE_LOG_EVERY = 100  # full-model weight snapshot distance
