@@ -17,7 +17,6 @@ import time
 import datetime
 import numpy as np
 import torch
-from collections import deque
 from pathlib import Path
 
 from Minesweeper.MinesweeperLogic import MinesweeperLogic
@@ -340,9 +339,9 @@ def main():
     print(f"CSV log: {csv_path}")
     print()
 
-    recent_rewards = deque(maxlen=LOG_INTERVAL)
-    recent_wins = deque(maxlen=LOG_INTERVAL)
-    recent_steps = deque(maxlen=LOG_INTERVAL)
+    # NOTE: recent_rewards / recent_wins / recent_steps 已搬進 agent.training_history。
+    # 它在 log_episode_metrics() 內 record(),console log 直接 query
+    # training_history.win_rate(window=LOG_INTERVAL) 等方法,順便獲得 resume 持久化。
     total_wins = 0
     start_time = time.time()
 
@@ -361,15 +360,13 @@ def main():
                 win=stats['is_win'],
                 invalid_click_rate=stats['invalid_rate'],
                 reward_mean=episode_reward_mean,
+                total_reward=stats['reward'],
+                steps=stats['steps'],
             )
             agent.on_episode_end()
 
             if stats['is_win']:
                 total_wins += 1
-
-            recent_rewards.append(stats['reward'])
-            recent_wins.append(1 if stats['is_win'] else 0)
-            recent_steps.append(stats['steps'])
 
             # TensorBoard — episode-level scalars. NOTE: do NOT reuse the
             # `train/Q_loss` / `train/q_mean` tag names; the agent already
@@ -431,14 +428,14 @@ def main():
 
             # Console log
             if episode % LOG_INTERVAL == 0:
-                avg_reward = np.mean(recent_rewards)
-                win_rate = np.mean(recent_wins) * 100
-                avg_steps = np.mean(recent_steps)
+                hist = agent.training_history
+                avg_reward = hist.avg_reward(window=LOG_INTERVAL)
+                win_rate = hist.win_rate(window=LOG_INTERVAL) * 100
                 elapsed = time.time() - start_time
                 eps_per_sec = episode / elapsed
 
                 writer.add_scalar('train/avg_reward_50', avg_reward, agent.episode_count)
-                writer.add_scalar('train/win_rate_50', win_rate, agent.episode_count)
+                writer.add_scalar('train/win_rate_recent', win_rate, agent.episode_count)
 
                 now_str = datetime.datetime.now().strftime("%H:%M")
                 print(f"[{now_str}] "

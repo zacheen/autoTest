@@ -33,6 +33,8 @@ class History:
     def __init__(self, max_capacity: int = 100):
         self._max_capacity = int(max(1, max_capacity))
         self._results: deque[int] = deque(maxlen=self._max_capacity)
+        self._rewards: deque[float] = deque(maxlen=self._max_capacity)
+        self._steps: deque[int] = deque(maxlen=self._max_capacity)
         self.total_episodes: int = 0
 
     @property
@@ -41,13 +43,37 @@ class History:
 
     # ──────────────────────────── update ────────────────────────────
 
-    def record(self, win: bool) -> None:
-        """Append a single episode outcome (1=win, 0=loss)。"""
-        outcome = int(bool(win))
-        self._results.append(outcome)
+    def record(
+        self,
+        win: bool,
+        *,
+        total_reward: float = 0.0,
+        steps: int = 0,
+    ) -> None:
+        """Append a single episode outcome 與 reward / steps。
+
+        total_reward / steps 是 keyword-only 且有預設值,讓舊呼叫端
+        `record(win=...)` 仍可運作 — 只是這場不會貢獻 reward/steps 統計。
+        """
+        self._results.append(int(bool(win)))
+        self._rewards.append(float(total_reward))
+        self._steps.append(int(steps))
         self.total_episodes += 1
 
     # ──────────────────────────── query ─────────────────────────────
+
+    def _rolling_mean(self, source: deque, window: int) -> float:
+        """共用的 rolling mean。window 大於 capacity 時自動擴張 (跟 win_rate 一致)。"""
+        window = int(max(1, window))
+        if window > self._max_capacity:
+            self._grow_capacity(window)
+        if not source:
+            return 0.0
+        if window >= len(source):
+            samples = source
+        else:
+            samples = list(source)[-window:]
+        return sum(samples) / len(samples)
 
     def win_rate(self, window: int = 100) -> float:
         """Rolling win rate over the last `window` episodes.
@@ -59,16 +85,19 @@ class History:
         呼叫端拿到的數字會隨 sample 數逐步穩定;若對 sample 不足敏感,
         可同時 query `len(history)` 或 `total_episodes` 自行判斷。
         """
-        window = int(max(1, window))
-        if window > self._max_capacity:
-            self._grow_capacity(window)
-        if not self._results:
-            return 0.0
-        if window >= len(self._results):
-            samples = self._results
-        else:
-            samples = list(self._results)[-window:]
-        return sum(samples) / len(samples)
+        return self._rolling_mean(self._results, window)
+
+    def avg_reward(self, window: int = 100) -> float:
+        """Rolling 平均整場 reward (跨 window 場,每場一個值)。
+
+        注意:這裡記的是「整場 total reward」,不是 per-step mean。
+        per-step mean 由 caller 自行從 (total_reward, steps) 算出。
+        """
+        return self._rolling_mean(self._rewards, window)
+
+    def avg_steps(self, window: int = 100) -> float:
+        """Rolling 平均每場 step 數。"""
+        return self._rolling_mean(self._steps, window)
 
     def __len__(self) -> int:
         return len(self._results)
@@ -76,14 +105,16 @@ class History:
     # ──────────────────────────── internal ──────────────────────────
 
     def _grow_capacity(self, new_capacity: int) -> None:
-        """擴張 deque 的 maxlen。既有資料保留;sample 滿到新長度之前,
-        win_rate(N) 會用「現有資料」算 (sample 不足的可接受 trade-off)。
+        """擴張所有 deque 的 maxlen。既有資料保留;sample 滿到新長度之前,
+        win_rate / avg_reward / avg_steps 會用「現有資料」算 (sample 不足的可接受 trade-off)。
         """
         new_capacity = int(new_capacity)
         if new_capacity <= self._max_capacity:
             return
         self._max_capacity = new_capacity
         self._results = deque(self._results, maxlen=self._max_capacity)
+        self._rewards = deque(self._rewards, maxlen=self._max_capacity)
+        self._steps = deque(self._steps, maxlen=self._max_capacity)
 
     # ──────────────────────────── checkpoint ────────────────────────
 
@@ -91,6 +122,8 @@ class History:
         return {
             "max_capacity": self._max_capacity,
             "results": list(self._results),
+            "rewards": list(self._rewards),
+            "steps": list(self._steps),
             "total_episodes": self.total_episodes,
         }
 
@@ -103,6 +136,8 @@ class History:
         相容性:
             - 新格式 key 是 "results";舊扁平 checkpoint 用的是 "result_window",
               這裡兩個都吃,讓 mixin 在 migration 階段可以直接餵舊 dict。
+            - "rewards" / "steps" 是新加的 key;舊 checkpoint 沒有 → 用空 deque
+              讓新指標從 resume 之後重新累積 (avg_reward/avg_steps 初期會返回 0.0)。
         """
         if not state:
             return
@@ -110,13 +145,17 @@ class History:
         self._max_capacity = max(1, new_cap)
         results = state.get("results", state.get("result_window", []))
         self._results = deque_cls(results, maxlen=self._max_capacity)
+        rewards = state.get("rewards", [])
+        steps = state.get("steps", [])
+        self._rewards = deque_cls(rewards, maxlen=self._max_capacity)
+        self._steps = deque_cls(steps, maxlen=self._max_capacity)
         self.total_episodes = int(state.get("total_episodes", 0))
 
 
 class TrainingHistory(History):
     """Training loop 用的 History subclass。
 
-    目前無 training-specific 行為,純作 namespace 用 — 之後若要加
-    training-only 的統計(e.g. invalid_rate / reward 平均…)可以在這加 field。
+    base class 已包含 win / total_reward / steps 三個 rolling 統計,
+    training script 不再需要自己維護 recent_* deque,直接 query 這裡即可。
     """
     pass

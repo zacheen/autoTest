@@ -1416,21 +1416,31 @@ class TransformerDiscreteAgent:
         win: bool,
         invalid_click_rate: float = 0.0,
         reward_mean: float = 0.0,
+        *,
+        total_reward: float = 0.0,
+        steps: int = 0,
     ) -> None:
         """記錄一場 episode 結果,並依 rolling win rate 更新 epsilon。
 
         與 v3 / v2 介面一致:訓練腳本應在 `on_episode_end()` 之前呼叫一次。
-        流程:1) 結果記到 TrainingHistory,2) 從 history 取 rolling win rate,
+        流程:1) 結果 (含 total_reward / steps) 記到 TrainingHistory,
+        2) 從 history 取 rolling win rate,
         3) 把 win rate 餵給 controller 算 next epsilon。
+
+        total_reward / steps 是 keyword-only。舊呼叫端不傳的話,history 內的
+        reward/steps 統計就會是 0 (對 win_rate / ε 衰減無影響)。
         """
-        self.training_history.record(win=win)
+        self.training_history.record(
+            win=win,
+            total_reward=total_reward,
+            steps=steps,
+        )
         ep_idx = self.training_history.total_episodes
         rolling_wr = self.training_history.win_rate(window=100)
         self.epsilon_controller.update(rolling_wr)
 
         self.tb_writer.add_scalar("episode/reward_mean",        float(reward_mean),        ep_idx)
         self.tb_writer.add_scalar("episode/invalid_click_rate", float(invalid_click_rate), ep_idx)
-        self.tb_writer.add_scalar("episode/win_rate_recent",    rolling_wr,                ep_idx)
 
     # ──────────────────────────── lr warmup ────────────────────────────
 
