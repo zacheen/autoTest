@@ -22,6 +22,7 @@ from pathlib import Path
 
 from Minesweeper.MinesweeperLogic import MinesweeperLogic, get_board_config
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
+from model_structure.history import History
 from transformer_discrete_agent import (
     TransformerDiscreteAgent,
     log_unhandled_exception,
@@ -250,24 +251,26 @@ def run_evaluation(logic, agent):
 
 
 def run_fixed_policy_evaluation(logic, agent, num_episodes):
-    eval_rewards = []
-    eval_wins = 0
-    eval_steps = []
-    eval_invalid_rates = []
+    # 用一個 ephemeral History 累積本次 eval session 的每場結果,query 時
+    # 走 window=None 取「全部現有資料」的 mean — 跟原本 np.mean(list) 同義,
+    # 但 averaging 邏輯集中在 History,不再在 caller 重新寫一次。
+    # max_capacity=num_episodes 確保 deque 不會截斷。
+    eval_hist = History(max_capacity=num_episodes)
 
     for _ in range(num_episodes):
         stats = run_episode(logic, agent, add_noise=False)
-        eval_rewards.append(stats['reward'])
-        eval_steps.append(stats['steps'])
-        eval_invalid_rates.append(stats['invalid_rate'])
-        if stats['is_win']:
-            eval_wins += 1
+        eval_hist.record(
+            win=stats['is_win'],
+            total_reward=stats['reward'],
+            steps=stats['steps'],
+            invalid_rate=stats['invalid_rate'],
+        )
 
     return {
-        'avg_reward': np.mean(eval_rewards),
-        'win_rate': eval_wins / num_episodes * 100,
-        'avg_steps': np.mean(eval_steps),
-        'avg_invalid_rate': np.mean(eval_invalid_rates),
+        'avg_reward':       eval_hist.avg_reward(window=None),
+        'win_rate':         eval_hist.win_rate(window=None) * 100,  # 百分比
+        'avg_steps':        eval_hist.avg_steps(window=None),
+        'avg_invalid_rate': eval_hist.avg_invalid_rate(window=None),
     }
 
 

@@ -7,7 +7,9 @@
 Class 結構:
     - History          : base class,提供 record / win_rate / state_dict 等通用 API
     - TrainingHistory  : training loop 用的 subclass(目前無額外行為,留作 namespace)
-    - eval 端目前無 eval-specific 需求,直接用 History 即可;有需要再加 EvalHistory。
+    - eval 端目前直接 init 一個 ephemeral `History(max_capacity=num_episodes)`,
+      用 `window=None` 取整個 session 的 mean (見 run_fixed_policy_evaluation)。
+      之後若要做「跨 eval session 的時間序」再加 EvalHistory subclass。
 
 設計重點:
     - max_capacity 預設 100,當 caller 要求更大的 window 時自動擴張
@@ -35,6 +37,7 @@ class History:
         self._results: deque[int] = deque(maxlen=self._max_capacity)
         self._rewards: deque[float] = deque(maxlen=self._max_capacity)
         self._steps: deque[int] = deque(maxlen=self._max_capacity)
+        self._invalid_rates: deque[float] = deque(maxlen=self._max_capacity)
         self.total_episodes: int = 0
 
     @property
@@ -49,34 +52,48 @@ class History:
         *,
         total_reward: float = 0.0,
         steps: int = 0,
+        invalid_rate: float = 0.0,
     ) -> None:
-        """Append a single episode outcome 與 reward / steps。
+        """Append a single episode outcome 與 reward / steps / invalid_rate。
 
-        total_reward / steps 是 keyword-only 且有預設值,讓舊呼叫端
-        `record(win=...)` 仍可運作 — 只是這場不會貢獻 reward/steps 統計。
+        total_reward / steps / invalid_rate 是 keyword-only 且有預設值,
+        讓舊呼叫端 `record(win=...)` 仍可運作 — 只是這場不會貢獻對應統計。
         """
         self._results.append(int(bool(win)))
         self._rewards.append(float(total_reward))
         self._steps.append(int(steps))
+        self._invalid_rates.append(float(invalid_rate))
         self.total_episodes += 1
 
     # ──────────────────────────── query ─────────────────────────────
 
-    def _rolling_mean(self, source: deque, window: int) -> float:
-        """共用的 rolling mean。window 大於 capacity 時自動擴張 (跟 win_rate 一致)。"""
-        window = int(max(1, window))
-        if window > self._max_capacity:
-            self._grow_capacity(window)
+    def _rolling_mean(self, source: deque, window: int | None) -> float:
+        """共用的 rolling mean。
+
+        - window=None 或 window >= len(source):用「全部現有資料」算 (eval
+          session 通常這樣用 — 取整個 session 的 mean,不要 rolling window)
+        - window > 目前 max_capacity:先擴張 capacity 再算 (sample 不足時
+          仍用現有資料,跟舊 controller 行為一致)
+        """
         if not source:
             return 0.0
-        if window >= len(source):
+        
+        if window is None:
             samples = source
         else:
-            samples = list(source)[-window:]
+            window = int(max(1, window))
+            if window > self._max_capacity:
+                self._grow_capacity(window)
+            if window >= len(source):
+                samples = source
+            else:
+                samples = list(source)[-window:]
         return sum(samples) / len(samples)
 
-    def win_rate(self, window: int = 100) -> float:
-        """Rolling win rate over the last `window` episodes.
+    def win_rate(self, window: int | None = 100) -> float:
+        """Rolling win rate over the last `window` episodes。
+
+        window=None 表示「用全部現有資料」(eval session 慣用法)。
 
         若 window > 目前 max_capacity,先擴張 max_capacity (rebuild deque +
         copy 現有資料);擴張後尚未累積到 window 場時,用「現有資料」直接算 —
@@ -87,17 +104,27 @@ class History:
         """
         return self._rolling_mean(self._results, window)
 
-    def avg_reward(self, window: int = 100) -> float:
+    def avg_reward(self, window: int | None = 100) -> float:
         """Rolling 平均整場 reward (跨 window 場,每場一個值)。
+
+        window=None 表示「用全部現有資料」(eval session 慣用法)。
 
         注意:這裡記的是「整場 total reward」,不是 per-step mean。
         per-step mean 由 caller 自行從 (total_reward, steps) 算出。
         """
         return self._rolling_mean(self._rewards, window)
 
-    def avg_steps(self, window: int = 100) -> float:
-        """Rolling 平均每場 step 數。"""
+    def avg_steps(self, window: int | None = 100) -> float:
+        """Rolling 平均每場 step 數。window=None 用全部現有資料。"""
         return self._rolling_mean(self._steps, window)
+
+    def avg_invalid_rate(self, window: int | None = 100) -> float:
+        """Rolling 平均每場 invalid click rate。window=None 用全部現有資料。
+
+        Caller 在 `record(invalid_rate=...)` 時要傳這場的 invalid rate
+        (0.0~1.0)。沒傳就視為 0.0,於是這場對 mean 的貢獻是 0。
+        """
+        return self._rolling_mean(self._invalid_rates, window)
 
     def __len__(self) -> int:
         return len(self._results)
@@ -106,7 +133,8 @@ class History:
 
     def _grow_capacity(self, new_capacity: int) -> None:
         """擴張所有 deque 的 maxlen。既有資料保留;sample 滿到新長度之前,
-        win_rate / avg_reward / avg_steps 會用「現有資料」算 (sample 不足的可接受 trade-off)。
+        win_rate / avg_reward / avg_steps / avg_invalid_rate 會用「現有資料」算
+        (sample 不足的可接受 trade-off)。
         """
         new_capacity = int(new_capacity)
         if new_capacity <= self._max_capacity:
@@ -115,6 +143,7 @@ class History:
         self._results = deque(self._results, maxlen=self._max_capacity)
         self._rewards = deque(self._rewards, maxlen=self._max_capacity)
         self._steps = deque(self._steps, maxlen=self._max_capacity)
+        self._invalid_rates = deque(self._invalid_rates, maxlen=self._max_capacity)
 
     # ──────────────────────────── checkpoint ────────────────────────
 
@@ -124,6 +153,7 @@ class History:
             "results": list(self._results),
             "rewards": list(self._rewards),
             "steps": list(self._steps),
+            "invalid_rates": list(self._invalid_rates),
             "total_episodes": self.total_episodes,
         }
 
@@ -136,8 +166,9 @@ class History:
         相容性:
             - 新格式 key 是 "results";舊扁平 checkpoint 用的是 "result_window",
               這裡兩個都吃,讓 mixin 在 migration 階段可以直接餵舊 dict。
-            - "rewards" / "steps" 是新加的 key;舊 checkpoint 沒有 → 用空 deque
-              讓新指標從 resume 之後重新累積 (avg_reward/avg_steps 初期會返回 0.0)。
+            - "rewards" / "steps" / "invalid_rates" 是新加的 key;舊 checkpoint
+              沒有 → 用空 deque 讓新指標從 resume 之後重新累積
+              (avg_reward / avg_steps / avg_invalid_rate 初期會返回 0.0)。
         """
         if not state:
             return
@@ -147,8 +178,10 @@ class History:
         self._results = deque_cls(results, maxlen=self._max_capacity)
         rewards = state.get("rewards", [])
         steps = state.get("steps", [])
+        invalid_rates = state.get("invalid_rates", [])
         self._rewards = deque_cls(rewards, maxlen=self._max_capacity)
         self._steps = deque_cls(steps, maxlen=self._max_capacity)
+        self._invalid_rates = deque_cls(invalid_rates, maxlen=self._max_capacity)
         self.total_episodes = int(state.get("total_episodes", 0))
 
 
