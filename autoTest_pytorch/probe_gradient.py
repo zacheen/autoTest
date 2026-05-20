@@ -145,7 +145,7 @@ def main():
 
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(REPORT_PATH, 'w', encoding='utf-8') as f:
-        f.write(f"GRADIENT REPORT (DDQN) | ep={agent.episode_count} | it={agent.total_it}\n")
+        f.write(f"GRADIENT REPORT (FQF) | ep={agent.episode_count} | it={agent.total_it}\n")
         f.write(f"loss={losses['loss']:.4f} | epsilon={agent.epsilon:.4f}\n")
         f.write(f"buffer={buf_size}\n\n")
         format_grads(avg_grads, f)

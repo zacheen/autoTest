@@ -21,7 +21,14 @@ from pathlib import Path
 
 from Minesweeper.MinesweeperLogic import MinesweeperLogic
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
-from transformer_discrete_agent import TransformerDiscreteAgent, log_unhandled_exception
+from transformer_discrete_agent import (
+    TransformerDiscreteAgent,
+    log_unhandled_exception,
+    GRID_STATE_CHANNELS,
+    TRANSFORMER_D_MODEL,
+    TRANSFORMER_NHEAD,
+    TRANSFORMER_NUM_LAYERS,
+)
 
 # ---------- 訓練參數 ----------
 GRID_ROWS = 6
@@ -307,10 +314,14 @@ class CSVLogger:
 def main():
     print("=" * 60)
     num_actions = GRID_ROWS * GRID_COLS
-    print(f"  Stage 1 DDQN: Grid State → Transformer → Dueling Q → {num_actions} actions")
+    print(f"  Stage 1 FQF: Grid State → Transformer → FQF Q-Network → {num_actions} actions")
     print("=" * 60)
     print(f"Grid: {GRID_ROWS}x{GRID_COLS}, Mines: {GRID_MINES}")
-    print(f"Architecture: 100 tokens × 12-d → Transformer(d=32, h=4, L=4) → per-token logit")
+    print(
+        f"Architecture: {num_actions} tokens × {GRID_STATE_CHANNELS}-d → "
+        f"Transformer(d={TRANSFORMER_D_MODEL}, h={TRANSFORMER_NHEAD}, "
+        f"L={TRANSFORMER_NUM_LAYERS}) → per-token logit"
+    )
     print(f"Max episodes: {MAX_EPISODES}")
     print()
 

@@ -22,18 +22,23 @@ from collections import defaultdict
 from Minesweeper.MinesweeperLogic import MinesweeperLogic
 from RL_Agent import GRID_STATE_CHANNELS, device
 from transformer_discrete_agent import TRANSFORMER_MODEL_PATH, TransformerActorNetwork
-from model_structure.transformer_shared import DuelingQNetwork
 
 REPORT_PATH = TRANSFORMER_MODEL_PATH / 'probe_report.txt'
 SEEDS = [42, 123, 7]
 NUM_EXTRA_CLICKS = 3  # 第一次點擊後再多點幾下產生 frontier
+
+# Probe board size — 跟 train_stage1_simple.py 的 GRID_ROWS / GRID_COLS 對齊。
+# 改了 grid 大小時要同步改這裡(或改成 import GRID_ROWS / GRID_COLS)。
+PROBE_GRID_ROWS = 6
+PROBE_GRID_COLS = 6
+PROBE_GRID_MINES = 4
 
 
 # ============================================================
 # Helpers
 # ============================================================
 
-def get_neighbors(r, c, rows=10, cols=10):
+def get_neighbors(r, c, rows=PROBE_GRID_ROWS, cols=PROBE_GRID_COLS):
     """取得 (r, c) 的合法鄰居座標。"""
     neighbors = []
     for dr in [-1, 0, 1]:
@@ -53,13 +58,13 @@ def create_game_state(seed):
         (logic, state_tensor)
     """
     random.seed(seed)
-    logic = MinesweeperLogic(rows=10, cols=10, mines_count=10)
+    logic = MinesweeperLogic(rows=PROBE_GRID_ROWS, cols=PROBE_GRID_COLS, mines_count=PROBE_GRID_MINES)
     # 第一次點擊中央，觸發 flood-fill
-    logic.click(5, 5)
+    logic.click(logic.rows // 2, logic.cols // 2)
 
     # 再多點幾個安全的未翻開格
     safe_unrevealed = [
-        (r, c) for r in range(10) for c in range(10)
+        (r, c) for r in range(logic.rows) for c in range(logic.cols)
         if (r, c) not in logic.mines and (r, c) not in logic.revealed
     ]
     random.shuffle(safe_unrevealed)
@@ -113,8 +118,8 @@ def extract_attention_weights(actor, state_tensor):
     """用 hooks 擷取每層 self_attn 的 attention weights。
 
     Returns:
-        attn_store: dict[layer_idx] → (1, nhead, 100, 100)
-        probs: (1, 100) action probabilities
+        attn_store: dict[layer_idx] → (1, nhead, T, T) where T = num_tokens
+        probs: (1, T) action probabilities
     """
     attn_store = {}
     handles = []
@@ -168,20 +173,20 @@ def analyze_attention(attn_store, logic, f):
 
     num_layers = len(attn_store)
     num_heads = attn_store[0].shape[1]
+    num_cells = logic.rows * logic.cols  # = num_tokens (attn shape: (1, h, T, T))
 
     # 計算每層每 head 的鄰居 attention 比例
     layer_head_ratios = defaultdict(list)  # (layer, head) → [ratios]
     layer_head_entropies = defaultdict(list)
 
     for r, c, num in numbered_cells:
-        tok = r * 10 + c
-        neighbors = get_neighbors(r, c)
-        neighbor_toks = [nr * 10 + nc for nr, nc in neighbors]
-        baseline = len(neighbors) / 100.0
+        tok = r * logic.cols + c
+        neighbors = get_neighbors(r, c, rows=logic.rows, cols=logic.cols)
+        neighbor_toks = [nr * logic.cols + nc for nr, nc in neighbors]
 
         for li in range(num_layers):
             for hi in range(num_heads):
-                attn = attn_store[li][0, hi, tok, :]  # (100,)
+                attn = attn_store[li][0, hi, tok, :]  # (num_cells,)
                 neighbor_sum = attn[neighbor_toks].sum().item()
                 layer_head_ratios[(li, hi)].append(neighbor_sum)
 
@@ -206,15 +211,21 @@ def analyze_attention(attn_store, logic, f):
     overall_ratio = np.mean(all_ratios)
     overall_entropy = np.mean(all_entropies)
 
+    # 中央格的鄰居數作為「uniform attention」基線(corner = 3, edge = 5, center = 8)。
+    center_neighbors = len(get_neighbors(logic.rows // 2, logic.cols // 2,
+                                         rows=logic.rows, cols=logic.cols))
+    uniform_baseline = center_neighbors / num_cells
+    uniform_entropy = float(np.log(num_cells))
+
     # 寫入 per-layer summary
-    f.write(f"\n  Per-layer neighbor attention ratio (baseline={len(get_neighbors(5,5))/100:.2f}):\n")
+    f.write(f"\n  Per-layer neighbor attention ratio (baseline={uniform_baseline:.2f}):\n")
     for li in range(num_layers):
         head_strs = []
         for hi in range(num_heads):
             head_strs.append(f"H{hi}={avg_ratios[(li,hi)]:.3f}")
         f.write(f"    Layer {li}: {' | '.join(head_strs)}\n")
 
-    f.write(f"\n  Per-layer attention entropy (uniform={np.log(100):.2f}):\n")
+    f.write(f"\n  Per-layer attention entropy (uniform={uniform_entropy:.2f}):\n")
     for li in range(num_layers):
         head_strs = []
         for hi in range(num_heads):
@@ -227,20 +238,20 @@ def analyze_attention(attn_store, logic, f):
     # 印出 best head 在前 3 個 numbered cell 的 attention heatmap
     show_cells = numbered_cells[:3]
     for r, c, num in show_cells:
-        tok = r * 10 + c
-        neighbors = get_neighbors(r, c)
+        tok = r * logic.cols + c
+        neighbors = get_neighbors(r, c, rows=logic.rows, cols=logic.cols)
         neighbor_set = set(neighbors)
-        attn = attn_store[best_key[0]][0, best_key[1], tok, :]  # (100,)
-        neighbor_sum = attn[[nr * 10 + nc for nr, nc in neighbors]].sum().item()
+        attn = attn_store[best_key[0]][0, best_key[1], tok, :]  # (num_cells,)
+        neighbor_sum = attn[[nr * logic.cols + nc for nr, nc in neighbors]].sum().item()
 
         f.write(f"\n  Attention from cell ({r},{c}) [number={num}],"
                 f" Layer {best_key[0]} Head {best_key[1]}:\n")
-        f.write("       " + "     ".join(f"{cc}" for cc in range(10)) + "\n")
+        f.write("       " + "     ".join(f"{cc}" for cc in range(logic.cols)) + "\n")
 
-        for rr in range(10):
+        for rr in range(logic.rows):
             row_str = f"  {rr} |"
-            for cc in range(10):
-                val = attn[rr * 10 + cc].item()
+            for cc in range(logic.cols):
+                val = attn[rr * logic.cols + cc].item()
                 if rr == r and cc == c:
                     row_str += f"  *** "
                 elif (rr, cc) in neighbor_set:
@@ -250,13 +261,15 @@ def analyze_attention(attn_store, logic, f):
             f.write(row_str + "\n")
 
         f.write(f"  Neighbor attn sum: {neighbor_sum:.3f}"
-                f" (baseline: {len(neighbors)/100:.2f})\n")
+                f" (baseline: {len(neighbors)/num_cells:.2f})\n")
 
     return {
         'overall_ratio': overall_ratio,
         'overall_entropy': overall_entropy,
         'best_ratio': best_ratio,
         'best_key': best_key,
+        'uniform_baseline': uniform_baseline,
+        'uniform_entropy': uniform_entropy,
     }
 
 
@@ -276,17 +289,17 @@ def analyze_q_values(backbone, q_network, state_tensor, logic, f):
         state_batch = state_tensor.unsqueeze(0).to(device)
         features = backbone.get_features(state_batch)
         q_values = q_network(features)
-        q_min = q_values[0].cpu().numpy()  # (100,)
+        q_min = q_values[0].cpu().numpy()  # (num_cells,)
 
-    q_grid = q_min.reshape(10, 10)
+    q_grid = q_min.reshape(logic.rows, logic.cols)
 
     # 分類 cells
     safe_qs = []
     mine_qs = []
     revealed_count = 0
 
-    for r in range(10):
-        for c in range(10):
+    for r in range(logic.rows):
+        for c in range(logic.cols):
             if (r, c) in logic.revealed:
                 revealed_count += 1
             elif (r, c) in logic.mines:
@@ -296,11 +309,11 @@ def analyze_q_values(backbone, q_network, state_tensor, logic, f):
 
     # Q-value grid 文字
     f.write("\n  Q-Values (min of twin Q):\n")
-    f.write("       " + "      ".join(f"{cc}" for cc in range(10)) + "\n")
+    f.write("       " + "      ".join(f"{cc}" for cc in range(logic.cols)) + "\n")
 
-    for r in range(10):
+    for r in range(logic.rows):
         row_str = f"  {r} |"
-        for c in range(10):
+        for c in range(logic.cols):
             if (r, c) in logic.revealed:
                 row_str += "  ---- "
             elif (r, c) in logic.mines:
@@ -363,6 +376,9 @@ def generate_verdict(attn_metrics_list, q_metrics_list, f):
         avg_ratio = np.mean([m['overall_ratio'] for m in valid_attn])
         avg_entropy = np.mean([m['overall_entropy'] for m in valid_attn])
         best_ratio = max(m['best_ratio'] for m in valid_attn)
+        # baseline / uniform 由 analyze_attention 從 logic.rows × logic.cols 算好寫進 metrics
+        uniform_baseline = valid_attn[0]['uniform_baseline']
+        uniform_entropy = valid_attn[0]['uniform_entropy']
 
         if avg_ratio > 0.25:
             attn_status = "STRONG — attention focuses on neighbors"
@@ -372,9 +388,9 @@ def generate_verdict(attn_metrics_list, q_metrics_list, f):
             attn_status = "FAILING — attention is near-uniform, no spatial reasoning"
 
         f.write(f"\n  ATTENTION PROBE:\n")
-        f.write(f"    Avg neighbor attention ratio: {avg_ratio:.3f} (baseline: 0.08)\n")
+        f.write(f"    Avg neighbor attention ratio: {avg_ratio:.3f} (baseline: {uniform_baseline:.2f})\n")
         f.write(f"    Best single head ratio:       {best_ratio:.3f}\n")
-        f.write(f"    Avg attention entropy:         {avg_entropy:.2f} (uniform: {np.log(100):.2f})\n")
+        f.write(f"    Avg attention entropy:         {avg_entropy:.2f} (uniform: {uniform_entropy:.2f})\n")
         f.write(f"    STATUS: {attn_status}\n")
     else:
         f.write(f"\n  ATTENTION PROBE: No data (no numbered cells found)\n")
@@ -399,10 +415,13 @@ def generate_verdict(attn_metrics_list, q_metrics_list, f):
         f.write(f"    Avg Q std:           {avg_std:.4f}\n")
         f.write(f"    STATUS: {q_status}\n")
 
-    # Overall
+    # Overall — entropy target 用 log(num_cells) 而不是寫死,跟 attention probe 的 uniform 一致
+    entropy_target = (
+        valid_attn[0]['uniform_entropy'] if valid_attn else float(np.log(PROBE_GRID_ROWS * PROBE_GRID_COLS))
+    )
     f.write(f"\n  POSSIBLE ROOT CAUSES:\n")
-    f.write(f"    1. Entropy collapsed (0.3-0.6 vs target 3.7) — exploration died early\n")
-    f.write(f"    2. Alpha clamp [0.05, 0.3] may be too restrictive for Transformer\n")
+    f.write(f"    1. Attention entropy 遠低於 uniform({entropy_target:.2f}) — exploration / 注意力散布不足\n")
+    f.write(f"    2. Epsilon decay 過快 / quota 不平衡 — replay buffer 缺少 win 樣本\n")
     f.write(f"    3. Learning rate may need warmup for Transformer architecture\n")
     f.write(f"    4. Positional encoding may not be expressive enough\n")
     f.write("\n")
@@ -464,7 +483,7 @@ def main():
             top5_vals, top5_idx = p.topk(5)
             f.write(f"\n  Action probs top-5:\n")
             for val, idx in zip(top5_vals, top5_idx):
-                r, c = idx.item() // 10, idx.item() % 10
+                r, c = idx.item() // logic.cols, idx.item() % logic.cols
                 is_mine = "MINE!" if (r, c) in logic.mines else ""
                 f.write(f"    ({r},{c}) = {val.item():.4f} {is_mine}\n")
 
