@@ -193,7 +193,8 @@ class VisualAgentV2(VisualAgentCommonMixin):
 
         # ── episode / step bookkeeping ──
         self.total_it = 0
-        self.episode_count = 0
+        # episode_count 改成 @property delegate 到 training_history.total_episodes,
+        # 單一 source of truth — 不再維護獨立 counter。
         self.train_every_n_steps = TRAIN_EVERY_N_STEPS
         self.pending_train_steps = 0
         self.n_step = VISUAL_N_STEP
@@ -246,6 +247,13 @@ class VisualAgentV2(VisualAgentCommonMixin):
 
     @property
     def episode_count_public(self) -> int:
+        return self.training_history.total_episodes
+
+    # episode_count delegate 到 training_history.total_episodes — 由
+    # log_episode_metrics() 內的 history.record() 自動 += 1,on_episode_end
+    # 不再 increment。Read-only,setter 沒提供(資料源應該是 history)。
+    @property
+    def episode_count(self) -> int:
         return self.training_history.total_episodes
 
     @property
@@ -581,8 +589,8 @@ class VisualAgentV2(VisualAgentCommonMixin):
 
     def on_episode_end(self) -> None:
         self._flush_n_step_buffer()
-        self.episode_count += 1
-        # epsilon 已在 log_episode_metrics() 透過 history.record + controller.update 更新好
+        # episode_count 是 @property delegate,history.record() 已自動 += 1。
+        # epsilon 也已在 log_episode_metrics() 透過 controller.update 更新好。
         self.tb_writer.add_scalar("episode/epsilon", self.epsilon, self.episode_count)
         self._save_model()
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
@@ -592,7 +600,9 @@ class VisualAgentV2(VisualAgentCommonMixin):
     def log_episode_metrics(self, win: bool, invalid_click_rate: float, reward_mean: float) -> None:
         # 1) 先把結果記到 history,2) 從 history 取 rolling win rate,
         # 3) 用 win rate 餵 controller 更新 epsilon。
-        self.training_history.record(win=win)
+        # 注意:v2 沒有 total_reward / steps 可傳,只 wire invalid_rate;
+        # avg_reward / reward_per_step 這邊會永遠為 0,需要的話 caller 再補。
+        self.training_history.record(win=win, invalid_rate=invalid_click_rate)
         ep_idx = self.training_history.total_episodes
         rolling_wr = self.training_history.win_rate(window=100)
         next_eps = self.epsilon_controller.update(rolling_wr)

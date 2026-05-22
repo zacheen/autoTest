@@ -360,7 +360,7 @@ def main():
     # NOTE: recent_rewards / recent_wins / recent_steps 已搬進 agent.training_history。
     # 它在 log_episode_metrics() 內 record(),console log 直接 query
     # training_history.win_rate(window=LOG_INTERVAL) 等方法,順便獲得 resume 持久化。
-    total_wins = 0
+    # 累計勝場改用 agent.training_history.total_wins (cumulative,resume 後持續累積)。
     start_time = time.time()
 
     try:
@@ -382,9 +382,7 @@ def main():
                 steps=stats['steps'],
             )
             agent.on_episode_end()
-
-            if stats['is_win']:
-                total_wins += 1
+            # 累計勝場由 agent.training_history.total_wins 維護 — 不需要本地 counter。
 
             # TensorBoard — episode-level scalars. NOTE: do NOT reuse the
             # `train/Q_loss` / `train/q_mean` tag names; the agent already
@@ -472,6 +470,7 @@ def main():
         print("  Training Complete!")
         print("=" * 60)
         elapsed = time.time() - start_time
+        total_wins = agent.training_history.total_wins
         print(f"Total episodes: {MAX_EPISODES}")
         print(f"Total wins: {total_wins} ({total_wins/MAX_EPISODES*100:.1f}%)")
         print(f"Total time: {elapsed:.1f}s ({MAX_EPISODES/elapsed:.1f} ep/s)")

@@ -39,6 +39,10 @@ class History:
         self._steps: deque[int] = deque(maxlen=self._max_capacity)
         self._invalid_rates: deque[float] = deque(maxlen=self._max_capacity)
         self.total_episodes: int = 0
+        # Cumulative counter, NOT bounded by deque maxlen — 用來看「整段訓練
+        # 累積贏了幾場」。deque 內的 _results 只保留最後 N 場,sum(_results)
+        # 是 rolling 不是 cumulative,所以另存一個 int 才能正確反映歷史總數。
+        self.total_wins: int = 0
 
     @property
     def max_capacity(self) -> int:
@@ -59,11 +63,13 @@ class History:
         total_reward / steps / invalid_rate 是 keyword-only 且有預設值,
         讓舊呼叫端 `record(win=...)` 仍可運作 — 只是這場不會貢獻對應統計。
         """
-        self._results.append(int(bool(win)))
+        win_int = int(bool(win))
+        self._results.append(win_int)
         self._rewards.append(float(total_reward))
         self._steps.append(int(steps))
         self._invalid_rates.append(float(invalid_rate))
         self.total_episodes += 1
+        self.total_wins += win_int
 
     # ──────────────────────────── query ─────────────────────────────
 
@@ -126,6 +132,33 @@ class History:
         """
         return self._rolling_mean(self._invalid_rates, window)
 
+    def reward_per_step(self, window: int | None = 100) -> float:
+        """Rolling 平均「每場 per-step reward」(即 mean of (total_reward / steps))。
+
+        語意:每場先算 reward_per_step = total_reward / max(steps, 1),再對
+        window 場取 mean — 每場「等權重」貢獻,跟 caller 原本傳的
+        episode-level `reward_mean` (TB scalar) 的滾動平均一致。
+
+        替代語意 sum(rewards) / sum(steps) (steps 多的場貢獻較大) 不採用 —
+        前者對「這個 policy 平均每步賺多少」比較有直覺,後者偏向「資料密度」。
+
+        window=None 用全部現有資料;沒有資料 → 0.0;steps=0 的單場視為 0。
+        Caller 沒傳 total_reward / steps 給 record(),這場貢獻 0/1=0。
+        """
+        if not self._rewards:
+            return 0.0
+        if window is None:
+            n = len(self._rewards)
+        else:
+            window = int(max(1, window))
+            if window > self._max_capacity:
+                self._grow_capacity(window)
+            n = min(window, len(self._rewards))
+        rewards = list(self._rewards)[-n:]
+        steps = list(self._steps)[-n:]
+        ratios = [r / s if s > 0 else 0.0 for r, s in zip(rewards, steps)]
+        return sum(ratios) / len(ratios)
+
     def __len__(self) -> int:
         return len(self._results)
 
@@ -155,6 +188,7 @@ class History:
             "steps": list(self._steps),
             "invalid_rates": list(self._invalid_rates),
             "total_episodes": self.total_episodes,
+            "total_wins": self.total_wins,
         }
 
     def load_state_dict(self, state: dict, *, deque_cls=deque) -> None:
@@ -169,6 +203,10 @@ class History:
             - "rewards" / "steps" / "invalid_rates" 是新加的 key;舊 checkpoint
               沒有 → 用空 deque 讓新指標從 resume 之後重新累積
               (avg_reward / avg_steps / avg_invalid_rate 初期會返回 0.0)。
+            - "total_wins" 在更舊扁平 checkpoint 裡有 (AdaptiveEpsilonController
+              曾經存過);中間版本拿掉了所以可能缺;這裡兩種情況都吃,缺
+              的時候用 sum(_results) 當下限近似 (至少反映 deque 內的 wins,
+              比 0 更接近真相)。
         """
         if not state:
             return
@@ -183,6 +221,11 @@ class History:
         self._steps = deque_cls(steps, maxlen=self._max_capacity)
         self._invalid_rates = deque_cls(invalid_rates, maxlen=self._max_capacity)
         self.total_episodes = int(state.get("total_episodes", 0))
+        if "total_wins" in state:
+            self.total_wins = int(state["total_wins"])
+        else:
+            # 缺 key 時用 sum(_results) 作下限近似 — 比預設 0 更接近真實值。
+            self.total_wins = int(sum(self._results))
 
 
 class TrainingHistory(History):

@@ -322,7 +322,8 @@ class TransformerDiscreteAgent:
         )
         self.total_it = 0
         self.steps_since_resume = 0  # 每次啟動重置；用於 resume LR warmup（不存檔）
-        self.episode_count = 0
+        # episode_count 改成 @property delegate 到 training_history.total_episodes,
+        # 單一 source of truth — 不再維護獨立 counter。
         self.n_step = N_STEP
         self.n_step_gamma = MINESWEEPER_REWARD_CONFIG.gamma
         self.n_step_buffer = deque()
@@ -427,6 +428,13 @@ class TransformerDiscreteAgent:
     @epsilon.setter
     def epsilon(self, value: float) -> None:
         self.epsilon_controller.epsilon = float(value)
+
+    # episode_count delegate 到 training_history.total_episodes — 後者在
+    # log_episode_metrics() 內 history.record() 時自動 += 1,on_episode_end
+    # 不再需要獨立 increment。Read-only,setter 會 raise(資料源應該是 history)。
+    @property
+    def episode_count(self) -> int:
+        return self.training_history.total_episodes
 
     def clear_blocked_actions(self):
         self.blocked_actions.clear()
@@ -1405,8 +1413,9 @@ class TransformerDiscreteAgent:
 
     def on_episode_end(self):
         self._flush_n_step_buffer()
-        self.episode_count += 1
-        # epsilon 已在 log_episode_metrics() 透過 history.record + controller.update 更新好
+        # episode_count 已在 log_episode_metrics() 內 history.record() 時自動
+        # 從 training_history 推導出來,這裡不再 += 1(它是 @property delegate)。
+        # epsilon 也已在 log_episode_metrics() 透過 controller.update 更新好。
         self.tb_writer.add_scalar("episode/epsilon", self.epsilon, self.episode_count)
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
             print(
@@ -1439,6 +1448,7 @@ class TransformerDiscreteAgent:
             win=win,
             total_reward=total_reward,
             steps=steps,
+            invalid_rate=invalid_click_rate,
         )
         ep_idx = self.training_history.total_episodes
         rolling_wr = self.training_history.win_rate(window=100)
@@ -1645,11 +1655,12 @@ class TransformerDiscreteAgent:
                 print(f"[FQF] Failed to load training_history.pth: {exc}")
                 # 落到下面 legacy fallback
         if legacy_state and any(
-            k in legacy_state for k in ("result_window", "total_episodes")
+            k in legacy_state for k in ("result_window", "total_episodes", "total_wins")
         ):
             legacy = {
                 "results": legacy_state.get("result_window", []),
                 "total_episodes": legacy_state.get("total_episodes", 0),
+                "total_wins": legacy_state.get("total_wins", 0),
             }
             self.training_history.load_state_dict(legacy, deque_cls=self.deque_cls)
             print("[FQF] Migrated legacy training history from optimizer state")
@@ -1746,7 +1757,10 @@ class TransformerDiscreteAgent:
                 try:
                     self.optimizer.load_state_dict(opt_payload["optimizer"])
                     self.total_it = opt_payload["total_it"]
-                    self.episode_count = opt_payload.get("episode_count", 0)
+                    # episode_count 不再直接 set — 它是 @property delegate 到
+                    # training_history.total_episodes,後者由獨立 .pth 檔還原。
+                    # 舊 opt_payload 裡的 "episode_count" 直接忽略 (跟 history
+                    # 的 total_episodes 重複了)。
                     # Controller 只剩 epsilon 一個 key;TrainingHistory 走獨立檔,
                     # 舊 checkpoint 把 history 攤平存在 opt_payload 的情況用 fallback。
                     self.epsilon_controller.load_state_dict(opt_payload)

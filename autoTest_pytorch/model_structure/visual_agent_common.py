@@ -114,7 +114,9 @@ class VisualAgentCommonMixin:
             state = torch.load(opt_path, map_location=self.device, weights_only=False)
             self.optimizer.load_state_dict(state["optimizer"])
             self.total_it = state.get("total_it", 0)
-            self.episode_count = state.get("episode_count", 0)
+            # episode_count 不再直接 set — 它是 @property delegate 到
+            # training_history.total_episodes,後者由獨立 .pth 檔還原。
+            # 舊 opt state 裡的 "episode_count" key 直接忽略。
             # AdaptiveEpsilonController 只剩 epsilon 一個 key。
             self.epsilon_controller.load_state_dict(state)
 
@@ -160,11 +162,12 @@ class VisualAgentCommonMixin:
                 print(f"{self.log_prefix} Failed to load training_history.pth: {exc}")
                 # 落到下面 legacy fallback
         if legacy_state and any(
-            k in legacy_state for k in ("result_window", "total_episodes")
+            k in legacy_state for k in ("result_window", "total_episodes", "total_wins")
         ):
             legacy = {
                 "results": legacy_state.get("result_window", []),
                 "total_episodes": legacy_state.get("total_episodes", 0),
+                "total_wins": legacy_state.get("total_wins", 0),
             }
             self.training_history.load_state_dict(legacy, deque_cls=self.deque_cls)
             print(
