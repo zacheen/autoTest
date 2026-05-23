@@ -110,7 +110,12 @@ Reward values centralized in `model_structure/reward_settings.py` (`MINESWEEPER_
 
 Persistent save: 256 entries to disk every 50 episodes + on exit.
 
-### Checkpoint Files (`models/visual_transformer_v3_6x6/`)
+### Checkpoint Files
+
+Split between two roots so that the high-frequency replay-buffer disk I/O can sit on
+a fast SSD while model weights / logs stay on the project drive.
+
+**`models/visual_transformer_v3_6x6/`** (project drive, written at checkpoint / episode boundaries):
 
 | File | Content |
 |------|---------|
@@ -118,9 +123,18 @@ Persistent save: 256 entries to disk every 50 episodes + on exit.
 | `fqf_head.pth` | FQFQNetwork weights |
 | `target_decoder.pth` | Target network decoder |
 | `target_fqf_head.pth` | Target network FQF head |
-| `training_state.pth` | Optimizer states, step counter, episode count |
-| `replay_buffer/` | Runtime PER buffer |
-| `replay_buffer_save/` | Persistent saved buffer |
+| `training_state.pth` | Optimizer states, step counter, episode count, **absolute paths to `replay_buffer_save/` entries on the SSD** |
+| `tensorboard/` | TensorBoard event files |
+| `action_logs/` | Per-episode action images |
+
+**`C:\dont_move\temp\autotest\`** (`VISUAL_V3_REPLAY_BASE`, SSD, written **every training step**):
+
+| Directory | Content |
+|-----------|---------|
+| `replay_buffer/` | Runtime PER buffer — one `state_<id>.pt` + `next_state_<id>.pt` per stored transition (uint8) |
+| `replay_buffer_save/` | Top-`save_capacity` snapshot copied from `replay_buffer/` every `SAVE_EVERY_N_EPISODES`; referenced by paths inside `training_state.pth` |
+
+> The project root is on a HDD; the `_save_tensor` / `_load_tensor` hot loop in `CategorizedReplayBuffer` cannot tolerate HDD random-IO latency for the visual buffer (~2.34 MB per entry × 40 reads per `sample()` call × every step). Putting `VISUAL_V3_REPLAY_BASE` on an SSD is what makes a non-trivial `VISUAL_BUFFER_CAPACITY` practical.
 
 ---
 

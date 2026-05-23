@@ -156,11 +156,23 @@ def _dbg_tensor(name: str, t, *, expect_max=None, expect_min=None, check_finite:
             except Exception: pass
 
 # ── paths ────────────────────────────────────────────────────────────
+# Disk layout（v3,2026-05-23 起):
+#   * MODEL_PATH        → D 槽（HDD)。weights / training_state.pth / tensorboard / action_logs。
+#                         這些檔案只在 checkpoint 或事件時寫,不在訓練熱迴路。
+#   * REPLAY_BASE       → C 槽（SSD)。disk-backed replay buffer 每 step 都讀寫,
+#                         D 槽是 HDD,小檔 random IO 太慢,所以拆到 C 槽。
+#                         REPLAY_BASE 底下保留原本的 replay_buffer/ 與 replay_buffer_save/
+#                         兩個子目錄結構,以避免動到 CategorizedReplayBuffer 與
+#                         visual_agent_common.save_persistent / export_top_k 的呼叫慣例。
+# 注意:training_state.pth 仍在 MODEL_PATH(D 槽);它內含 replay_buffer_save 下的 .pt 絕對
+# 路徑(C 槽),pathlib 跨槽絕對路徑沒問題。如果手動清 C 槽快取,記得把對應的
+# training_state.pth 也一併處理,免得 _load_persistent_buffer 拿到失效路徑。
 YOLO_PREDICTOR_PATH = Path("./models/yolo_grid_predictor/best.pth")
 
 VISUAL_V3_MODEL_PATH             = Path("./models/visual_transformer_v3_6x6")
-VISUAL_V3_REPLAY_PATH            = VISUAL_V3_MODEL_PATH / "replay_buffer"
-VISUAL_V3_REPLAY_PERSISTENT_PATH = VISUAL_V3_MODEL_PATH / "replay_buffer_save"
+VISUAL_V3_REPLAY_BASE            = Path(r"C:\dont_move\temp\autotest")
+VISUAL_V3_REPLAY_PATH            = VISUAL_V3_REPLAY_BASE / "replay_buffer"
+VISUAL_V3_REPLAY_PERSISTENT_PATH = VISUAL_V3_REPLAY_BASE / "replay_buffer_save"
 VISUAL_V3_TENSORBOARD_DIR        = VISUAL_V3_MODEL_PATH / "tensorboard"
 VISUAL_V3_ACTION_LOG_PATH        = VISUAL_V3_MODEL_PATH / "action_logs"
 
