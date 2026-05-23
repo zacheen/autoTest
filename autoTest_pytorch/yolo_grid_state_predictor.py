@@ -2,18 +2,18 @@
 
 設計文件：docs/DESIGN_YOLO_GRID_PREDICTOR.md
 
-Pipeline（Phase 1 監督訓練）：
+Pipeline（Phase 1 監督訓練,dim 由 yolo_encoder_base 的 FINAL_DIM / TOTAL_LAYERS 決定）：
     Screenshot (B, 3, 640, 640)
       ↓ YOLO11n backbone（fine-tune, LR 1e-5）
     (B, 128, 40, 40)
       ↓ token adapter + 2D positional encoding
     (B, 1600, 128)                                   = memory tokens
-      ↓ Hierarchical encoder (128 → 64 → 32)
-    (B, 1600, 32)
+      ↓ Hierarchical encoder (build_encoder_dims(final_dim, total_layers))
+    (B, 1600, final_dim)
       ↓ learned queries + 2D positional encoding    = H*W queries
-      ↓ Cross-Attention（2 層 TransformerDecoder，含 self-attn + cross-attn）
-    (B, H*W, 32)
-      ↓ classification head Linear(32, 12)
+      ↓ Cross-Attention（num_cross_attn_layers 層 TransformerDecoder，含 self-attn + cross-attn）
+    (B, H*W, final_dim)
+      ↓ classification head Linear(final_dim, 12)
     (B, 12, H, W)
 
 該 tensor 可直接餵入凍結的 TransformerDiscreteAgent 做推論（Phase 2）。
@@ -40,7 +40,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from model_structure.yolo_encoder_base import (
     YOLOEncoderBase, HierarchicalEncoder, HierarchicalEncoderLayer,
-    DEFAULT_ENCODER_DIMS, DEFAULT_ENCODER_FF_MULT,
+    DEFAULT_ENCODER_DIMS, DEFAULT_ENCODER_FF_MULT, DEFAULT_ENCODER_FINAL_DIM,
 )
 
 
@@ -303,7 +303,8 @@ class YOLOGridStatePredictor(YOLOEncoderBase):
     """Screenshot → 12-channel grid state（fixed-grid learned-query variant）。
 
     設計重點：
-      * 繼承 YOLOEncoderBase（YOLO + token_adapter + HierarchicalEncoder [128→64→32]）
+      * 繼承 YOLOEncoderBase（YOLO + token_adapter + HierarchicalEncoder,
+        dims 由 yolo_encoder_base.DEFAULT_ENCODER_FINAL_DIM / TOTAL_LAYERS 決定）
       * YOLO backbone 整個跟著 fine-tune（LR 設小一點：1e-5）
       * Learned queries + 2D positional embedding for a fixed grid
       * Cross-attention 2 層（nn.TransformerDecoder），含 self-attn + cross-attn + FFN
@@ -316,7 +317,9 @@ class YOLOGridStatePredictor(YOLOEncoderBase):
         grid_w: int = 6,
         nhead: int = 4,
         num_cross_attn_layers: int = 2,
-        dim_feedforward: int = 128,
+        # FFN width follows the same 4× d_model invariant as v3 — keeps the predictor's
+        # cross-attn capacity consistent with the encoder/decoder elsewhere.
+        dim_feedforward: int = DEFAULT_ENCODER_FINAL_DIM * DEFAULT_ENCODER_FF_MULT,
         dropout: float = 0.1,
         num_classes: int = NUM_CHANNELS,
         yolo_model_path: str = "yolo11n.pt",
@@ -387,10 +390,10 @@ class YOLOGridStatePredictor(YOLOEncoderBase):
         Returns:
             logits: (B, num_classes, grid_h, grid_w)，**尚未過 softmax**。
         """
-        memory  = self.encode(screenshot)                            # (B, 1600, 32)
-        queries = self._build_queries(batch_size=memory.size(0))     # (B, 36,   32)
-        decoded = self.cross_attn_core(queries, memory)              # (B, 36,   32)
-        logits_flat = self.classification_head(decoded)              # (B, 36,   num_classes)
+        memory  = self.encode(screenshot)                            # (B, 1600, out_dim)
+        queries = self._build_queries(batch_size=memory.size(0))     # (B, num_queries, out_dim)
+        decoded = self.cross_attn_core(queries, memory)              # (B, num_queries, out_dim)
+        logits_flat = self.classification_head(decoded)              # (B, num_queries, num_classes)
         B = memory.size(0)
         return logits_flat.transpose(1, 2).reshape(B, self.num_classes, self.grid_h, self.grid_w)
 

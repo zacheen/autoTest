@@ -1,16 +1,16 @@
 """visual_discrete_agent_v3.py — Stage 2 Agent（screenshot → FQF Q-network）。
 
-Pipeline:
+Pipeline（dim/層數由 yolo_encoder_base 與下方 DECODER_* 常數決定）:
     screenshot (3, 640, 640)
         ↓ YOLOEncoderBase（FROZEN，從 YOLOGridStatePredictor checkpoint 載入）
         ↓   YOLO11n backbone → (128, 40, 40)
-        ↓   token_adapter + 2D sinusoidal pos encoding → (1600, 128)
-        ↓   HierarchicalEncoder [128→64→32] → (1600, 32)
-    encoded memory (B, 1600, 32)
-        ↓ TransformerDecoder × 5 layers（pre-LN, cross-attn，36 learned query tokens）
-    decoded features (B, 36, 32)
-        ↓ FQFQNetwork (d_model=32, num_fractions=8)
-    Q-values (B, 6, 6) → masked argmax → action
+        ↓   token_adapter + 2D sinusoidal pos encoding → (1600, encoder_dims[0])
+        ↓   HierarchicalEncoder (build_encoder_dims(final_dim, total_layers)) → (1600, final_dim)
+    encoded memory (B, 1600, final_dim)
+        ↓ TransformerDecoder × DECODER_NUM_LAYERS（pre-LN, cross-attn，GRID_H*GRID_W learned query tokens）
+    decoded features (B, GRID_H*GRID_W, final_dim)
+        ↓ FQFQNetwork (d_model=final_dim, num_fractions=NUM_FQF_FRACTIONS)
+    Q-values (B, GRID_H, GRID_W) → masked argmax → action
 
 架構說明：
     • VisualBackboneV3 繼承 YOLOEncoderBase（與 YOLOGridStatePredictor 共用）
@@ -43,7 +43,11 @@ from model_structure.transformer_shared import FQFQNetwork
 from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 import model_structure.CategorizedReplayBuffer as _crb_module
 from model_structure.visual_agent_common import VisualAgentCommonMixin
-from model_structure.yolo_encoder_base import YOLOEncoderBase, DEFAULT_ENCODER_DIMS
+from model_structure.yolo_encoder_base import (
+    YOLOEncoderBase,
+    DEFAULT_ENCODER_DIMS,
+    DEFAULT_ENCODER_FF_MULT,
+)
 from model_structure.optimizer_factory import build_fqf_optimizer
 from model_structure.adaptive_epsilon import AdaptiveEpsilonController
 from model_structure.history import TrainingHistory
@@ -168,21 +172,25 @@ NUM_ACTIONS = GRID_H * GRID_W
 VISUAL_BATCH_SIZE = 40
 MINIMUM_DATA_SIZE = 1000 # below this amount, won't start training
 
-# ── Encoder dims（與 YOLOGridStatePredictor 共用 DEFAULT_ENCODER_DIMS = [128,64,32]）──
+# ── Encoder dims（與 YOLOGridStatePredictor 共用 DEFAULT_ENCODER_DIMS）──
+# 形狀由 model_structure.yolo_encoder_base.DEFAULT_ENCODER_FINAL_DIM /
+# DEFAULT_ENCODER_TOTAL_LAYERS 決定;改那邊兩個常數 v3 與 predictor 會同步更新。
 ENCODER_DIMS = DEFAULT_ENCODER_DIMS
 
 # ── Decoder spec ─────────────────────────────────────────────────────
-DECODER_D_MODEL    = ENCODER_DIMS[-1]   # 32
+DECODER_D_MODEL    = ENCODER_DIMS[-1]       # = ENCODER_FINAL_DIM
 DECODER_NHEAD      = 4
-DECODER_NUM_LAYERS = 5
-DECODER_FF_DIM     = 128
+DECODER_NUM_LAYERS = 4
+# Transformer convention: FFN width = 4 × d_model — keeps capacity ratio constant
+# when d_model changes. Shared with encoder side (DEFAULT_ENCODER_FF_MULT).
+DECODER_FF_DIM     = DECODER_D_MODEL * DEFAULT_ENCODER_FF_MULT
 DECODER_DROPOUT    = 0.1
 
 # ── training hyper-params ────────────────────────────────────────────
 VISUAL_N_STEP = 1
 VISUAL_GRAD_CLIP_NORM = 10.0   # 與 TransformerDiscreteAgent 對齊；encoder 已凍結，不需要 5.0 的寬鬆 room
 TRAIN_EVERY_N_STEPS = 1
-TARGET_UPDATE_FREQ = 1000
+TARGET_UPDATE_FREQ = 200
 SAVE_EVERY_N_EPISODES = 100
 VISUAL_HISTOGRAM_EVERY = 20
 WEIGHT_DISTANCE_LOG_EVERY = 100
@@ -215,7 +223,7 @@ LOG_ACTIONS = True
 # VisualBackboneV3 — YOLOEncoderBase（frozen）+ cross-attn decoder
 # ════════════════════════════════════════════════════════════════════════
 class VisualBackboneV3(YOLOEncoderBase):
-    """screenshot (B,3,H,W) → 36 cell features (B, 36, 32).
+    """screenshot (B,3,H,W) → cell features (B, grid_h*grid_w, encoder_final_dim).
 
     YOLO + token_adapter + HierarchicalEncoder 繼承自 YOLOEncoderBase，
     並在初始化時從 YOLOGridStatePredictor checkpoint 載入後凍結。
@@ -234,13 +242,13 @@ class VisualBackboneV3(YOLOEncoderBase):
         super().__init__(
             encoder_dims=ENCODER_DIMS,
             nhead=DECODER_NHEAD,
-            ff_mult=4,
+            ff_mult=DEFAULT_ENCODER_FF_MULT,
             dropout=decoder_dropout,
         )
         self.grid_h = grid_h
         self.grid_w = grid_w
         self.num_queries = grid_h * grid_w
-        out_dim = self.out_dim   # 32
+        out_dim = self.out_dim
 
         self.query_tokens = nn.Parameter(torch.randn(1, self.num_queries, out_dim) * 0.02)
 
@@ -259,10 +267,10 @@ class VisualBackboneV3(YOLOEncoderBase):
         return self.query_tokens.expand(batch_size, -1, -1)
 
     def get_features(self, screenshot: torch.Tensor) -> torch.Tensor:
-        """screenshot (B, 3, H, W) → cell features (B, 36, out_dim)."""
-        memory  = self.encode(screenshot)                        # (B, 1600, 32)
-        queries = self._build_queries(memory.size(0))            # (B, 36,   32)
-        return self.decoder(queries, memory)                     # (B, 36,   32)
+        """screenshot (B, 3, H, W) → cell features (B, num_queries, out_dim)."""
+        memory  = self.encode(screenshot)                        # (B, 1600, out_dim)
+        queries = self._build_queries(memory.size(0))            # (B, num_queries, out_dim)
+        return self.decoder(queries, memory)                     # (B, num_queries, out_dim)
 
     def forward(self, screenshot: torch.Tensor) -> torch.Tensor:
         return self.get_features(screenshot)

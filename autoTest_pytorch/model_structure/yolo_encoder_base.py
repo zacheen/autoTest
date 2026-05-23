@@ -7,11 +7,14 @@ Pipeline:
     screenshot (B, 3, H, W)
       ↓ YOLO11n backbone
     (B, 128, 40, 40)
-      ↓ token_adapter: LayerNorm(128) + Linear(128→128)
+      ↓ token_adapter: LayerNorm(128) + Linear(128→encoder_dims[0])
       ↓ + fixed 2D sinusoidal positional encoding
-    (B, 1600, 128)
-      ↓ HierarchicalEncoder [128→64→32]
-    (B, 1600, 32)                                    ← encode() output
+    (B, 1600, encoder_dims[0])
+      ↓ HierarchicalEncoder (dims built by build_encoder_dims(final_dim, total_layers))
+    (B, 1600, final_dim)                             ← encode() output
+
+Encoder shape is controlled by DEFAULT_ENCODER_FINAL_DIM / DEFAULT_ENCODER_TOTAL_LAYERS
+below — geometric halving from 128 down to final_dim, then uniform layers at final_dim.
 """
 
 from __future__ import annotations
@@ -25,10 +28,82 @@ from model_structure.transformer_shared import FixedSinusoidalPositionEmbedding
 
 
 YOLO_FEATURE_CHANNELS = 128
-DEFAULT_ENCODER_DIMS  = [128, 64, 32]
 DEFAULT_ENCODER_NHEAD = 4
 DEFAULT_ENCODER_FF_MULT = 4
 DEFAULT_ENCODER_DROPOUT = 0.1
+
+# Encoder shape — geometric compression (128 → 64 → ... → final_dim) followed by
+# uniform-dim layers until reaching total_layers. Both v3 and YOLOGridStatePredictor
+# read DEFAULT_ENCODER_DIMS; change FINAL_DIM / TOTAL_LAYERS here to update both.
+DEFAULT_ENCODER_FINAL_DIM    = 64  # 編碼最終 dim (= decoder d_model)
+DEFAULT_ENCODER_TOTAL_LAYERS = 1   # encoder 總層數 (壓縮 + uniform);須 ≥ log2(128/final_dim)
+
+
+def build_encoder_dims(
+    final_dim: int,
+    total_layers: int,
+    nhead: int = DEFAULT_ENCODER_NHEAD,
+) -> list[int]:
+    """建立 HierarchicalEncoder 的 dims list。
+
+    從 YOLO_FEATURE_CHANNELS 每次除二降到 final_dim(壓縮段),再把 final_dim 重複
+    補滿 uniform 層直到層數 = total_layers。回傳的 list 長度 = total_layers + 1,
+    第一個元素是 token_adapter 輸入 dim (= YOLO_FEATURE_CHANNELS),其餘 total_layers
+    個是每層的輸出 dim。
+
+    範例:
+        build_encoder_dims(32, 5) → [128, 64, 32, 32, 32, 32]   (2 壓縮 + 3 uniform)
+        build_encoder_dims(64, 4) → [128, 64, 64, 64, 64]       (1 壓縮 + 3 uniform)
+        build_encoder_dims(32, 2) → [128, 64, 32]               (純壓縮,無 uniform)
+        build_encoder_dims(128, 4) → [128, 128, 128, 128, 128]  (純 uniform,無壓縮)
+
+    Raises:
+        ValueError: final_dim 不是 2 的次方、不在 [nhead, YOLO_FEATURE_CHANNELS] 區間、
+                    YOLO_FEATURE_CHANNELS 不能整除 final_dim、或 total_layers 不夠壓到目標。
+    """
+    if not isinstance(final_dim, int) or final_dim <= 0:
+        raise ValueError(f"final_dim must be a positive int, got {final_dim!r}")
+    if not isinstance(total_layers, int) or total_layers < 1:
+        raise ValueError(f"total_layers must be int >= 1, got {total_layers!r}")
+    if final_dim > YOLO_FEATURE_CHANNELS:
+        raise ValueError(
+            f"final_dim ({final_dim}) must be <= YOLO_FEATURE_CHANNELS ({YOLO_FEATURE_CHANNELS})"
+        )
+    if final_dim < nhead:
+        raise ValueError(f"final_dim ({final_dim}) must be >= nhead ({nhead})")
+    if final_dim % nhead != 0:
+        raise ValueError(f"final_dim ({final_dim}) must be divisible by nhead ({nhead})")
+    ratio = YOLO_FEATURE_CHANNELS // final_dim
+    if YOLO_FEATURE_CHANNELS % final_dim != 0 or (ratio & (ratio - 1)) != 0:
+        raise ValueError(
+            f"YOLO_FEATURE_CHANNELS ({YOLO_FEATURE_CHANNELS}) / final_dim ({final_dim}) "
+            f"must be a power of 2 (got ratio={ratio}); final_dim must be a power-of-2 "
+            f"divisor of YOLO_FEATURE_CHANNELS."
+        )
+
+    # 壓縮段:128 → 64 → ... → final_dim
+    compression: list[int] = []
+    d = YOLO_FEATURE_CHANNELS
+    while d > final_dim:
+        compression.append(d)
+        d //= 2
+    compression.append(final_dim)
+    num_compression_layers = len(compression) - 1
+
+    if total_layers < num_compression_layers:
+        raise ValueError(
+            f"total_layers ({total_layers}) is less than the {num_compression_layers} "
+            f"compression layers needed to reach final_dim={final_dim} from "
+            f"YOLO_FEATURE_CHANNELS={YOLO_FEATURE_CHANNELS}"
+        )
+
+    uniform_layers = total_layers - num_compression_layers
+    return compression + [final_dim] * uniform_layers
+
+
+DEFAULT_ENCODER_DIMS = build_encoder_dims(
+    DEFAULT_ENCODER_FINAL_DIM, DEFAULT_ENCODER_TOTAL_LAYERS
+)
 
 
 class HierarchicalEncoderLayer(nn.Module):
