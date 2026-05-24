@@ -3,6 +3,7 @@ import datetime
 import logging as _logging
 import math
 import random
+import secrets
 import sys
 from collections import defaultdict, deque
 from pathlib import Path
@@ -23,6 +24,21 @@ import model_structure.CategorizedReplayBuffer as _crb_module
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ── reproducibility ──────────────────────────────────────────────────
+# 模組 import 時生一個 32-bit seed,並 apply 到 random / numpy / torch / cuda。
+# 實際使用的 SEED 會被 hyperparameter_dump 自動寫進 hyperparameters.txt
+# (因為是 module-level ALL_CAPS int,符合 _dump_module 的篩選條件)。
+# 想重現特定 run:把這行改成 `SEED: int = <hyperparameters.txt 裡的數字>`,
+# 並從零開始訓練 — _save_model 會把 RNG state 存進 optimizer_state.pth,
+# resume 後 RNG trajectory 從 checkpoint 還原,SEED 只決定首次啟動的初始狀態。
+SEED: int = secrets.randbits(32)
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
 BATCH_SIZE = 128
 GRID_STATE_CHANNELS = 12
 PER_CAPACITY = 10000
