@@ -89,16 +89,18 @@ class CategorizedReplayBuffer:
             age_decay: Decay factor removing priority based on how many inserts occurred since entry.
             max_age: Hard age limit in insert steps. Entries older than this get zero effective priority.
             enable_sample_decay: master switch for the Method-B sample-count decay (default False).
-                When False, ``sample_count`` is NEVER bumped and ``_effective_priority`` ignores
-                the sample-count divisor — behaves like a plain PER buffer. When True, see
-                ``sample_decay`` below for the decay mechanic.
+                **僅控制是否在 ``_effective_priority`` 套用 decay**;``sample_count`` 不論這個
+                開關都會在 ``_sample_from_bucket`` 結尾無條件 +1(因為 ``mean_sample_count``
+                這類觀測 metric 需要永遠有效的 counter)。當這個開關 False 時,buffer 行為
+                等同 plain PER,sample_count 只是觀測值不影響抽樣。
             sample_decay: Method B — divide effective priority by (1 + sample_decay × sample_count).
-                Only takes effect when ``enable_sample_decay=True``. sample_count is bumped every
-                time an entry is selected via the PER (priority-weighted) branch in
-                ``_sample_from_bucket`` — uniform-mix picks don't count. This slow-cools entries
-                that PER keeps favoring (stochastic-trap or hard-but-persistent transitions) so
-                they don't dominate the buffer or the batch indefinitely. Learned entries are
-                naturally protected: low priority → low PER pick rate → sample_count stays small.
+                Only takes effect when ``enable_sample_decay=True``. ``sample_count`` 累計
+                **所有抽樣路徑**(uniform / PER / safety padding 都算),不只 PER 半邊 — 任何
+                被過度採樣的 entry 都該降溫,不分原因。Learned 過的 entry 自然受保護:
+                low priority → low pick rate → sample_count 增長慢。
+                ⚠️ 註:原始設計只計 PER 半邊(避免懲罰 uniform exploration);改為涵蓋全部
+                路徑是為了統一 metric 語義。若日後啟用 Method B 發現 uniform 被誤殺,可考慮
+                還原為 PER-only 計數,但需另開欄位避免破壞 metric。
             enable_spread_decay: master switch for the FQF quantile-spread decay (default False).
                 Designed to be latched ON by the agent when win_rate crosses some threshold
                 (e.g. > 40%), once the model has matured enough that "wide quantile spread" mostly
@@ -472,21 +474,22 @@ class CategorizedReplayBuffer:
                     p=probabilities,
                 )
                 priority_pick = [available[int(idx)] for idx in np.atleast_1d(indices)]
-            # Method B (only when self.enable_sample_decay is True) — bump sample_count for
-            # every PER-selected entry. Uniform picks above and safety padding below are NOT
-            # bumped (they don't represent "PER kept favoring this entry"). When the switch
-            # is off, sample_count stays at 0 for every entry and ``_effective_priority``
-            # also ignores the divisor — buffer behaves like a plain PER buffer.
-            if self.enable_sample_decay:
-                for entry in priority_pick:
-                    entry["sample_count"] = int(entry.get("sample_count", 0)) + 1
             chosen.extend(priority_pick)
 
-        # Safety padding — these are uniform-random fallbacks, not PER picks → no sample_count bump
+        # Safety padding — uniform-random fallback when bucket 太小不夠抽。
         while len(chosen) < count:
             chosen.append(random.choice(entries))
 
-        return chosen[:count]
+        result = chosen[:count]
+        # sample_count 無條件 +1:每次 entry 進 batch 都算一次(不分 uniform / PER /
+        # padding)。提供「資料被抽到次數」的觀測值。Method B(enable_sample_decay=True)
+        # 的 decay 公式 1/(1 + sample_decay × sample_count) 用同一個 counter,所以
+        # 啟用 Method B 時,decay 會對「任何被過度採樣的 entry」一律降溫(原始設計
+        # 只懲罰 PER 半邊,改成不分路徑 — 過度採樣本身就是要避免的訊號)。
+        # 同一筆 entry 在 batch 內出現多次(replace=True 時)會每出現一次 +1。
+        for entry in result:
+            entry["sample_count"] = int(entry.get("sample_count", 0)) + 1
+        return result
 
     def store(
         self,
@@ -523,7 +526,7 @@ class CategorizedReplayBuffer:
             "reward_type": self._reward_type(bucket_reward, done),
             "priority": float(np.clip(abs(float(reward)) + 1.0, self.priority_min, self.priority_max)),
             "insert_order": self.insert_counter,
-            "sample_count": 0,  # Method B counter — only bumped when self.enable_sample_decay is True
+            "sample_count": 0,  # 每次進 batch 都 +1(uniform/PER/padding 都算);Method B decay 也用這個
             "quantile_spread": 0.0,  # FQF quantile std — updated by update_priorities when sampled
         }
 
@@ -544,8 +547,8 @@ class CategorizedReplayBuffer:
                 regardless of the switch state — so flipping the switch later
                 doesn't reset spread history.
 
-        Note: ``sample_count`` is bumped at PER pick time in ``_sample_from_bucket``,
-        NOT here — so this function only refreshes ``priority`` and ``quantile_spread``.
+        Note: ``sample_count`` 在 ``_sample_from_bucket`` 結尾無條件 +1,不在這裡動 —
+        本 function 只刷新 ``priority`` 和 ``quantile_spread``。
         """
         if sample_indices is None or td_errors is None:
             return
@@ -647,6 +650,8 @@ class CategorizedReplayBuffer:
 
         # 一次取出所有選中的 entry,接著向量化算 selection priorities(給下面 IS 用)。
         # 其他 per-entry 欄位(state/action/reward/...) 還是必須 loop 拆出來。
+        # 注意:sample_count 不在這裡 bump,已經在 `_sample_from_bucket` 結尾統一 bump
+        # 過了(uniform / PER / padding 三條路徑都在那裡覆蓋到)。
         selected_entries = [self.index[idx] for idx in selected_indices]
         priorities_arr = self._selection_priorities(selected_entries)
 
@@ -757,6 +762,24 @@ class CategorizedReplayBuffer:
                 counts["progress"] = counts.get("progress", 0) + 1
         return counts
 
+    def mean_sample_count(self) -> float:
+        """整個 buffer 中,每筆 entry 平均被 sample 到幾次。
+
+        定義:``sum(sample_count) / size_count``。``sample_count`` 在
+        ``_sample_from_bucket`` 結尾無條件 +1,涵蓋 uniform / PER / safety padding
+        三條路徑。Method B(``enable_sample_decay=True``)的 decay 公式也用同一個
+        counter。
+
+        判讀:
+        - 數值單調隨訓練步數成長(只增不減,除非該筆 entry 被 prune)。
+        - 高 mean = 平均每筆被反覆抽到,代表 PER 集中度高
+        - 低 mean = 抽樣分佈分散,buffer 內樣本被均勻利用
+        - 對齊看:同 env_step 下,mean_sample_count 越低代表 batch 多樣性越好
+        """
+        if not self.index:
+            return 0.0
+        return sum(int(e.get("sample_count", 0)) for e in self.index) / len(self.index)
+
     @property
     def class_quota(self) -> int:
         """Per-class soft-floor quota used by ``top_k_balanced`` and ``sample()``.
@@ -813,7 +836,7 @@ class CategorizedReplayBuffer:
                 normalized_entry["reward_type"] = self._reward_type(
                     tail_reward, bool(normalized_entry.get("done", False))
                 )
-            # Default Method-B sample_count + quantile_spread for legacy entries
+            # Default sample_count + quantile_spread for legacy entries
             normalized_entry.setdefault("sample_count", 0)
             normalized_entry.setdefault("quantile_spread", 0.0)
             normalized_entries.append(normalized_entry)
