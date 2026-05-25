@@ -257,6 +257,34 @@ class CategorizedReplayBuffer:
 
         return priority
 
+    def _selection_priorities(self, entries):
+        """向量化計算多筆 entry 的 PER「選擇權重」(α-powered + priority_min floor)。
+
+        這是「選擇分數」的**單一數學定義** — 單筆版 ``_selection_priority`` 只是
+        薄包裝。要改公式只動這裡一處。
+
+        ``P(select) ∝ _selection_priorities(entries)[i]`` — 抽樣時用這個算機率,
+        IS weight ``w_i = (N · P_i)^(-β)`` 也用同一個值,確保「抽樣分佈」與
+        「IS 修正」對得起來,不會出現抽到死條目卻 IS weight 爆炸的情況。
+
+        與 ``_effective_priority`` 的差別:
+        - 套 α 次方(``self.alpha``)讓分佈變平緩(標準 PER 公式)。
+        - 對 ``priority_min`` 取 ``np.maximum``。死條目(``age > max_age``)的 eff
+          是 0,沒這個 floor 它的 ``(N·P + ε)^(-β)`` 會炸到 ~10^4,跑 weights.max
+          normalize 後把其他活條目的 IS weight 壓到接近 0。
+        """
+        eff = np.array([self._effective_priority(e) for e in entries], dtype=np.float64)
+        return np.power(np.maximum(eff, self.priority_min), self.alpha)
+
+    def _selection_priority(self, entry):
+        """單筆 entry 的 PER 選擇權重,薄包裝呼叫 ``_selection_priorities``。
+
+        數學定義全部在 ``_selection_priorities`` 裡(單一來源,避免兩處 drift)。
+        這個 scalar helper 給單點查詢 / 外部 audit 用,生產 hot path 都直接走
+        陣列版以享受 numpy 向量化。
+        """
+        return float(self._selection_priorities([entry])[0])
+
     def top_k_balanced(self, k):
         """Select up to ``k`` entries via 50% balanced (soft floor per class) + 50% PER.
 
@@ -429,12 +457,7 @@ class CategorizedReplayBuffer:
             available = [entry for entry in available if entry["storage_id"] not in chosen_ids]
 
         if num_priority > 0 and available:
-            priorities = np.array(
-                [self._effective_priority(entry) for entry in available],
-                dtype=np.float64,
-            )
-            # Apply alpha exponent
-            priorities = np.power(np.maximum(priorities, self.priority_min), self.alpha)
+            priorities = self._selection_priorities(available)
             prob_sum = priorities.sum()
 
             if prob_sum <= 0 or not np.isfinite(prob_sum):
@@ -622,14 +645,17 @@ class CategorizedReplayBuffer:
 
         selected_indices = selected_indices[:batch_size]
 
-        states, actions, next_states, rewards, dones, priorities, discounts, n_steps = [], [], [], [], [], [], [], []
-        
-        for idx in selected_indices:
-            entry = self.index[idx]
-            
+        # 一次取出所有選中的 entry,接著向量化算 selection priorities(給下面 IS 用)。
+        # 其他 per-entry 欄位(state/action/reward/...) 還是必須 loop 拆出來。
+        selected_entries = [self.index[idx] for idx in selected_indices]
+        priorities_arr = self._selection_priorities(selected_entries)
+
+        states, actions, next_states, rewards, dones, discounts, n_steps = [], [], [], [], [], [], []
+
+        for entry in selected_entries:
             states.append(self._load_tensor(entry["state"]))
             actions.append(entry["action"])
-            
+
             if entry["next_state"] is not None:
                 next_states.append(self._load_tensor(entry["next_state"]))
             else:
@@ -637,10 +663,9 @@ class CategorizedReplayBuffer:
                 dummy = states[-1].clone()
                 dummy.fill_(0)
                 next_states.append(dummy)
-                
+
             rewards.append(entry["reward"])
             dones.append(float(entry["done"]))
-            priorities.append(self._effective_priority(entry))
             discounts.append(float(entry.get("discount", 1.0)))
             n_steps.append(int(entry.get("n_steps", 1)))
 
@@ -662,10 +687,18 @@ class CategorizedReplayBuffer:
             except Exception:
                 pass
 
-        # Important Sampling
+        # Important Sampling — priorities_arr 在 selected_entries 上面已經用
+        # _selection_priorities 一次算完,跟 _sample_from_bucket 的選擇分佈對齊
+        # (都套 α 次方 + priority_min floor)。
+        #
+        # 簡化:標準 PER 公式 prob_sum = Σ_k p_k^α over 整個 buffer(O(N_buffer)),
+        # 但下面 `weights = weights / weights.max()` 會把這個 batch 共用的常數
+        # `(N / prob_sum)^(-β)` 整個吸收掉,逐元素歸一後結果只依賴 batch 內
+        # priorities_arr 的比例。所以這裡只 sum batch 即可(O(batch_size))。
+        # ⚠️ 此簡化依賴下方的 max-normalize;若把歸一化方式換成 mean、或乾脆
+        # 拿掉,必須改回 `self._selection_priorities(self.index).sum()`。
         N = self.size_count
-        priorities_arr = np.array(priorities, dtype=np.float64)
-        prob_sum = sum([self._effective_priority(entry) for entry in self.index])
+        prob_sum = priorities_arr.sum()
         probabilities = priorities_arr / (prob_sum + 1e-10)
         
         # weights formulation: (1/N * 1/P_i) ^ beta
