@@ -45,6 +45,9 @@ PER_CAPACITY = 10000
 PER_ALPHA = 0.6
 PER_BETA_START = 0.4
 PER_BETA_END = 1.0
+# Phase 1 (stratified balanced) 占 batch 的比例。1.0 = 全部 batch 走 per-class
+# stratified,PER 只在某類不足時補位。0.5 = 原始 50/50。0.0 = 純 PER 全域抽。
+PER_BALANCED_RATIO = 1.0
 SAVE_CAPACITY = 512
 SAVE_EVERY_N_EPISODES = 500
 TARGET_UPDATE_FREQ = 50
@@ -331,6 +334,7 @@ class TransformerDiscreteAgent:
             invalid_threshold=MINESWEEPER_REWARD_CONFIG.replay_invalid_threshold,
             alpha=PER_ALPHA,
             beta_start=PER_BETA_START,
+            balanced_ratio=PER_BALANCED_RATIO,
             quota_check_class="win",  # Minesweeper: win is the rare-event bottleneck class
             # Spread-decay calibrated from observed inference quantile spreads (median ~0.115,
             # p90 ~0.378). Starts disabled — latched ON by train_step once win_rate(100) > 0.4.

@@ -70,6 +70,7 @@ class CategorizedReplayBuffer:
         spread_decay: float = 2.0,
         quota_check_class: str | None = None,
         beta_start: float = 0.4,
+        balanced_ratio: float = 1.0,
     ):
         """
         Args:
@@ -124,6 +125,13 @@ class CategorizedReplayBuffer:
                 and you don't want pruning equilibrium to artificially delay training.
                 Must be a member of ``REWARD_TYPES`` or None.
             beta_start: Initial Importance Sampling weight factor.
+            balanced_ratio: 0.0~1.0,``sample()`` 裡 Phase 1 (stratified balanced)
+                占 batch 的比例。剩下的給 Phase 2(cross-class pure-PER)當 fallback。
+                - 1.0(default):每類各取 ``batch_size // 4`` 筆,PER 只在某類 entry
+                  數不足時補位。完全避免 cross-class PER 偏向高 abs(reward) 的類。
+                - 0.5:原始設計 50/50,Phase 1 取 ``batch_size // 8`` 每類,Phase 2
+                  在 leftover pool 用 PER 全域競爭 50% 名額。
+                - 0.0:完全沒 stratification,純 PER 全域抽。會被高 priority 類別主宰。
         """
         self.max_size = max_size
         self.storage_mode = storage_mode.lower()
@@ -159,6 +167,9 @@ class CategorizedReplayBuffer:
             )
         self.quota_check_class = quota_check_class
         self.beta = beta_start
+        if not 0.0 <= balanced_ratio <= 1.0:
+            raise ValueError(f"balanced_ratio must be in [0, 1], got {balanced_ratio}")
+        self.balanced_ratio = float(balanced_ratio)
 
         self.size_count = 0
         self.index = []
@@ -572,20 +583,26 @@ class CategorizedReplayBuffer:
                 entry["quantile_spread"] = float(spread)
 
     def sample(self, batch_size, beta=None, device="cpu", include_extra=False):
-        """Sample a batch via 50% balanced (soft floor per class, with uniform_mix)
-        + 50% PER (pure-priority leftover pool, no uniform_mix).
+        """Sample a batch via stratified balanced + PER fallback。比例由
+        ``self.balanced_ratio``(constructor 參數)控制。
 
-        Phase 1 — Balanced half:
-            ``batch_size // 2`` slots, split into ``per_class_count = (batch_size // 2) // 4``
-            per reward_type. Each non-empty class contributes up to ``per_class_count``
-            entries via ``_sample_from_bucket(use_uniform=True)`` — the uniform_mix
-            piece gives exploration noise within each class.
+        Phase 1 — Balanced(占 ``batch_size × balanced_ratio`` 個名額):
+            每類各取 ``per_class_count = balanced_total // len(REWARD_TYPES)`` 筆。
+            類內仍走 ``_sample_from_bucket(use_uniform=True)``,所以類內仍有
+            uniform_mix + alpha-weighted PER(focus on hard sample),只是**不跨類**。
 
-        Phase 2 — PER half:
-            All entries not yet picked are pooled and sampled by
-            ``_sample_from_bucket(use_uniform=False)`` — pure priority weighting,
-            cross-class. Soft-floor slack from Phase 1 (empty / starved classes)
-            flows into this pool automatically.
+        Phase 2 — PER fallback(占 ``batch_size × (1 - balanced_ratio)`` 個名額,
+        加上 Phase 1 某類不足時的剩餘 slack):
+            從所有未被 Phase 1 選到的 entries 用 pure-priority PER 全域抽。
+            這裡是 cross-class 競爭,容易被高 abs(reward) → 高 TD-error 的類別
+            (Minesweeper 的 win/lose)系統性主宰 → 想避免就把 balanced_ratio 拉高。
+
+        典型設定:
+            - ``balanced_ratio = 1.0``(default):每類 ``batch_size // 4`` 筆,
+              PER 只在某類 entry 數不足時補位。最乾淨的 stratification。
+            - ``balanced_ratio = 0.5``:原始 50/50 設計,Phase 1 每類 ``batch_size // 8``,
+              Phase 2 用 PER 全域競爭 50% 名額。
+            - ``balanced_ratio = 0.0``:純 PER 全域抽,沒 stratification。
 
         Note for specific models:
         Visual Agent typically doesn't use IS weights (ignores it),
@@ -596,9 +613,12 @@ class CategorizedReplayBuffer:
 
         use_beta = beta if beta is not None else self.beta
 
-        # === Phase 1: Balanced half ===
-        balanced_total = batch_size // 2
-        per_class_count = max(1, balanced_total // len(self.REWARD_TYPES))
+        # === Phase 1: Balanced(占 self.balanced_ratio × batch_size) ===
+        balanced_total = int(batch_size * self.balanced_ratio)
+        if balanced_total > 0:
+            per_class_count = max(1, balanced_total // len(self.REWARD_TYPES))
+        else:
+            per_class_count = 0  # balanced_ratio = 0 → 完全跳過 Phase 1
 
         grouped_indices = {reward_type: [] for reward_type in self.REWARD_TYPES}
         for idx, entry in enumerate(self.index):
@@ -626,7 +646,8 @@ class CategorizedReplayBuffer:
                     selected_indices.append(id_to_idx[sid])
                     selected_storage_ids.add(sid)
 
-        # === Phase 2: PER half — fill remaining slots from leftover pool by pure priority ===
+        # === Phase 2: PER fallback — 只在 Phase 1 沒填滿時觸發(某類 entry 數 < per_class_count) ===
+        # 用剩餘 entries 跨類 pure-priority 補滿 batch。steady state 下通常是空跑。
         per_remaining = batch_size - len(selected_indices)
         if per_remaining > 0:
             leftover_indices = [
