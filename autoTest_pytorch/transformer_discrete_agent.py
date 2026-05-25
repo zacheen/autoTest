@@ -939,6 +939,7 @@ class TransformerDiscreteAgent:
                 td_error.max(),
                 entropy.mean(),
                 is_weights.float().mean(),
+                is_weights.float().min(),
                 fpn_norm_entropy_t,
                 fpn_tau_std_t,
             ]).cpu().tolist()
@@ -947,7 +948,7 @@ class TransformerDiscreteAgent:
                 q0_min, q0_max,
                 target_q_mean, target_q_std,
                 td_error_mean, td_error_max,
-                entropy_value, is_weight_mean,
+                entropy_value, is_weight_mean, is_weight_min,
                 fpn_norm_entropy, fpn_tau_std,
             ) = _stats
 
@@ -1024,7 +1025,14 @@ class TransformerDiscreteAgent:
         self.tb_writer.add_scalar("grad_post/head", head_post, step)
         self.tb_writer.add_scalar("grad_pre/extras", extras_pre, step)
         self.tb_writer.add_scalar("grad_post/extras", extras_post, step)
-        self.tb_writer.add_scalar("train/is_weight_mean", is_weight_mean, step)
+        # check/ namespace — 驗證用,不是核心訓練指標。
+        self.tb_writer.add_scalar("check/is_weight_mean", is_weight_mean, step)
+        self.tb_writer.add_scalar("check/is_weight_min", is_weight_min, step)
+        # IS weight 是 max-normalized 所以 max 恆為 1.0,ratio = 1/min。
+        # 健康範圍 < 10;若 > 100 代表 IS 公式可能又 broken(死條目 weight 爆炸之類)。
+        self.tb_writer.add_scalar("check/is_weight_ratio", 1.0 / max(is_weight_min, 1e-12), step)
+        # 每筆 entry 平均被抽到幾次。數值單調隨訓練步數成長;高 mean 代表 PER 集中度高,batch 多樣性低。
+        self.tb_writer.add_scalar("check/mean_sample_count", self.replay_buffer.mean_sample_count(), step)
 
         # Per-layer weight/grad norms — collected pre-clip inside the try
         # block above; written here so we never leave orphan rows on a
@@ -1052,7 +1060,7 @@ class TransformerDiscreteAgent:
     def _write_metric_docs(self):
         """把 metric 解讀表寫到 TensorBoard 的 TEXT 分頁,只寫一次。"""
         is_weight_mean_doc = (
-            "**`train/is_weight_mean`** — PER importance-sampling weight 平均值 "
+            "**`check/is_weight_mean`** — PER importance-sampling weight 平均值 "
             "(已 normalize by max,所以 max 恆為 1.0,只看 mean)。\n\n"
             "| 數值區間 | 代表 | 該擔心嗎? |\n"
             "|---|---|---|\n"
@@ -1065,6 +1073,24 @@ class TransformerDiscreteAgent:
             "代表 priority 分佈在塌掉。"
         )
         self.tb_writer.add_text("docs/is_weight_mean", is_weight_mean_doc, 0)
+
+        is_weight_ratio_doc = (
+            "**`check/is_weight_ratio`** — IS weight 的 max/min 比例 (= 1.0 / min,"
+            "因為 IS weight 已 normalize by max → max 恆為 1.0)。**這是抓 IS bug 的"
+            "頭號指標**。\n\n"
+            "| 數值 | 代表 | 該擔心嗎? |\n"
+            "|---|---|---|\n"
+            "| < 10 | priorities 分佈健康,IS 修正有效,batch 內每筆都實質參與梯度 | 正常 |\n"
+            "| 10 ~ 100 | 部分樣本 IS weight 被壓得低,梯度貢獻不均 | "
+            "注意,可能 priority 分佈過度 skewed |\n"
+            "| > 100 | 嚴重失衡,大部分 batch 名額幾乎沒貢獻梯度 | "
+            "**紅燈**,檢查 `_selection_priorities` 與 `_sample_from_bucket` 是否同步、"
+            "死條目 priority_min floor 是否被繞過 |\n\n"
+            "歷史:修 IS bug 之前(buggy 版本)ratio 常常 > 10^4 — 死條目 raw "
+            "_effective_priority=0 在 IS 公式裡撞到 `(1e-10)^(-β) ≈ 10^4` 變 max,"
+            "把活條目的 weight 壓到 ~1e-5。"
+        )
+        self.tb_writer.add_text("docs/is_weight_ratio", is_weight_ratio_doc, 0)
 
     def _assert_finite(self, stage, name, tensor):
         """訓練流程的 NaN/Inf probe:命中就 raise,訊息含 stage / tensor / step。
