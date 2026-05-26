@@ -299,19 +299,22 @@ class CategorizedReplayBuffer:
         return float(self._selection_priorities([entry])[0])
 
     def top_k_balanced(self, k):
-        """Select up to ``k`` entries via 50% balanced (soft floor per class) + 50% PER.
+        """Select up to ``k`` entries via stratified balanced + cross-class PER。
+        比例由 ``self.balanced_ratio`` 控制(跟 ``sample()`` 用同一個參數)。
 
-        Phase 1 — Balanced (50% of ``k``):
-            Each ``reward_type`` bucket keeps top ``(k // 2) // len(REWARD_TYPES)``
-            entries by ``_effective_priority``. With 4 classes that's a 12.5%
-            soft floor per class — buckets with fewer entries leave slack for
-            Phase 2 rather than being padded.
+        Phase 1 — Balanced(占 ``k × balanced_ratio``):
+            每類保留 ``per_class_quota = balanced_share // len(REWARD_TYPES)`` 筆,
+            按 ``_effective_priority`` 排序由高到低取。某類 entry 數 < quota 時
+            slack 留給 Phase 2。
 
-        Phase 2 — PER (remaining ~50% of ``k`` + Phase-1 slack):
-            All entries NOT picked in Phase 1 are pooled and ranked by
-            ``_effective_priority`` globally; top remaining slots fill in.
-            This is where high-priority "model hasn't learned" entries get
-            extra representation regardless of class.
+        Phase 2 — PER fallback / 剩餘名額(占 ``k × (1 - balanced_ratio)`` + Phase-1 slack):
+            Phase 1 未選到的 entries 跨類比 ``_effective_priority`` 全域排序,
+            取 top 補滿剩餘名額。高 priority「model 還沒學會」的 entry 在這裡跨類競爭。
+
+        典型設定:
+            - ``balanced_ratio = 1.0``:每類保 ``k/4``(8 類 → 12.5%),PER 只在某類
+              不足時補位。pruning 不會被高 abs(reward) 類別系統性壓擠其他類。
+            - ``balanced_ratio = 0.5``:原始設計,每類保 ``k/8``,剩 50% 給 PER 跨類競爭。
 
         Pure function: does NOT mutate ``self.index`` or touch disk files.
         Returns a list of entry-dict references (aliases into ``self.index``).
@@ -322,8 +325,10 @@ class CategorizedReplayBuffer:
         if k >= self.size_count:
             return list(self.index)
 
-        balanced_share = k // 2
-        per_class_quota = max(1, balanced_share // len(self.REWARD_TYPES))
+        # balanced_share ≥ 0 必然成立,整數除法保持非負;quota=0 時 entries[:0] 自然
+        # 是空 list,Phase 1 等同跳過 → 不用額外 if/else。
+        balanced_share = int(k * self.balanced_ratio)
+        per_class_quota = balanced_share // len(self.REWARD_TYPES)
 
         grouped_entries = {reward_type: [] for reward_type in self.REWARD_TYPES}
         for entry in self.index:
@@ -614,11 +619,9 @@ class CategorizedReplayBuffer:
         use_beta = beta if beta is not None else self.beta
 
         # === Phase 1: Balanced(占 self.balanced_ratio × batch_size) ===
+        # per_class_count=0 時 take=0,Phase 1 自然空跑(無需 if/else)。
         balanced_total = int(batch_size * self.balanced_ratio)
-        if balanced_total > 0:
-            per_class_count = max(1, balanced_total // len(self.REWARD_TYPES))
-        else:
-            per_class_count = 0  # balanced_ratio = 0 → 完全跳過 Phase 1
+        per_class_count = balanced_total // len(self.REWARD_TYPES)
 
         grouped_indices = {reward_type: [] for reward_type in self.REWARD_TYPES}
         for idx, entry in enumerate(self.index):
@@ -803,12 +806,15 @@ class CategorizedReplayBuffer:
 
     @property
     def class_quota(self) -> int:
-        """Per-class soft-floor quota used by ``top_k_balanced`` and ``sample()``.
+        """Per-class soft-floor quota used by ``top_k_balanced``、``sample()`` 及
+        ``is_class_quota_filled`` training gate。
 
-        With 4 classes and a 50% balanced share, this equals ``max_size // 8``
-        (i.e. 12.5% of buffer capacity per class).
+        定義:``(max_size × balanced_ratio) // len(REWARD_TYPES)``,至少 1。
+        - ``balanced_ratio = 1.0``:``max_size / 4``(每類 25%)
+        - ``balanced_ratio = 0.5``:``max_size / 8``(每類 12.5%,原始設計)
         """
-        return max(1, (self.max_size // 2) // len(self.REWARD_TYPES))
+        balanced_share = int(self.max_size * self.balanced_ratio)
+        return max(1, balanced_share // len(self.REWARD_TYPES))
 
     def is_class_quota_filled(self) -> bool:
         """True iff the gated class(es) have at least ``class_quota`` entries.
