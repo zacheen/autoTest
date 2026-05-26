@@ -15,7 +15,14 @@ class Chrome_Driver:
         print("open browser")
         options = webdriver.ChromeOptions()
         options.add_argument("--window-size=1960,1080")
+        # Pin DPR=1 so get_screenshot_as_png() pixels match the .txt region coords
+        options.add_argument("--force-device-scale-factor=1.25")
         options.add_argument("disable-infobars")
+        # Suppress the "Chrome is being controlled by automated test software" infobar.
+        # Without this it eats ~70px at the top of the screen, making viewport ≠ screen
+        # and breaking the coord pass-through for both clicks and screenshots.
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
         prefs = {
             "": "",
             "credentials_enable_service": False,

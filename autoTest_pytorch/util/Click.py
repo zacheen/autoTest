@@ -1,18 +1,21 @@
 import pyautogui
 import time
+from io import BytesIO
+from PIL import Image
 from selenium.webdriver.common.action_chains import ActionChains
 
 # where the cursor parks after each click (top-middle of screen)
 HOME_POS = (952, 21)
 
 # Click the screen using pyautogui or selenium
-def get_ctrl(driver=None):
-    if driver:
+def get_ctrl(driver=None, use_sel=True):
+    if driver and use_sel:
         return ClickSelenium(driver)
     return ClickPyautogui
 
 class ClickAbstract:
-    """Abstract pointer-input backend. Subclasses: ClickPyautogui, ClickSelenium."""
+    """Abstract browser-interaction backend (click + screenshot).
+    Subclasses: ClickPyautogui, ClickSelenium."""
     # Subclasses override to shave off sleep that ActionChains already spends
     sleep_adjust = 0.0
 
@@ -38,6 +41,18 @@ class ClickAbstract:
     def move_home():
         """Park the cursor somewhere neutral. Optional (selenium has no real cursor)."""
         pass
+
+    @staticmethod
+    def screenshot(out_path=None, region=None):
+        """Capture a screenshot.
+
+        out_path : if given, save the PNG there. Required for save-to-disk callers.
+        region   : (x, y, w, h) tuple in viewport / screen coords; None = full frame.
+
+        Returns the PIL Image (so callers like locateCenterOnScreen can keep working
+        in-memory without re-loading from disk).
+        """
+        raise NotImplementedError
 
 class ClickPyautogui(ClickAbstract):
     """Screen-coordinate input via pyautogui — works with any window."""
@@ -75,6 +90,15 @@ class ClickPyautogui(ClickAbstract):
     def move_home():
         pyautogui.moveTo(*HOME_POS)
 
+    @staticmethod
+    def screenshot(out_path=None, region=None):
+        if region is not None:
+            region = tuple(map(int, region))
+        img = pyautogui.screenshot(region=region)
+        if out_path is not None:
+            img.save(str(out_path))
+        return img
+
 
 class ClickSelenium(ClickAbstract):
     """Page-coordinate input via selenium ActionChains.
@@ -84,6 +108,14 @@ class ClickSelenium(ClickAbstract):
 
     def __init__(self, driver):
         self.driver = driver
+        # DPR is set via --force-device-scale-factor in Chrome_Driver. Whatever value
+        # is configured there must match what pyautogui sees, so the same region coords
+        # work for both. Just print it on startup so it's visible in logs.
+        try:
+            dpr = float(driver.execute_script("return window.devicePixelRatio"))
+            print(f"[ClickSelenium] devicePixelRatio = {dpr}")
+        except Exception as exc:
+            print(f"[ClickSelenium] DPR check failed: {exc}")
 
     def click(self, x, y, long_click=None, move_click=None):
         (ActionChains(self.driver)
@@ -91,6 +123,16 @@ class ClickSelenium(ClickAbstract):
             .click()
             .move_by_offset(-x, -y)
             .perform())
+
+    def screenshot(self, out_path=None, region=None):
+        png_bytes = self.driver.get_screenshot_as_png()
+        img = Image.open(BytesIO(png_bytes))
+        if region is not None:
+            x, y, w, h = map(int, region)
+            img = img.crop((x, y, x + w, y + h))
+        if out_path is not None:
+            img.save(str(out_path))
+        return img
 
     def drag_swipe(self, direction, times):
         for _ in range(times):

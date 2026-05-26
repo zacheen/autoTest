@@ -126,8 +126,8 @@ class Game_test_case(unittest.TestCase) :
                 self.assertTrue(False,"time_out")
                 break
 
-            if Tool_Main.compare_sim(glo_var, "level_training", sys._getframe().f_code.co_name) > 0.97 :
-            # if Tool_Main.compare_sim(glo_var, "roomLV1", sys._getframe().f_code.co_name) > 0.97 :
+            if Tool_Main.compare_sim(glo_var, "level_training", sys._getframe().f_code.co_name, threshold=0.97) :
+            # if Tool_Main.compare_sim(glo_var, "roomLV1", sys._getframe().f_code.co_name, threshold=0.97) :
                 Tool_Main.click_mid(glo_var, "click room")
                 break
 
@@ -154,8 +154,8 @@ class Game_test_case(unittest.TestCase) :
                 self.assertTrue(False,"time_out")
                 break
 
-            if Tool_Main.compare_sim(glo_var, "new_game", sys._getframe().f_code.co_name) > 0.97 :
-            # if Tool_Main.compare_sim(glo_var, "grab_none", sys._getframe().f_code.co_name) > 0.97 :
+            if Tool_Main.compare_sim(glo_var, "new_game", sys._getframe().f_code.co_name, threshold=0.97) :
+            # if Tool_Main.compare_sim(glo_var, "grab_none", sys._getframe().f_code.co_name, threshold=0.97) :
                 Minesweeper_Begin_thread().start()
                 break
 
@@ -336,7 +336,7 @@ class Game_test_case(unittest.TestCase) :
 
             last_pic_pos = f"grid_region_comp_{0+11}_{0}"
             # since a small change in the whole screen shot is tiny, the threshold should be very strick
-            if Tool_Main.compare_sim(glo_var, last_pic_pos, sys._getframe().f_code.co_name, precise=True) < 0.9995 :
+            if Tool_Main.compare_sim(glo_var, last_pic_pos, sys._getframe().f_code.co_name, precise=True, threshold=0.9995, disappear=True) :
                 # case : something changed
                 # game status for valid click
                 game_status.step_count += 1
@@ -345,13 +345,13 @@ class Game_test_case(unittest.TestCase) :
                 time.sleep(UI_waiting_time)
 
                 # check loss
-                if Tool_Main.compare_sim(glo_var, "lose", sys._getframe().f_code.co_name, precise=True) >= 0.9:
+                if Tool_Main.compare_sim(glo_var, "lose", sys._getframe().f_code.co_name, precise=True, threshold=0.9):
                     game_status.reward = MINESWEEPER_REWARD_CONFIG.lose
                     game_status.game_over = 1
                     print("hit mine")
 
                 # check win
-                elif Tool_Main.compare_sim(glo_var, "win", sys._getframe().f_code.co_name, precise=True) >= 0.9:
+                elif Tool_Main.compare_sim(glo_var, "win", sys._getframe().f_code.co_name, precise=True, threshold=0.9):
                     game_status.reward = MINESWEEPER_REWARD_CONFIG.win
                     game_status.game_over = 1
                     game_status.won = True
@@ -365,7 +365,7 @@ class Game_test_case(unittest.TestCase) :
 
             elif Tool_Main.cal_time_out(glo_var, 2, sys._getframe().f_code.co_name):
                 # check still in game
-                if Tool_Main.compare_sim(glo_var, "buttons", sys._getframe().f_code.co_name, precise=True) < 0.99 :
+                if Tool_Main.compare_sim(glo_var, "buttons", sys._getframe().f_code.co_name, precise=True, threshold=0.99, disappear=True) :
                     # not sure what happens, so don't give reward to model
                     game_status.game_over = 1
 
@@ -480,7 +480,7 @@ class Game_test_case(unittest.TestCase) :
                 self.assertTrue(False,"time_out")
                 break
 
-            if Tool_Main.compare_sim(glo_var, "confirm", sys._getframe().f_code.co_name, precise=False) >= 0.9 :
+            if Tool_Main.compare_sim(glo_var, "confirm", sys._getframe().f_code.co_name, precise=False, threshold=0.9) :
                 # < call the process when the game is ended, usually include backend data crawling and checking data correctness >
                 # KPSZNN_End_thread().start()
                 # total_wait_time = 100
@@ -504,7 +504,7 @@ class Game_test_case(unittest.TestCase) :
                 self.assertTrue(False,"time_out")
                 break
 
-            if Tool_Main.compare_sim(glo_var, "new_game", sys._getframe().f_code.co_name, precise=False) >= 0.97 :
+            if Tool_Main.compare_sim(glo_var, "new_game", sys._getframe().f_code.co_name, precise=False, threshold=0.97) :
                 if WEB_API.start_new_game():
                     break
     # ── end of test cases - after entering game ──────────────────────────
