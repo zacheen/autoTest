@@ -53,7 +53,7 @@ from model_structure.yolo_encoder_base import (
     DEFAULT_ENCODER_DIMS,
     DEFAULT_ENCODER_FF_MULT,
 )
-from model_structure.optimizer_factory import build_fqf_optimizer
+from model_structure.optimizer_factory import build_fqf_optimizer, FQFOptimizerConfig
 from model_structure.adaptive_epsilon import AdaptiveEpsilonController
 from model_structure.history import TrainingHistory
 
@@ -214,8 +214,14 @@ WEIGHT_DISTANCE_LOG_EVERY = 100
 USE_AMP = False
 
 # ── learning rates ───────────────────────────────────────────────────
-# LR / weight_decay 由 model_structure.optimizer_factory.FQFOptimizerConfig 提供預設值；
-# 需要單獨調整時，呼叫 build_fqf_optimizer(...) 時傳入自訂 config 即可。
+# 大部分 LR / weight_decay 走 FQFOptimizerConfig 預設(lr_backbone=lr_head=5e-5)。
+# 但 v3 多了一個 catastrophic forgetting 防護:把 backbone 內 pretrained 的部分
+# (encoder + token_adapter,從 YOLOGridStatePredictor 的 best.pth 載入)用 0.1× LR,
+# 避免 RL 階段稀疏雜訊大的 gradient 把預訓練學到的 self-attn pattern 洗掉。
+# 觀察 TB 的 weight_norm/encoder.* 與 grad_norm/encoder.* 來調整:
+#   - encoder weight delta 太久不動 → 調大 LR_BACKBONE_PRETRAINED
+#   - encoder weight 在前 1000 step 內 RMS 變化 > 50% → 調小
+LR_BACKBONE_PRETRAINED = 5e-6   # encoder + token_adapter (0.1× backbone fresh LR)
 # Linear LR warmup over the first N optimizer steps (transformer 早期穩定)
 # 從 base_lr * LR_WARMUP_START_FACTOR 線性增加到 base_lr
 LR_WARMUP_STEPS         = 2000   # 第一次從頭訓練的 warmup 長度
@@ -378,9 +384,24 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.q_target.load_state_dict(self.q_network.state_dict())
         self.q_target.eval()
 
-        # ── Optimizer（只更新 backbone decoder + queries，YOLO+encoder 已凍結）──
-        # build_fqf_optimizer 會自動只收 requires_grad=True 的 params，跳過凍結 encoder。
-        self.optimizer = build_fqf_optimizer(self.backbone, self.q_network)
+        # ── Optimizer ───────────────────────────────────────────────────────
+        # 只有 YOLO11n (feature_extractor) 凍結。token_adapter + encoder + decoder +
+        # query_tokens + FQF head 都會更新。
+        #
+        # 拆 3 個 param group:
+        #   group 0: backbone fresh    = decoder + query_tokens (random init)
+        #            → lr = config.lr_backbone = 5e-5
+        #   group 1: backbone pretrained = token_adapter + encoder (從 best.pth 載入)
+        #            → lr = LR_BACKBONE_PRETRAINED = 5e-6 (0.1×,防 catastrophic forgetting)
+        #   group 2: head              = q_network (random init)
+        #            → lr = config.lr_head = 5e-5
+        # build_fqf_optimizer 內部已過濾 requires_grad=False,YOLO 不會進來。
+        self.optimizer = build_fqf_optimizer(
+            self.backbone,
+            self.q_network,
+            config=FQFOptimizerConfig(lr_backbone_pretrained=LR_BACKBONE_PRETRAINED),
+            pretrained_prefixes=("token_adapter.", "encoder."),
+        )
         # 紀錄每個 param group 的 base lr，warmup 期間根據 total_it 動態縮放
         self._base_lrs = [group["lr"] for group in self.optimizer.param_groups]
         self.scaler = torch.cuda.amp.GradScaler(enabled=(USE_AMP and device.type == "cuda"))
