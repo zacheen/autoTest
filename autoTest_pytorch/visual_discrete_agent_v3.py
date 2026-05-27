@@ -937,6 +937,15 @@ class VisualAgentV3(VisualAgentCommonMixin):
         if self.scaler.is_enabled():
             self.tb_writer.add_scalar("train/scaler_scale", self.scaler.get_scale(), self.total_it)
 
+        # ── LR scalars(每個 param group 一條,在 TB 上歸在 lr/ 分類底下)──
+        # build_fqf_optimizer 在每個 group 內塞了 "name" key;若舊 checkpoint 載入後沒
+        # 這個 key(理論上不會發生,但保險),fallback 用 index。warmup 期間 group["lr"]
+        # 已經被 _apply_lr_warmup() in-place 改成 base_lr * factor,所以這裡讀的就是當下
+        # 真正生效的 LR — TB 上能直接看到 warmup ramp + 三個 group 的 ratio。
+        for idx, group in enumerate(self.optimizer.param_groups):
+            tag = group.get("name") or f"group_{idx}"
+            self.tb_writer.add_scalar(f"lr/{tag}", group["lr"], self.total_it)
+
         self.tb_writer.flush()
         _dbg(f"[train_step] EXIT total_it={self.total_it}")
         _dbg_mem("train_step EXIT")

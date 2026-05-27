@@ -68,11 +68,13 @@ def build_fqf_optimizer(
 
     if not pretrained_prefixes:
         # Stage 1 路徑:單一 backbone group,保持原行為。
+        # "name" 是 caller(例如 v3 的 train_step)用來在 TB 標 lr/<name> 的 tag,
+        # AdamW 本身不會讀這個 key,只是被 param_groups 透傳保留下來。
         backbone_trainable = [p for p in backbone_module.parameters() if p.requires_grad]
         return torch.optim.AdamW(
             [
-                {"params": backbone_trainable, "lr": config.lr_backbone},
-                {"params": head_trainable, "lr": config.lr_head},
+                {"params": backbone_trainable, "lr": config.lr_backbone, "name": "backbone"},
+                {"params": head_trainable, "lr": config.lr_head, "name": "head"},
             ],
             weight_decay=config.weight_decay,
             foreach=config.foreach,
@@ -103,11 +105,16 @@ def build_fqf_optimizer(
     param_groups: list[dict] = []
     # 順序固定 [fresh, pretrained, head]:_base_lrs / _apply_lr_warmup 是按
     # index 對應 param_group,改順序會讓 v3 內部的 LR warmup index 對不上。
+    # "name" 給 caller 在 TB 上標 lr/<name> 用,AdamW 本身不會讀這個 key。
     if fresh_params:
-        param_groups.append({"params": fresh_params, "lr": config.lr_backbone})
+        param_groups.append({
+            "params": fresh_params, "lr": config.lr_backbone, "name": "backbone_fresh",
+        })
     if pretrained_params:
-        param_groups.append({"params": pretrained_params, "lr": lr_pretrained})
-    param_groups.append({"params": head_trainable, "lr": config.lr_head})
+        param_groups.append({
+            "params": pretrained_params, "lr": lr_pretrained, "name": "backbone_pretrained",
+        })
+    param_groups.append({"params": head_trainable, "lr": config.lr_head, "name": "head"})
 
     # 印一行 split summary,讓 caller 在 log 內肉眼確認 prefix 抓對。
     print(
