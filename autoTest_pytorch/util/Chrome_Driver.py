@@ -9,14 +9,28 @@ import sys
 import time
 import pyautogui
 
+# When True, Chrome runs without a visible window. Screenshots / clicks still work
+# via chromedriver (in-process events, not OS-level), so the agent is unaffected.
+# Toggle off for human debugging.
+HEADLESS = True
+
+# DPR must match what pyautogui sees so screen-coord templates work via chromedriver.
+# Single source of truth — used by both --force-device-scale-factor and the headless
+# CDP viewport override below.
+DEVICE_SCALE_FACTOR = 1.25
+
 class Chrome_Driver:
     def __init__(self, game_env):
         """Open browser, log in, and wire the driver into the session."""
         print("open browser")
         options = webdriver.ChromeOptions()
+        if HEADLESS:
+            # New headless mode (Chrome 109+). Renders to off-screen buffer; same
+            # viewport size honoured, get_screenshot_as_png() still works.
+            options.add_argument("--headless=new")
         options.add_argument("--window-size=1960,1080")
-        # Pin DPR=1 so get_screenshot_as_png() pixels match the .txt region coords
-        options.add_argument("--force-device-scale-factor=1.25")
+        # Pin DPR so get_screenshot_as_png() pixels match the .txt region coords
+        options.add_argument(f"--force-device-scale-factor={DEVICE_SCALE_FACTOR}")
         options.add_argument("disable-infobars")
         # Suppress the "Chrome is being controlled by automated test software" infobar.
         # Without this it eats ~70px at the top of the screen, making viewport ≠ screen
@@ -33,10 +47,35 @@ class Chrome_Driver:
         service = Service(ChromeDriverManager().install())
         self.driver = webdriver.Chrome(service=service, options=options)
         self.game_env = game_env
-        ClickPyautogui.click(30, 30)
-        time.sleep(1)
+
+        if HEADLESS:
+            # --window-size is unreliable in headless (Chrome defaults to ~800×600).
+            # Force the CSS viewport via CDP so that:
+            #   - CSS width / height = OS screen size / DPR
+            #   - get_screenshot_as_png() returns physical pixels = OS screen size
+            # This matches headed-mode behaviour (Chrome F11 fullscreen with
+            # DPR=DEVICE_SCALE_FACTOR), so existing templates keep working.
+            screen_w, screen_h = pyautogui.size()
+            self.driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+                "width": int(screen_w / DEVICE_SCALE_FACTOR),
+                "height": int(screen_h / DEVICE_SCALE_FACTOR),
+                "deviceScaleFactor": DEVICE_SCALE_FACTOR,
+                "mobile": False,
+            })
+
+        if not HEADLESS:
+            # Focus the browser window so pyautogui hotkeys land in Chrome.
+            # In headless mode there's no window to focus.
+            ClickPyautogui.click(30, 30)
+            time.sleep(1)
         self.full_screen()
         self.login_plat()
+
+        # Diagnostic — confirm viewport and DPR are what we expect
+        vw = self.driver.execute_script("return window.innerWidth")
+        vh = self.driver.execute_script("return window.innerHeight")
+        dpr = self.driver.execute_script("return window.devicePixelRatio")
+        print(f"[Chrome_Driver] viewport: {vw}×{vh}, DPR: {dpr}")
 
     def login_plat(self):
         print("login platform : ", self.game_env)
@@ -74,7 +113,10 @@ class Chrome_Driver:
     
     def full_screen(self):
         self.driver.maximize_window()
-        pyautogui.hotkey("f11")
+        if not HEADLESS:
+            # F11 toggles browser fullscreen. In headless mode there's no window,
+            # and the global hotkey would land in whatever OS app has focus — bad.
+            pyautogui.hotkey("f11")
 
     def open_book_mark():
         pyautogui.hotkey("ctrl", "shift", "b")
