@@ -672,8 +672,7 @@ class HTMLTestRunner(Template_mixin):
         # ID修改点为下划线,支持Bootstrap折叠展开特效 - Findyou
         tid = (n == 0 and 'p' or 'f') + 't%s_%s' % (cid+1,tid+1)
         name = t.id().split('.')[-1]
-        doc = t.shortDescription() or ""
-        desc = doc and ('%s: %s' % (name, doc)) or name
+        desc = name
         tmpl = has_output and self.REPORT_TEST_WITH_OUTPUT_TMPL or self.REPORT_TEST_NO_OUTPUT_TMPL
 
         # utf-8 支持中文 - Findyou

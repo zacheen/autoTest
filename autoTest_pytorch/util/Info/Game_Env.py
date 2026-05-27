@@ -38,7 +38,7 @@ class _Game_Env:
 
         training_data_path = self.game_pic_path / "training_data"
         training_data_path.mkdir(exist_ok=True)
-        self.cut_pic_path = str(training_data_path) + "\\"
+        self.cut_pic_path = training_data_path
 
         # export game name to the identification module
         import util.identify_for_import as identify_for_import

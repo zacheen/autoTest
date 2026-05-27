@@ -5,17 +5,60 @@ from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
 
+import os
 import sys
 import time
-import pyautogui
+# Same X-less guard as util/Click — see comment there. pyautogui here is only
+# touched on the non-headless paths plus the headless screen-size lookup, which
+# is bypassed by AUTOTEST_HEADLESS_VIEWPORT.
+try:
+    import pyautogui
+except Exception:
+    pyautogui = None
+
+# ── Browser mode toggles ──────────────────────────────────────────
+# HEADLESS : True  → Chrome --headless=new, no visible window, viewport via CDP
+#            False → real window, F11 fullscreen, needs a desktop
+# use_sel  : 1     → ClickSelenium (ActionChains clicks, driver.get_screenshot_as_png)
+#                    — coord system = browser viewport
+#            0     → ClickPyautogui (OS-level clicks + pyautogui.screenshot)
+#                    — coord system = OS screen, only makes sense with HEADLESS=False
+# Typical combos:
+#   HEADLESS=True  + use_sel=1  → containerized (Colab, CI, server)
+#   HEADLESS=False + use_sel=1  → local dev, watch Chrome, browser-internal capture
+#   HEADLESS=False + use_sel=0  → legacy OS-screen pipeline
+HEADLESS = True
+use_sel = 1
+
+# DPR must match what pyautogui sees so screen-coord templates work via chromedriver.
+# Single source of truth — used by both --force-device-scale-factor and the headless
+# CDP viewport override below.
+DEVICE_SCALE_FACTOR = 1.25
 
 class Chrome_Driver:
     def __init__(self, game_env):
         """Open browser, log in, and wire the driver into the session."""
         print("open browser")
         options = webdriver.ChromeOptions()
+        if HEADLESS:
+            # New headless mode (Chrome 109+). Renders to off-screen buffer; same
+            # viewport size honoured, get_screenshot_as_png() still works.
+            options.add_argument("--headless=new")
+            # Colab / containerized Linux runs as root and ships a tiny /dev/shm.
+            # --no-sandbox lets Chrome run as root; --disable-dev-shm-usage falls
+            # back to /tmp for shared memory. Both are no-ops on local Windows.
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-gpu")
         options.add_argument("--window-size=1960,1080")
+        # Pin DPR so get_screenshot_as_png() pixels match the .txt region coords
+        options.add_argument(f"--force-device-scale-factor={DEVICE_SCALE_FACTOR}")
         options.add_argument("disable-infobars")
+        # Suppress the "Chrome is being controlled by automated test software" infobar.
+        # Without this it eats ~70px at the top of the screen, making viewport ≠ screen
+        # and breaking the coord pass-through for both clicks and screenshots.
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
         prefs = {
             "": "",
             "credentials_enable_service": False,
@@ -26,10 +69,47 @@ class Chrome_Driver:
         service = Service(ChromeDriverManager().install())
         self.driver = webdriver.Chrome(service=service, options=options)
         self.game_env = game_env
-        ClickPyautogui.click(30, 30)
-        time.sleep(1)
+
+        if HEADLESS:
+            # --window-size is unreliable in headless (Chrome defaults to ~800×600).
+            # Force the CSS viewport via CDP so that:
+            #   - CSS width / height = OS screen size / DPR
+            #   - get_screenshot_as_png() returns physical pixels = OS screen size
+            # This matches headed-mode behaviour (Chrome F11 fullscreen with
+            # DPR=DEVICE_SCALE_FACTOR), so existing templates keep working.
+            # AUTOTEST_HEADLESS_VIEWPORT="WxH" overrides pyautogui.size() for
+            # X-less environments (Colab) where pyautogui can't query the screen.
+            viewport_env = os.environ.get("AUTOTEST_HEADLESS_VIEWPORT")
+            if viewport_env:
+                screen_w, screen_h = map(int, viewport_env.lower().split("x"))
+            elif pyautogui is not None:
+                screen_w, screen_h = pyautogui.size()
+            else:
+                raise RuntimeError(
+                    "HEADLESS Chrome needs a viewport size, but pyautogui is "
+                    "unavailable (no X display?) and AUTOTEST_HEADLESS_VIEWPORT "
+                    "is not set. Set AUTOTEST_HEADLESS_VIEWPORT=1920x1080 (or similar)."
+                )
+            self.driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+                "width": int(screen_w / DEVICE_SCALE_FACTOR),
+                "height": int(screen_h / DEVICE_SCALE_FACTOR),
+                "deviceScaleFactor": DEVICE_SCALE_FACTOR,
+                "mobile": False,
+            })
+
+        if not HEADLESS:
+            # Focus the browser window so pyautogui hotkeys land in Chrome.
+            # In headless mode there's no window to focus.
+            ClickPyautogui.click(30, 30)
+            time.sleep(1)
         self.full_screen()
         self.login_plat()
+
+        # Diagnostic — confirm viewport and DPR are what we expect
+        vw = self.driver.execute_script("return window.innerWidth")
+        vh = self.driver.execute_script("return window.innerHeight")
+        dpr = self.driver.execute_script("return window.devicePixelRatio")
+        print(f"[Chrome_Driver] viewport: {vw}×{vh}, DPR: {dpr}")
 
     def login_plat(self):
         print("login platform : ", self.game_env)
@@ -67,7 +147,10 @@ class Chrome_Driver:
     
     def full_screen(self):
         self.driver.maximize_window()
-        pyautogui.hotkey("f11")
+        if not HEADLESS:
+            # F11 toggles browser fullscreen. In headless mode there's no window,
+            # and the global hotkey would land in whatever OS app has focus — bad.
+            pyautogui.hotkey("f11")
 
     def open_book_mark():
         pyautogui.hotkey("ctrl", "shift", "b")
