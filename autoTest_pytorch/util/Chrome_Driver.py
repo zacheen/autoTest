@@ -44,6 +44,12 @@ class Chrome_Driver:
             # New headless mode (Chrome 109+). Renders to off-screen buffer; same
             # viewport size honoured, get_screenshot_as_png() still works.
             options.add_argument("--headless=new")
+            # Colab / containerized Linux runs as root and ships a tiny /dev/shm.
+            # --no-sandbox lets Chrome run as root; --disable-dev-shm-usage falls
+            # back to /tmp for shared memory. Both are no-ops on local Windows.
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-gpu")
         options.add_argument("--window-size=1960,1080")
         # Pin DPR so get_screenshot_as_png() pixels match the .txt region coords
         options.add_argument(f"--force-device-scale-factor={DEVICE_SCALE_FACTOR}")
