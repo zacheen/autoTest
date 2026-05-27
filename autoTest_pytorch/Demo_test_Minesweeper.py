@@ -341,7 +341,7 @@ class Game_test_case(unittest.TestCase) :
 
             last_pic_pos = f"grid_region_comp_{0+11}_{0}"
             # since a small change in the whole screen shot is tiny, the threshold should be very strick
-            if Tool_Main.compare_sim(glo_var, last_pic_pos, sys._getframe().f_code.co_name, precise=True, threshold=0.9995, disappear=True) :
+            if Tool_Main.compare_sim(glo_var, last_pic_pos, sys._getframe().f_code.co_name, precise=True, threshold=0.97, disappear=True) :
                 # case : something changed
                 # game status for valid click
                 game_status.step_count += 1
@@ -370,7 +370,7 @@ class Game_test_case(unittest.TestCase) :
 
             elif Tool_Main.cal_time_out(glo_var, 2, sys._getframe().f_code.co_name):
                 # check still in game
-                if Tool_Main.compare_sim(glo_var, "buttons", sys._getframe().f_code.co_name, precise=True, threshold=0.99, disappear=True) :
+                if Tool_Main.compare_sim(glo_var, "buttons", sys._getframe().f_code.co_name, precise=True, threshold=0.97, disappear=True) :
                     # not sure what happens, so don't give reward to model
                     game_status.game_over = 1
 

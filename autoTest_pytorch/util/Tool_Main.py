@@ -38,6 +38,15 @@ from .Chrome_Driver import Chrome_Driver, use_sel
 # 1. Module constants / paths
 # ════════════════════════════════════════════════════════════════════
 
+# Pre-blur both inputs before TM_CCOEFF_NORMED so AA / sub-pixel differences
+# between platforms (Linux FreeType vs Windows ClearType) don't tank the score.
+# Tested: a "Training 6x6" button compared across Colab vs Windows goes from
+# 0.88 (raw NCC) to 0.97+ with σ=1.5. ksize 5×5 is small for σ=1.5 — the tail
+# of the Gaussian gets truncated — but that's fine, we only need ~1–2 pixel of
+# smoothing.
+_MATCH_BLUR_KSIZE = (5, 5)
+_MATCH_BLUR_SIGMA = 1.5
+
 glo_var = None
 def set_glo_var(in_glo_var):
     # Module-level singleton (assigned by the entry script after construction)
@@ -88,7 +97,9 @@ def locateCenterOnScreen(template_pic, region=None, save_loc=None):
     screenshot = _ctrl.screenshot(out_path=save_loc, region=region)
     screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
 
-    result = cv2.matchTemplate(screenshot, template_pic, cv2.TM_CCOEFF_NORMED)
+    screenshot_blur = cv2.GaussianBlur(screenshot, _MATCH_BLUR_KSIZE, _MATCH_BLUR_SIGMA)
+    template_blur = cv2.GaussianBlur(template_pic, _MATCH_BLUR_KSIZE, _MATCH_BLUR_SIGMA)
+    result = cv2.matchTemplate(screenshot_blur, template_blur, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, max_loc = cv2.minMaxLoc(result)
 
     h, w = template_pic.shape[:2]
@@ -310,7 +321,9 @@ def compare_sim(glo_var, file_place, className,
                 new_img_pil = _ctrl.screenshot(region=fb_region)
                 new_img_bgr = cv2.cvtColor(np.array(new_img_pil), cv2.COLOR_RGB2BGR)
                 # Same-size matchTemplate → result is 1×1, the single correlation
-                png_match = cv2.matchTemplate(new_img_bgr, template, cv2.TM_CCOEFF_NORMED)
+                new_img_blur = cv2.GaussianBlur(new_img_bgr, _MATCH_BLUR_KSIZE, _MATCH_BLUR_SIGMA)
+                template_blur = cv2.GaussianBlur(template, _MATCH_BLUR_KSIZE, _MATCH_BLUR_SIGMA)
+                png_match = cv2.matchTemplate(new_img_blur, template_blur, cv2.TM_CCOEFF_NORMED)
                 _, png_sim, _, _ = cv2.minMaxLoc(png_match)
 
                 _ensure_folder_empty(glo_var.env.game_pic_path)
