@@ -3,15 +3,23 @@
 Both YOLOGridStatePredictor and VisualAgentV3 inherit from YOLOEncoderBase.
 Subclasses add their own decoder on top of encode().
 
-Pipeline:
+Pipeline (split into two halves so V3 can cache the backbone output in replay):
     screenshot (B, 3, H, W)
-      ↓ YOLO11n backbone
-    (B, 128, 40, 40)
+      ↓ YOLO11n backbone                            ← extract_backbone_features()
+    (B, 128, 40, 40)                                ← V3 stores this in replay buffer
       ↓ token_adapter: LayerNorm(128) + Linear(128→encoder_dims[0])
-      ↓ + fixed 2D sinusoidal positional encoding
-    (B, 1600, encoder_dims[0])
+      ↓ + fixed 2D sinusoidal positional encoding   ← encode_from_backbone_features()
       ↓ HierarchicalEncoder (dims built by build_encoder_dims(final_dim, total_layers))
     (B, 1600, final_dim)                             ← encode() output
+
+`encode()` is the high-level wrapper (screenshot → encoded memory). V3 calls the two
+halves separately so the frozen YOLO forward only runs once at storage time, and the
+trainable token_adapter + encoder run every gradient step on cached features.
+
+Freezing API:
+    freeze()                  — legacy: freezes feature_extractor + token_adapter + encoder
+    freeze_feature_extractor() — V3 path: only freezes YOLO11n; lets encoder train
+    unfreeze() / set_bn_eval() — unchanged
 
 Encoder shape is controlled by DEFAULT_ENCODER_FINAL_DIM / DEFAULT_ENCODER_TOTAL_LAYERS
 below — geometric halving from 128 down to final_dim, then uniform layers at final_dim.
@@ -180,24 +188,60 @@ class YOLOEncoderBase(nn.Module):
 
     # ── forward ──────────────────────────────────────────────────────────
 
-    def encode(self, screenshot: torch.Tensor) -> torch.Tensor:
-        """screenshot (B, 3, H, W) → encoded memory tokens (B, N, out_dim)."""
-        features = self.feature_extractor(screenshot)
+    def extract_backbone_features(self, screenshot: torch.Tensor) -> torch.Tensor:
+        """screenshot (B, 3, H, W) → raw YOLO11n features (B, 128, h, w).
+
+        This is the half that V3 caches in the replay buffer. The YOLO11n backbone
+        is typically frozen (freeze_feature_extractor()) so this forward is
+        deterministic across training steps for a given screenshot.
+        """
+        return self.feature_extractor(screenshot)
+
+    def encode_from_backbone_features(self, features: torch.Tensor) -> torch.Tensor:
+        """YOLO features (B, 128, h, w) → encoded memory tokens (B, h*w, out_dim).
+
+        Runs the trainable half: token_adapter (LayerNorm + Linear) + fixed
+        sinusoidal positional encoding + HierarchicalEncoder. V3 calls this every
+        gradient step on cached features pulled from the replay buffer.
+        """
         B, _, h, w = features.shape
         tokens = features.permute(0, 2, 3, 1).reshape(B, h * w, YOLO_FEATURE_CHANNELS)
         memory = self.token_adapter(tokens)
         memory = memory + self.memory_position(h, w).unsqueeze(0)
         return self.encoder(memory)
 
+    def encode(self, screenshot: torch.Tensor) -> torch.Tensor:
+        """screenshot (B, 3, H, W) → encoded memory tokens (B, N, out_dim).
+
+        High-level wrapper used by YOLOGridStatePredictor (supervised pretrain) and
+        by VisualAgentV3.select_action() (live inference, no replay cache). For
+        training-time forwards on cached features, call encode_from_backbone_features
+        directly.
+        """
+        return self.encode_from_backbone_features(self.extract_backbone_features(screenshot))
+
     # ── freeze / unfreeze ─────────────────────────────────────────────────
 
     def freeze(self) -> None:
-        """Freeze only the base components (feature_extractor, token_adapter, encoder)."""
+        """Freeze feature_extractor + token_adapter + encoder (legacy full freeze).
+
+        Used by callers that want the whole pretrained stack frozen. V3 instead
+        calls freeze_feature_extractor() so the encoder can fine-tune on RL signal.
+        """
         for p in self.feature_extractor.parameters():
             p.requires_grad_(False)
         for p in self.token_adapter.parameters():
             p.requires_grad_(False)
         for p in self.encoder.parameters():
+            p.requires_grad_(False)
+
+    def freeze_feature_extractor(self) -> None:
+        """Freeze only the YOLO11n backbone; keep token_adapter + encoder trainable.
+
+        V3 path: lets the encoder specialize self-attention for Q-value estimation
+        while keeping the generic vision feature extractor stable.
+        """
+        for p in self.feature_extractor.parameters():
             p.requires_grad_(False)
 
     def unfreeze(self) -> None:

@@ -2,10 +2,11 @@
 
 Pipeline（dim/層數由 yolo_encoder_base 與下方 DECODER_* 常數決定）:
     screenshot (3, 640, 640)
-        ↓ YOLOEncoderBase（FROZEN，從 YOLOGridStatePredictor checkpoint 載入）
-        ↓   YOLO11n backbone → (128, 40, 40)
-        ↓   token_adapter + 2D sinusoidal pos encoding → (1600, encoder_dims[0])
-        ↓   HierarchicalEncoder (build_encoder_dims(final_dim, total_layers)) → (1600, final_dim)
+        ↓ YOLOEncoderBase 的兩半:
+        ↓   [frozen] YOLO11n backbone → (128, 40, 40)
+        ↓   ───────────── REPLAY-BUFFER 在此切點儲存 (128, 40, 40) fp32 特徵 ─────────────
+        ↓   [trainable] token_adapter + 2D sinusoidal pos enc → (1600, encoder_dims[0])
+        ↓   [trainable] HierarchicalEncoder → (1600, final_dim)
     encoded memory (B, 1600, final_dim)
         ↓ TransformerDecoder × DECODER_NUM_LAYERS（pre-LN, cross-attn，GRID_H*GRID_W learned query tokens）
     decoded features (B, GRID_H*GRID_W, final_dim)
@@ -14,8 +15,13 @@ Pipeline（dim/層數由 yolo_encoder_base 與下方 DECODER_* 常數決定）:
 
 架構說明：
     • VisualBackboneV3 繼承 YOLOEncoderBase（與 YOLOGridStatePredictor 共用）
-    • YOLO + token_adapter + encoder 全部凍結（BN eval mode）
-    • 可訓練部分：decoder + query tokens + FQF head
+    • 從 YOLOGridStatePredictor checkpoint 載入 feature_extractor + token_adapter + encoder 權重
+    • YOLO11n backbone 凍結(BN eval mode);token_adapter + HierarchicalEncoder 解凍可訓練
+    • Replay buffer 改存 YOLO backbone 輸出 (128, 40, 40) 而不是原始截圖(3, 640, 640):
+        - 每筆 transition 從 ~1.17 MB(uint8 截圖)降到 ~0.78 MB(fp32 特徵)
+        - 訓練時跳過 YOLO11n forward,只跑 token_adapter + encoder + decoder
+        - 因為 YOLO 凍結,cached features 對訓練等同每次重算
+    • 可訓練部分：token_adapter + encoder + decoder + query tokens + FQF head
 """
 
 from __future__ import annotations
@@ -25,11 +31,9 @@ import datetime
 import hashlib
 import math
 import random
-import shutil
 from collections import deque
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -45,6 +49,7 @@ import model_structure.CategorizedReplayBuffer as _crb_module
 from model_structure.visual_agent_common import VisualAgentCommonMixin
 from model_structure.yolo_encoder_base import (
     YOLOEncoderBase,
+    YOLO_FEATURE_CHANNELS,
     DEFAULT_ENCODER_DIMS,
     DEFAULT_ENCODER_FF_MULT,
 )
@@ -200,7 +205,7 @@ DECODER_DROPOUT    = 0.1
 
 # ── training hyper-params ────────────────────────────────────────────
 VISUAL_N_STEP = 1
-VISUAL_GRAD_CLIP_NORM = 10.0   # 與 TransformerDiscreteAgent 對齊；encoder 已凍結，不需要 5.0 的寬鬆 room
+VISUAL_GRAD_CLIP_NORM = 10.0   # 與 TransformerDiscreteAgent 對齊；token_adapter + encoder 加入可訓練後仍維持 10.0
 TRAIN_EVERY_N_STEPS = 1
 TARGET_UPDATE_FREQ = 200
 SAVE_EVERY_N_EPISODES = 100
@@ -279,10 +284,25 @@ class VisualBackboneV3(YOLOEncoderBase):
         return self.query_tokens.expand(batch_size, -1, -1)
 
     def get_features(self, screenshot: torch.Tensor) -> torch.Tensor:
-        """screenshot (B, 3, H, W) → cell features (B, num_queries, out_dim)."""
+        """screenshot (B, 3, H, W) → cell features (B, num_queries, out_dim).
+
+        Live-inference path (select_action). Runs the full pipeline including the
+        frozen YOLO backbone forward.
+        """
         memory  = self.encode(screenshot)                        # (B, 1600, out_dim)
         queries = self._build_queries(memory.size(0))            # (B, num_queries, out_dim)
         return self.decoder(queries, memory)                     # (B, num_queries, out_dim)
+
+    def get_features_from_cached(self, backbone_features: torch.Tensor) -> torch.Tensor:
+        """Cached YOLO features (B, 128, h, w) → cell features (B, num_queries, out_dim).
+
+        Training-time path. Skips the frozen YOLO backbone forward — the features
+        were precomputed once at storage time. token_adapter + encoder + decoder
+        all run here with gradients (encoder is trainable in this configuration).
+        """
+        memory  = self.encode_from_backbone_features(backbone_features)
+        queries = self._build_queries(memory.size(0))
+        return self.decoder(queries, memory)
 
     def forward(self, screenshot: torch.Tensor) -> torch.Tensor:
         return self.get_features(screenshot)
@@ -312,10 +332,33 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.log_prefix = "[V3]"
         self.log_actions = LOG_ACTIONS
 
-        # ── Backbone：載入 Predictor 權重後凍結 YOLO + encoder ──
+        # ── Backbone：載入 Predictor 權重；YOLO11n 凍結，token_adapter+encoder 可訓練 ──
+        # Replay buffer 改存 YOLO backbone 輸出 (128, h, w) 而不是原始截圖,所以 YOLO
+        # 必須保持凍結(否則 cache 的 features 會與更新後的權重不一致)。token_adapter
+        # 與 HierarchicalEncoder 是 RL 階段的 fine-tune 目標 — 預訓練學的是
+        # YOLOGridStatePredictor 的「每格分類」資訊交換 pattern,Q-value 任務需要不同
+        # 的全域聚合 pattern,所以解凍它讓 RL gradient 把它特化。
         self.backbone = VisualBackboneV3(grid_h=grid_h, grid_w=grid_w).to(device)
         self.backbone.load_encoder_weights_from_checkpoint(YOLO_PREDICTOR_PATH)
-        self.backbone.freeze()
+        self.backbone.freeze_feature_extractor()
+        # BN 必須切到 eval,否則接下來的 dummy forward 會以 momentum=0.1 把全零輸入的
+        # batch stats 混進剛從 checkpoint 載入的 running_mean/running_var,污染 YOLO BN。
+        # torch.no_grad 不會抑制 BN running_stats 更新 — 那是受 module.training 控制的。
+        self.backbone.set_bn_eval()
+
+        # 推算 backbone 輸出的空間尺寸(用於 replay buffer 的 shape check)。
+        # YOLO11n stride=16,所以 640x640 → 40x40;dummy forward 確認且為其他輸入尺寸保險。
+        with torch.no_grad():
+            dummy = torch.zeros(1, 3, *IMAGE_SIZE, device=device)
+            dummy_feat = self.backbone.extract_backbone_features(dummy)
+            _, feat_c, feat_h, feat_w = dummy_feat.shape
+            assert feat_c == YOLO_FEATURE_CHANNELS, (
+                f"YOLO feature channels ({feat_c}) ≠ YOLO_FEATURE_CHANNELS "
+                f"({YOLO_FEATURE_CHANNELS}); update yolo_encoder_base."
+            )
+        self.backbone_feature_shape: tuple[int, int, int] = (feat_c, feat_h, feat_w)
+        # 給 mixin._load_persistent_buffer 用的 shape check;v3 覆寫成 cached features 形狀。
+        self.replay_state_shape: tuple[int, ...] = self.backbone_feature_shape
 
         # ── FQF heads (random init) ──
         self.q_network = FQFQNetwork(
@@ -429,11 +472,11 @@ class VisualAgentV3(VisualAgentCommonMixin):
     # ──────────────────────────── runtime modes ──────────────────────────
 
     def _set_runtime_modes(self) -> None:
-        self.backbone.train()          # decoder + queries → train mode
-        self.backbone.set_bn_eval()    # YOLO BN layers 保持 eval（凍結 running stats）
-        self.backbone.feature_extractor.eval()
-        self.backbone.token_adapter.eval()
-        self.backbone.encoder.eval()
+        self.backbone.train()                       # 整個 backbone 預設 train（dropout 等啟用）
+        self.backbone.feature_extractor.eval()      # YOLO11n 凍結，永遠 eval
+        self.backbone.set_bn_eval()                 # YOLO BN 保持 eval（凍結 running stats）
+        self.backbone.token_adapter.train()         # 解凍 — 從 RL gradient 學新的特徵投影
+        self.backbone.encoder.train()               # 解凍 — 學 Q-value 任務的全域資訊交換
         self.backbone.decoder.train()
         self.q_network.train()
         self.q_target.eval()
@@ -572,61 +615,35 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
     # ──────────────────────────── transition storage ───────────────────
 
-    def store_transition(
-        self,
-        state: torch.Tensor,
-        action: int,
-        next_state: torch.Tensor | None,
-        reward: float,
-        done: bool,
-    ) -> None:
-        self.recent_real_rewards.append(float(reward))
-        transition = {
-            "state": state.detach().cpu(),
-            "action": int(action),
-            "next_state": next_state.detach().cpu() if next_state is not None else None,
-            "reward": float(reward),
-            "done": bool(done),
-        }
-        self.n_step_buffer.append(transition)
+    def _to_storage_state(self, state: torch.Tensor | None) -> torch.Tensor | None:
+        """Override: run frozen YOLO backbone once and store its (128, h, w) output.
 
-        if len(self.n_step_buffer) >= self.n_step:
-            self._commit_n_step_transition(self.n_step)
-        if done:
-            self._flush_n_step_buffer()
+        Replaces the default (3, H, W) screenshot storage. The YOLO11n backbone is
+        frozen via freeze_feature_extractor(), so for a given screenshot the cached
+        feature tensor is stable across training steps and equivalent to recomputing
+        it. This trades a one-time forward at storage time for skipping the YOLO
+        forward on every replayed batch.
 
-    def _commit_n_step_transition(self, horizon: int) -> None:
-        if not self.n_step_buffer:
-            return
+        Called via VisualAgentCommonMixin.store_transition for both state and
+        next_state (next_state may be None at episode end, which we forward verbatim).
+        """
+        if state is None:
+            return None
+        screenshot = state.detach()
+        # _set_runtime_modes puts feature_extractor in eval and freezes BN running
+        # stats; we still wrap in no_grad to avoid building autograd graph through
+        # this storage-time forward.
+        self.backbone.feature_extractor.eval()
+        self.backbone.set_bn_eval()
+        with torch.no_grad():
+            features = self.backbone.extract_backbone_features(
+                screenshot.unsqueeze(0).to(self.device)
+            )
+        return features.squeeze(0).detach().cpu()
 
-        horizon = min(horizon, len(self.n_step_buffer))
-        discounted_reward = 0.0
-        last_transition = None
-        for step_idx in range(horizon):
-            transition = self.n_step_buffer[step_idx]
-            discounted_reward += (self.n_step_gamma ** step_idx) * transition["reward"]
-            last_transition = transition
-            if transition["done"]:
-                horizon = step_idx + 1
-                break
-
-        first_transition = self.n_step_buffer[0]
-        discount = self.n_step_gamma ** horizon
-        self.replay_buffer.store(
-            first_transition["state"],
-            first_transition["action"],
-            last_transition["next_state"],
-            discounted_reward,
-            last_transition["done"],
-            discount=discount,
-            n_steps=horizon,
-            tail_reward=last_transition["reward"],
-        )
-        self.n_step_buffer.popleft()
-
-    def _flush_n_step_buffer(self) -> None:
-        while self.n_step_buffer:
-            self._commit_n_step_transition(len(self.n_step_buffer))
+    # store_transition / _commit_n_step_transition / _flush_n_step_buffer 都來自
+    # VisualAgentCommonMixin（見檔尾 rebinding）。Mixin 的 store_transition 會呼叫
+    # 上面的 _to_storage_state hook,所以 v3 走的是 (128, h, w) 特徵儲存路徑。
 
     # ──────────────────────────── training step ────────────────────────
 
@@ -671,11 +688,24 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self._set_runtime_modes()
 
         # ── target branch (no gradients) ──
+        # state/next_state 是預先存好的 YOLO backbone 特徵 (B, 128, h, w),不是截圖。
+        # YOLO11n forward 已經在 store_transition 階段做完,這裡只跑可訓練的
+        # token_adapter + encoder + decoder。
+        #
+        # 重要:target 分支必須把 token_adapter/encoder/decoder 切到 eval,否則 dropout
+        # (p=0.1) 會在 target Q 計算時 fire,讓同一個 next_state 在不同 batch 給出隨機
+        # 的 target Q,變成 TD target 的噪音來源。no_grad 只擋反傳,不擋 dropout。
+        # q_network 在 _set_runtime_modes 是 train(),這裡也要切 eval — 它跟 q_target 共
+        # 享決策邏輯(double-Q argmax),target 分支要兩邊一致。算完 restore 訓練模式。
+        self.backbone.token_adapter.eval()
+        self.backbone.encoder.eval()
+        self.backbone.decoder.eval()
+        self.q_network.eval()
         with torch.no_grad():
             with torch.autocast(device_type=device.type, dtype=torch.float16,
                                 enabled=(USE_AMP and device.type == "cuda")):
                 _dbg("[train_step] before next backbone")
-                next_features  = self.backbone.get_features(next_state)
+                next_features  = self.backbone.get_features_from_cached(next_state)
                 _dbg_tensor("train_step.next_features", next_features)
                 _dbg("[train_step] after next backbone")
                 next_online    = self.q_network(next_features)
@@ -695,12 +725,15 @@ class VisualAgentV3(VisualAgentCommonMixin):
                 target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
                 _dbg_tensor("train_step.target_quantiles", target_quantiles)
         _dbg("[train_step] target branch done")
+        # Restore 訓練模式 — current branch 要 dropout/BN-stats 都進去
+        self._set_runtime_modes()
 
-        # ── current branch (gradients flow through decoder + FQF；YOLO+encoder 已凍結）──
+        # ── current branch (gradients flow through token_adapter + encoder + decoder + FQF；
+        #                    YOLO11n 已凍結，且其 forward 已在 store_transition 階段完成）──
         with torch.autocast(device_type=device.type, dtype=torch.float16,
                             enabled=(USE_AMP and device.type == "cuda")):
             _dbg("[train_step] before current backbone")
-            features  = self.backbone.get_features(state)
+            features  = self.backbone.get_features_from_cached(state)
             _dbg_tensor("train_step.features", features)
             _dbg("[train_step] after current backbone")
             q_output  = self.q_network(features)
@@ -1027,72 +1060,9 @@ class VisualAgentV3(VisualAgentCommonMixin):
             )
         self._load_persistent_training_state()
 
-    def _load_persistent_buffer(self, persistent_index) -> None:
-        VISUAL_V3_REPLAY_PATH.mkdir(parents=True, exist_ok=True)
-        for file_path in VISUAL_V3_REPLAY_PATH.glob("*.pt"):
-            file_path.unlink()
-
-        loaded_count = 0
-        self.replay_buffer.index = []
-        for entry in persistent_index[: self.replay_buffer.max_size]:
-            state_src_str = entry.get("state", entry.get("state_path"))
-            if state_src_str is None:
-                continue
-            state_src = Path(state_src_str)
-            if not state_src.exists():
-                continue
-
-            try:
-                peek = torch.load(str(state_src), map_location="cpu", weights_only=True)
-                if not torch.is_tensor(peek) or tuple(peek.shape) != (3, *IMAGE_SIZE):
-                    continue
-            except Exception:
-                continue
-
-            storage_id = loaded_count
-            state_dst = VISUAL_V3_REPLAY_PATH / f"state_{storage_id}.pt"
-            shutil.copy2(str(state_src), str(state_dst))
-
-            next_state_dst = None
-            next_src_str = entry.get("next_state", entry.get("next_state_path"))
-            if next_src_str:
-                next_src = Path(next_src_str)
-                if next_src.exists():
-                    next_state_dst = VISUAL_V3_REPLAY_PATH / f"next_state_{storage_id}.pt"
-                    shutil.copy2(str(next_src), str(next_state_dst))
-
-            runtime_entry = {
-                "storage_id": storage_id,
-                "state": str(state_dst),
-                "action": int(entry["action"]),
-                "next_state": str(next_state_dst) if next_state_dst else None,
-                "reward": float(entry["reward"]),
-                "tail_reward": float(entry.get("tail_reward", entry["reward"])),
-                "done": bool(entry["done"]),
-                "discount": float(entry.get("discount", 1.0)),
-                "n_steps": int(entry.get("n_steps", 1)),
-                "reward_type": self.replay_buffer._reward_type(
-                    float(entry.get("tail_reward", entry["reward"])),
-                    bool(entry["done"]),
-                ),
-                "priority": float(
-                    np.clip(
-                        entry.get("priority", abs(float(entry["reward"])) + 1.0),
-                        VISUAL_PRIORITY_MIN,
-                        VISUAL_PRIORITY_MAX,
-                    )
-                ),
-                "insert_order": loaded_count + 1,
-            }
-            if "reward_type" in entry:
-                runtime_entry["reward_type"] = entry["reward_type"]
-            self.replay_buffer.index.append(runtime_entry)
-            loaded_count += 1
-
-        self.replay_buffer.size_count = loaded_count
-        self.replay_buffer.next_storage_id = loaded_count
-        self.replay_buffer.insert_counter = loaded_count
-        print(f"[V3] Loaded {loaded_count} replay buffer entries")
+    # _load_persistent_buffer 來自 VisualAgentCommonMixin（見檔尾 rebinding）。
+    # Mixin 版本會用 self.replay_state_shape（v3 在 __init__ 設成 backbone_feature_shape）
+    # 來驗證 disk 上的 .pt 形狀,所以舊截圖檔(3, 640, 640) 會被自動跳過。
 
     # ──────────────────────────── lr warmup ────────────────────────────
 
