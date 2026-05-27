@@ -327,6 +327,76 @@ class VisualAgentCommonMixin:
             )
         print(f"{self.log_prefix} Loaded {loaded_count} replay buffer entries{suffix}")
 
+    def _purge_stale_replay_files(self) -> None:
+        """刪除 replay_path / replay_persistent_path 內 shape 與目前 replay_state_shape
+        不一致的 .pt 檔(以及讀檔失敗的損毀檔)。
+
+        呼叫時機:agent __init__ 內、try_load_model() 之前。用途是把上一版架構留下的
+        殘留資料砍乾淨,例如 v3 從 (3, 640, 640) 截圖切到 (128, h, w) cached features
+        那一次,舊 .pt 全部都會 shape mismatch。
+
+        若 replay_persistent_path 內有 .pt 被刪,順手把 training_state.pth 一起刪 —
+        它的 persistent_entries 內路徑已部分指向不存在的檔,留著只會讓
+        _load_persistent_training_state 印一堆 missing warning。
+        """
+        expected_shape = tuple(
+            getattr(self, "replay_state_shape", (3, *self.image_size))
+        )
+
+        def _purge_dir(dir_path: Path) -> int:
+            if not dir_path.exists():
+                return 0
+            deleted = 0
+            for pt_file in dir_path.glob("*.pt"):
+                keep = False
+                try:
+                    # weights_only=True 限制 pickle 反序列化能跑的 opcode,
+                    # 避免損毀/惡意檔案 RCE。
+                    peek = torch.load(
+                        str(pt_file), map_location="cpu", weights_only=True
+                    )
+                    if torch.is_tensor(peek) and tuple(peek.shape) == expected_shape:
+                        keep = True
+                except Exception:
+                    keep = False  # 讀失敗 → 損毀 → 也視為該刪
+                if not keep:
+                    try:
+                        pt_file.unlink()
+                        deleted += 1
+                    except Exception as exc:
+                        print(
+                            f"{self.log_prefix} Failed to unlink stale "
+                            f"{pt_file}: {exc}"
+                        )
+            return deleted
+
+        deleted_runtime = _purge_dir(self.replay_path)
+        deleted_persistent = _purge_dir(self.replay_persistent_path)
+
+        # Persistent .pt 被砍 → training_state.pth 的 entries 指向不存在的檔。
+        # 直接刪掉它,避免 _load_persistent_training_state 拿過時 metadata。
+        if deleted_persistent > 0:
+            ts_path = self._training_state_path()
+            if ts_path.exists():
+                try:
+                    ts_path.unlink()
+                    print(
+                        f"{self.log_prefix} Purged stale training_state.pth "
+                        f"(referenced deleted files)"
+                    )
+                except Exception as exc:
+                    print(
+                        f"{self.log_prefix} Failed to unlink stale "
+                        f"{ts_path}: {exc}"
+                    )
+
+        if deleted_runtime or deleted_persistent:
+            print(
+                f"{self.log_prefix} Purged stale replay buffer files "
+                f"(runtime={deleted_runtime}, persistent={deleted_persistent}) "
+                f"— expected shape {expected_shape}"
+            )
+
     def _module_grad_norm(self, module) -> float:
         grad_sq_sum = 0.0
         for param in module.parameters():

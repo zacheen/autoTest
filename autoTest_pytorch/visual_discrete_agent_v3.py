@@ -458,6 +458,11 @@ class VisualAgentV3(VisualAgentCommonMixin):
         print(f"[V3] TensorBoard: tensorboard --logdir {VISUAL_V3_TENSORBOARD_DIR}")
         print(f"[V3] Current run: {self.tensorboard_log_dir}")
 
+        # 砍掉上一版架構留下的 replay buffer .pt(shape mismatch 或損毀)。
+        # 一定要在 try_load_model() 之前跑,否則 _load_persistent_training_state
+        # 會嘗試載入指向已不存在/不匹配檔案的 entries,印一堆 missing warning。
+        # replay_state_shape 在上面 dummy forward 後已經設好。
+        self._purge_stale_replay_files()
         self.try_load_model()
         self._init_weight_reference = self._capture_trainable_weight_snapshot()
         self._rolling_weight_reference = self._capture_trainable_weight_snapshot()
