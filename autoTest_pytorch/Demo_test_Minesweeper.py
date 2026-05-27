@@ -6,10 +6,15 @@ import random
 import sys
 import time
 import traceback
-import pyautogui
-from pynput import keyboard
 
 from util.Log import Logger, print_to_output, report_error, format_for_db_time
+
+# AUTOTEST_NO_KEYBOARD=1 skips pynput on X-less environments (e.g., Colab) where
+# Listener crashes at startup. Without a listener, IS_PAUSED stays False and
+# check_pause() is a no-op, so the demo loses only the End-key pause shortcut.
+NO_KEYBOARD_LISTENER = bool(os.environ.get("AUTOTEST_NO_KEYBOARD"))
+if not NO_KEYBOARD_LISTENER:
+    from pynput import keyboard
 
 IS_PAUSED = False
 def on_press(key):
@@ -513,10 +518,11 @@ GAME_ENV = "Minesweeper_web"
 GAME_NAME = "Minesweeper_web"
 player_num = 1
 
-if __name__=="__main__" : 
-    # Start keyboard listener
-    listener = keyboard.Listener(on_press=on_press)
-    listener.start()
+if __name__=="__main__" :
+    # Start keyboard listener (skipped on X-less envs via AUTOTEST_NO_KEYBOARD)
+    if not NO_KEYBOARD_LISTENER:
+        listener = keyboard.Listener(on_press=on_press)
+        listener.start()
 
     round_count = 1
     from util.Info.Glo_var import Glo_var

@@ -32,14 +32,11 @@ import util.identify_for_import as identify_for_import
 import util.Data as Data
 
 from .Click import ClickPyautogui, get_ctrl
-from .Chrome_Driver import Chrome_Driver
+from .Chrome_Driver import Chrome_Driver, use_sel
 
 # ════════════════════════════════════════════════════════════════════
 # 1. Module constants / paths
 # ════════════════════════════════════════════════════════════════════
-
-# use_sel: 0 = pyautogui (screen coords) / 1 = selenium (page coords)
-use_sel = 1
 
 glo_var = None
 def set_glo_var(in_glo_var):

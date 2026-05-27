@@ -1,4 +1,10 @@
-import pyautogui
+# pyautogui imports xlib on Linux at module load and crashes without DISPLAY.
+# ClickPyautogui is only exercised in non-headless / non-Selenium paths,
+# so on Colab (X-less) we keep the symbol but stub it out.
+try:
+    import pyautogui
+except Exception:
+    pyautogui = None
 import time
 from io import BytesIO
 from PIL import Image
