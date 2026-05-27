@@ -182,7 +182,7 @@ GRID_H = 6
 GRID_W = 6
 NUM_ACTIONS = GRID_H * GRID_W
 VISUAL_BATCH_SIZE = 32
-MINIMUM_DATA_SIZE = 50 # below this amount, won't start training
+MINIMUM_DATA_SIZE = 2000 # below this amount, won't start training
 
 # ── Encoder dims（與 YOLOGridStatePredictor 共用 DEFAULT_ENCODER_DIMS）──
 # 形狀由 model_structure.yolo_encoder_base.DEFAULT_ENCODER_FINAL_DIM /
@@ -213,7 +213,7 @@ USE_AMP = False
 # 需要單獨調整時，呼叫 build_fqf_optimizer(...) 時傳入自訂 config 即可。
 # Linear LR warmup over the first N optimizer steps (transformer 早期穩定)
 # 從 base_lr * LR_WARMUP_START_FACTOR 線性增加到 base_lr
-LR_WARMUP_STEPS         = 50   # 第一次從頭訓練的 warmup 長度
+LR_WARMUP_STEPS         = 2000   # 第一次從頭訓練的 warmup 長度
 LR_WARMUP_START_FACTOR  = 0.0
 LR_RESUME_WARMUP_STEPS  = 2000   # 每次重啟（包含第一次）的額外 warmup 長度
 
