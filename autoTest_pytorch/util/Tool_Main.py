@@ -158,7 +158,7 @@ def cal_time_out(glo_var, limit, state_name=""):
 # real screen state a chance to appear. Tune the probability below.
 # Toggle on → run test → review images in new/ → move correct ones out to replace
 # originals → toggle off. See compare_sim() docstring.
-CALIBRATION_MODE = True
+CALIBRATION_MODE = False
 # Probability (per failing compare_sim call) of capture + force-pass. Lower = more
 # polls go through naturally, fewer false positives, but slower template refresh.
 CALIBRATION_CAPTURE_PROBABILITY = 0.05
