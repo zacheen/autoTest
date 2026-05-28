@@ -457,7 +457,9 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.n_step = VISUAL_N_STEP
         self.n_step_gamma = MINESWEEPER_REWARD_CONFIG.gamma
         self.n_step_buffer = deque()
-        self.recent_real_rewards = deque(maxlen=100)
+        # recent_real_rewards 搬到 TrainingHistory._step_rewards;mixin 的
+        # store_transition 會 call self.training_history.record_step_reward(reward),
+        # train_step 結尾用 self.training_history.avg_step_reward() 拿 rolling mean。
 
         # ── adaptive epsilon ──
         # 共用 controller,stage1 (TransformerDiscreteAgent) 也用同一個 class。
@@ -937,10 +939,9 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # ── logging ──
         with torch.no_grad():
             q_mean = q_taken.mean().item()
-            real_reward_mean = (
-                float(sum(self.recent_real_rewards) / len(self.recent_real_rewards))
-                if self.recent_real_rewards else 0.0
-            )
+            # raw reward rolling mean(來源:training_history._step_rewards,由
+            # mixin store_transition 維護;跟 stage1 共用同一個 method)。
+            real_reward_mean = self.training_history.avg_step_reward()
             q0 = q_2d[0].view(-1)
             top_vals, top_idx = torch.topk(q0, k=min(5, self.num_actions))
             top_actions = [
@@ -1043,20 +1044,42 @@ class VisualAgentV3(VisualAgentCommonMixin):
             print(f"[V3] Periodic save at episode {self.episode_count} | epsilon={self.epsilon:.4f}")
             self.save_persistent()
 
-    def log_episode_metrics(self, win: bool, invalid_click_rate: float, reward_mean: float) -> None:
+    def log_episode_metrics(
+        self,
+        win: bool,
+        invalid_click_rate: float,
+        reward_mean: float,
+    ) -> None:
         # 1) 先把結果記到 history,2) 從 history 取 rolling win rate,
         # 3) 用 win rate 餵 controller 更新 epsilon (log-interpolation)。
         # 注意:v3 沒有 total_reward / steps 可傳,只 wire invalid_rate;
         # avg_reward / reward_per_step 這邊會永遠為 0,需要的話 caller 再補。
+        # 點擊次數的「絕對量」(valid/invalid_clicks)不寫 TB — 比例
+        # `episode/invalid_click_rate` 已足夠,raw count 可以從 invalid_rate ×
+        # steps 反推,不需要兩條 derivable 曲線重複占版面。
         self.training_history.record(win=win, invalid_rate=invalid_click_rate)
         ep_idx = self.training_history.total_episodes
         rolling_wr = self.training_history.win_rate(window=100)
         next_eps = self.epsilon_controller.update(rolling_wr)
 
+        # 拿掉 `episode/win` — 0/1 binary 噪音大,看 `episode/win_rate_recent` 就好。
         self.tb_writer.add_scalar("episode/reward_mean",        float(reward_mean),        ep_idx)
-        self.tb_writer.add_scalar("episode/win",                float(bool(win)),          ep_idx)
-        self.tb_writer.add_scalar("episode/invalid_click_rate", float(invalid_click_rate),ep_idx)
+        self.tb_writer.add_scalar("episode/invalid_click_rate", float(invalid_click_rate), ep_idx)
         self.tb_writer.add_scalar("episode/win_rate_recent",    rolling_wr,                ep_idx)
+
+        # Replay buffer composition — agent.train_step 內也寫,但 buffer 沒滿
+        # MINIMUM_DATA_SIZE 前 train_step return None,那段時間 TB 空白。每個 episode
+        # 從這寫保證 fill curve 與 4 個 bucket 比例從 ep 1 開始就有。
+        for bucket_name, count in self.replay_buffer.bucket_sizes().items():
+            self.tb_writer.add_scalar(f"buffer/bucket_{bucket_name}", count, ep_idx)
+        self.tb_writer.add_scalar("buffer/total_size", self.replay_buffer.size(), ep_idx)
+
+        # Agent 內部 counter — total_it 看 train_step 跑了幾次;n_step_buffer_len 在
+        # episode 邊界預期 = 0(reset_episode 與 on_episode_end 都 flush),長期非 0
+        # 代表 flush 沒生效。
+        self.tb_writer.add_scalar("train/total_it",             self.total_it,             ep_idx)
+        self.tb_writer.add_scalar("train/n_step_buffer_len",    len(self.n_step_buffer),   ep_idx)
+
         self.tb_writer.flush()
 
         status = "WIN " if win else "LOSE"

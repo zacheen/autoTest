@@ -193,8 +193,9 @@ def run_episode(logic, agent, add_noise=True):
     episode_steps = 0
     done = False
     is_win = False
+    # 只計 invalid 一邊就夠了:total_clicks == episode_steps,valid 可由
+    # episode_steps - invalid_clicks 反推。raw count 不外傳,只有 invalid_rate 出去。
     invalid_clicks = 0
-    valid_clicks = 0
     train_info_list = []
 
     while not done and episode_steps < MAX_STEPS_PER_EPISODE:
@@ -205,9 +206,7 @@ def run_episode(logic, agent, add_noise=True):
         reward = compute_reward(result)
         episode_reward += reward
 
-        if result.changed:
-            valid_clicks += 1
-        else:
+        if not result.changed:
             invalid_clicks += 1
             agent.block_action_for_state(state, row * GRID_CONFIG.cols + col)
 
@@ -225,8 +224,7 @@ def run_episode(logic, agent, add_noise=True):
 
         episode_steps += 1
 
-    total_clicks = valid_clicks + invalid_clicks
-    invalid_rate = invalid_clicks / total_clicks if total_clicks > 0 else 0.0
+    invalid_rate = invalid_clicks / episode_steps if episode_steps > 0 else 0.0
 
     avg_q_loss = None
     avg_q_mean = None
@@ -239,8 +237,6 @@ def run_episode(logic, agent, add_noise=True):
         'steps': episode_steps,
         'is_win': is_win,
         'invalid_rate': invalid_rate,
-        'valid_clicks': valid_clicks,
-        'invalid_clicks': invalid_clicks,
         'Q_loss': avg_q_loss,
         'q_mean': avg_q_mean,
     }
@@ -348,7 +344,6 @@ def main():
     csv_logger = CSVLogger(csv_path)
     csv_fields = [
         'episode', 'reward', 'steps', 'is_win', 'invalid_rate',
-        'valid_clicks', 'invalid_clicks',
         'Q_loss', 'q_mean', 'epsilon',
         'eval_avg_reward', 'eval_win_rate', 'eval_avg_steps', 'eval_avg_invalid_rate',
         'timestamp',
@@ -398,6 +393,17 @@ def main():
                 writer.add_scalar('episode/Q_loss_avg', stats['Q_loss'], agent.episode_count)
                 writer.add_scalar('episode/q_mean_avg', stats['q_mean'], agent.episode_count)
 
+            # NOTE: 點擊次數比例由 log_episode_metrics 寫成 `episode/invalid_click_rate`;
+            # raw count(valid/invalid_clicks)不額外 log — 可以從 invalid_rate × steps 反推。
+            # NOTE: `buffer/bucket_*` / `buffer/total_size` 由 agent.train_step 內統一
+            # 寫,axis = total_it。主迴圈不重複寫(同 tag 不同 step 軸會把曲線變亂)。
+
+            # Agent 內部 counter — total_it 看實際 train_step 次數(跟 episode 數比可
+            # 看每場平均梯度步);n_step_buffer_len 預期 episode 邊界都被 flush 清空,
+            # 若長期非 0 代表 flush 沒生效。
+            writer.add_scalar('train/total_it', agent.total_it, agent.episode_count)
+            writer.add_scalar('train/n_step_buffer_len', len(agent.n_step_buffer), agent.episode_count)
+
             # CSV
             csv_row = {
                 'episode': episode,
@@ -405,8 +411,6 @@ def main():
                 'steps': stats['steps'],
                 'is_win': int(stats['is_win']),
                 'invalid_rate': f"{stats['invalid_rate']:.4f}",
-                'valid_clicks': stats['valid_clicks'],
-                'invalid_clicks': stats['invalid_clicks'],
                 'Q_loss': f"{stats['Q_loss']:.6f}" if stats['Q_loss'] is not None else '',
                 'q_mean': f"{stats['q_mean']:.4f}" if stats['q_mean'] is not None else '',
                 'epsilon': f"{agent.epsilon:.4f}",

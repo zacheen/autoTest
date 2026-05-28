@@ -200,7 +200,10 @@ class VisualAgentV2(VisualAgentCommonMixin):
         self.n_step = VISUAL_N_STEP
         self.n_step_gamma = MINESWEEPER_REWARD_CONFIG.gamma
         self.n_step_buffer = deque()
-        self.recent_real_rewards = deque(maxlen=100)
+        # recent_real_rewards 搬到 TrainingHistory._step_rewards;store_transition
+        # 內 call self.training_history.record_step_reward(reward),train_step 結尾
+        # 用 self.training_history.avg_step_reward() 拿 rolling mean。跟 v3 / stage1
+        # 共用同一個 method。
 
         # ── adaptive epsilon state (win-rate based) ──
         # v2 沿用較寬的 wr_max=0.9（與 v3 的 0.85 不同）— 透過 controller 參數注入。
@@ -371,7 +374,7 @@ class VisualAgentV2(VisualAgentCommonMixin):
         done: bool,
     ) -> None:
         """Store raw screenshots; buffer writes to disk automatically."""
-        self.recent_real_rewards.append(float(reward))
+        self.training_history.record_step_reward(float(reward))
         transition = {
             "state": state.detach().cpu(),
             "action": int(action),                   # single int action_id
@@ -526,10 +529,8 @@ class VisualAgentV2(VisualAgentCommonMixin):
         # ── logging ──
         with torch.no_grad():
             q_mean = q_taken.mean().item()
-            real_reward_mean = (
-                float(sum(self.recent_real_rewards) / len(self.recent_real_rewards))
-                if self.recent_real_rewards else 0.0
-            )
+            # raw reward rolling mean(來源:training_history._step_rewards)。
+            real_reward_mean = self.training_history.avg_step_reward()
             q0 = q_2d[0].view(-1)
             top_vals, top_idx = torch.topk(q0, k=min(5, self.num_actions))
             top_actions = [

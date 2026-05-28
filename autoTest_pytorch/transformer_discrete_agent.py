@@ -348,6 +348,10 @@ class TransformerDiscreteAgent:
         self.n_step = N_STEP
         self.n_step_gamma = MINESWEEPER_REWARD_CONFIG.gamma
         self.n_step_buffer = deque()
+        # raw reward rolling mean 搬到 TrainingHistory._step_rewards;store_transition
+        # 內 call self.training_history.record_step_reward(reward),train_step 結尾
+        # 用 self.training_history.avg_step_reward() 拿 mean。跟 v2 / v3 共用同一個
+        # method,避免兩邊各自貼一份相同的 sum()/len() 公式。
 
         # ── adaptive epsilon ──
         # 跟 v3 共用同一個 controller class,並用相同 wr / eps 範圍。Stage1 與
@@ -497,6 +501,9 @@ class TransformerDiscreteAgent:
         return (action_id // self.grid_w, action_id % self.grid_w)
 
     def store_transition(self, state, action, next_state, reward, done):
+        # 餵 train/real_reward_mean — raw reward(reward_squash 之前)的 rolling mean
+        # 走 TrainingHistory._step_rewards,跟 v2 / v3 共用同一個 record_step_reward。
+        self.training_history.record_step_reward(float(reward))
         transition = {
             "state": state.detach().cpu(),
             "action": np.array(action, dtype=np.int64),
@@ -1009,10 +1016,15 @@ class TransformerDiscreteAgent:
         )
         self._io_log.flush()
 
+        # raw reward rolling mean(來源:training_history._step_rewards,由
+        # store_transition 維護;跟 v2 / v3 共用同一個 method)。
+        real_reward_mean = self.training_history.avg_step_reward()
+
         # ── TensorBoard scalars ──
         step = self.total_it
         self.tb_writer.add_scalar("train/Q_loss", loss_value, step)
         self.tb_writer.add_scalar("train/q_mean", q_mean, step)
+        self.tb_writer.add_scalar("train/real_reward_mean", real_reward_mean, step)
         self.tb_writer.add_scalar("train/q_taken_std", q_taken_std, step)
         self.tb_writer.add_scalar("train/q_max", q_all_max, step)
         self.tb_writer.add_scalar("train/q_min", q_all_min, step)
@@ -1051,8 +1063,7 @@ class TransformerDiscreteAgent:
             self._write_backbone_weight_norm_snapshots(backbone_norm_snapshots, step)
 
         # Buffer composition — diagnoses replay drift over time.
-        bucket_counts = self.replay_buffer.bucket_sizes()
-        for bucket_name, count in bucket_counts.items():
+        for bucket_name, count in self.replay_buffer.bucket_sizes().items():
             self.tb_writer.add_scalar(f"buffer/bucket_{bucket_name}", count, step)
         self.tb_writer.add_scalar("buffer/total_size", self.replay_buffer.size(), step)
 

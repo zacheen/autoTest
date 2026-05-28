@@ -52,7 +52,11 @@ class VisualAgentCommonMixin:
         reward: float,
         done: bool,
     ) -> None:
-        self.recent_real_rewards.append(float(reward))
+        # raw reward 直接記到 training_history.step_rewards(per-transition rolling
+        # mean,給 train/real_reward_mean 用)。v2 / v3 都繼承這個 mixin,所以
+        # 兩邊同時切換到 history 版的 source of truth — agent 端不再各自維護
+        # recent_real_rewards deque。
+        self.training_history.record_step_reward(float(reward))
         transition = {
             "state": self._to_storage_state(state),
             "action": int(action),
