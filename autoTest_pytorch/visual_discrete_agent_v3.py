@@ -224,8 +224,15 @@ VISUAL_N_STEP = 1
 VISUAL_GRAD_CLIP_NORM = 10.0   # 與 TransformerDiscreteAgent 對齊；token_adapter + encoder 加入可訓練後仍維持 10.0
 TRAIN_EVERY_N_STEPS = 1
 TARGET_UPDATE_FREQ = 200
-SAVE_EVERY_N_EPISODES = 100
-VISUAL_HISTOGRAM_EVERY = 20
+SAVE_EVERY_N_EPISODES = 500
+# ── throttle 命名跟 stage1 對齊(同功能、同名)──────────────────────
+# DIAGNOSTIC_LOG_EVERY:io_log + .item() batch + ~22 條 TB scalar 的 gate。
+# HISTOGRAM_EVERY:per-layer weight_norm/* + grad_norm/* 的 gate。
+# WEIGHT_DISTANCE_LOG_EVERY:整模型 weight snapshot 距離。
+# 三個值跟 stage1 一致(10 / 200 / 100),改一邊另一邊也要同步,免得兩個
+# agent 在同樣的事上行為不一致。
+DIAGNOSTIC_LOG_EVERY = 10
+HISTOGRAM_EVERY = 200
 WEIGHT_DISTANCE_LOG_EVERY = 100
 USE_AMP = False
 
@@ -479,7 +486,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.blocked_actions: set[int] = set()
 
         # ── action-image logging (record full episode every N episodes) ──
-        self.action_log_every_n_episodes = 10
+        self.action_log_every_n_episodes = 50
         self._log_actions_this_episode = False
 
         # ── Session / hour archive 目錄 ──────────────────────────────
@@ -887,8 +894,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
             target_mean = target_quantiles.mean(dim=1, keepdim=True)
             td_error = (q_taken.detach().float() - target_mean.detach().float()).abs()
-            fpn_norm_entropy = (entropy.mean() / math.log(NUM_FQF_FRACTIONS)).item()
-            fpn_tau_std = tau_hats.std(dim=1).mean().item()
+            # fpn 兩條維持 tensor;.item() 延後到 DIAGNOSTIC gate 內跟其他 scalar
+            # 一起 batch,省掉每步 2 個 GPU→CPU sync。
+            fpn_norm_entropy_t = entropy.mean() / math.log(NUM_FQF_FRACTIONS)
+            fpn_tau_std_t = tau_hats.std(dim=1).mean()
 
         _dbg_tensor("train_step.loss", loss)
         _dbg_tensor("train_step.td_error", td_error)
@@ -910,7 +919,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
         # ── per-layer grad/weight norms must be logged BEFORE clip_grad_norm_，
         # 否則 grad 會被 in-place 縮過,看不出哪一層真的爆掉。
-        if self.total_it % VISUAL_HISTOGRAM_EVERY == 0:
+        if self.total_it % HISTOGRAM_EVERY == 0:
             self._log_backbone_weight_norms(self.total_it)
 
         params_to_clip = (
@@ -962,12 +971,42 @@ class VisualAgentV3(VisualAgentCommonMixin):
             self._rolling_weight_reference = current_snapshot
             self._rolling_weight_reference_step = self.total_it
 
-        # ── logging ──
+        # ── Diagnostic / logging — only every DIAGNOSTIC_LOG_EVERY steps ──
+        # 跟 stage1 的 throttle 策略一致:把 io_log / TB scalar / no_grad stats
+        # 區塊降頻,其他 step 直接 return None。
+        # 省下的 sync 包含:loss / q_taken.mean / td_error.mean / td_error.max /
+        # target_quantiles.float().mean / fpn_norm_entropy / fpn_tau_std,7 個
+        # `.item()` 合成一次 `.cpu().tolist()`。
+        # 其他 gate(TARGET_UPDATE_FREQ / WEIGHT_DISTANCE_LOG_EVERY / HISTOGRAM_EVERY)
+        # 本來就獨立 throttle,DIAGNOSTIC_LOG_EVERY=10 是其他 gate 的因數
+        # (HISTOGRAM=200, WEIGHT_DISTANCE=100, TARGET=200),所以每次他們 fire 都
+        # 一定也是 DIAGNOSTIC step,TB 寫入順序仍正確。
+        if self.total_it % DIAGNOSTIC_LOG_EVERY != 0:
+            return None
+
+        # Batched stats: 一次 .cpu().tolist() 從 7 個 sync 變成 1 個。順序要跟下面
+        # unpack 對齊。frac_clipped 已是 Python float(來自 _quantile_huber_loss
+        # return_stats=True 內部 .item()),跟 stage1 一致不重新 batch。
         with torch.no_grad():
-            q_mean = q_taken.mean().item()
+            _stats = torch.stack([
+                loss,
+                q_taken.mean(),
+                td_error.mean(),
+                td_error.max(),
+                target_quantiles.float().mean(),
+                fpn_norm_entropy_t,
+                fpn_tau_std_t,
+            ]).cpu().tolist()
+            (
+                loss_value, q_mean, td_error_mean, td_error_max,
+                target_q_mean, fpn_norm_entropy, fpn_tau_std,
+            ) = _stats
+
             # raw reward rolling mean(來源:training_history._step_rewards,由
-            # mixin store_transition 維護;跟 stage1 共用同一個 method)。
+            # mixin store_transition 維護;Python-side deque,不走 GPU sync)。
             real_reward_mean = self.training_history.avg_step_reward()
+
+            # top-5 actions（torch.topk → tolist 是 sync,但很小,留著)
             q0 = q_2d[0].view(-1)
             top_vals, top_idx = torch.topk(q0, k=min(5, self.num_actions))
             top_actions = [
@@ -987,8 +1026,8 @@ class VisualAgentV3(VisualAgentCommonMixin):
             f"[Step {self.total_it}] {datetime.datetime.now().strftime('%H:%M:%S')}\n"
             f"  real_reward_mean={real_reward_mean:.4f}\n"
             f"  q_top5={top_actions}\n"
-            f"  Q_loss={loss.item():.6f} | q_mean={q_mean:.6f} | epsilon={self.epsilon:.4f}\n"
-            f"  td_error_mean={td_error.mean().item():.6f} | frac_clipped={frac_clipped:.3f}\n"
+            f"  Q_loss={loss_value:.6f} | q_mean={q_mean:.6f} | epsilon={self.epsilon:.4f}\n"
+            f"  td_error_mean={td_error_mean:.6f} | frac_clipped={frac_clipped:.3f}\n"
             f"  fpn_norm_entropy={fpn_norm_entropy:.4f} | fpn_tau_std={fpn_tau_std:.4f}\n"
             f"  grad_total_pre={grad_norm_total_value:.6f} | grad_total_post={grad_post_total:.6f} | "
             f"clip_scale={grad_clip_scale:.6f} clip_percent={grad_clip_percent:.2%}\n"
@@ -1003,16 +1042,16 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # 表示「只進 TB,不入 CSV row」。logger 收到後 call SummaryWriter.add_scalar,
         # 等同直接寫,但介面跟 episode summary 統一。
         step = self.total_it
-        self.training_logger.log("train/Q_loss",            loss.item(),                                   step=step, csv=False)
+        self.training_logger.log("train/Q_loss",            loss_value,                                    step=step, csv=False)
         self.training_logger.log("train/q_mean",            q_mean,                                        step=step, csv=False)
         self.training_logger.log("train/real_reward_mean",  real_reward_mean,                              step=step, csv=False)
         self.training_logger.log("train/epsilon",           self.epsilon,                                  step=step, csv=False)
         self.training_logger.log("train/frac_huber_clipped", frac_clipped,                                 step=step, csv=False)
         self.training_logger.log("fpn/norm_entropy",        fpn_norm_entropy,                              step=step, csv=False)
         self.training_logger.log("fpn/tau_std",             fpn_tau_std,                                   step=step, csv=False)
-        self.training_logger.log("train/td_error_mean",     td_error.mean().item(),                        step=step, csv=False)
-        self.training_logger.log("train/td_error_max",      td_error.max().item(),                         step=step, csv=False)
-        self.training_logger.log("train/target_q_mean",     target_quantiles.float().mean().item(),        step=step, csv=False)
+        self.training_logger.log("train/td_error_mean",     td_error_mean,                                 step=step, csv=False)
+        self.training_logger.log("train/td_error_max",      td_error_max,                                  step=step, csv=False)
+        self.training_logger.log("train/target_q_mean",     target_q_mean,                                 step=step, csv=False)
         self.training_logger.log("grad/total_norm",         grad_norm_total_value,                         step=step, csv=False)
         self.training_logger.log("grad/post_total_norm",    grad_post_total,                               step=step, csv=False)
         self.training_logger.log("grad/clip_threshold",     grad_clip_threshold,                           step=step, csv=False)
@@ -1042,7 +1081,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.training_logger.flush()
         _dbg(f"[train_step] EXIT total_it={self.total_it}")
         _dbg_mem("train_step EXIT")
-        return {"Q_loss": loss.item(), "q_mean": q_mean}
+        # 用 batched scalar(loss_value)而不是 loss.item() — 上面已經 sync 過,
+        # 不要再多一次。Demo_test_Minesweeper 端 `if loss_info:` 判 None,所以
+        # throttle 跳過時(return None)caller 自動 silent skip。
+        return {"Q_loss": loss_value, "q_mean": q_mean}
 
     def maybe_train_step(self, force: bool = False):
         self.pending_train_steps += 1
