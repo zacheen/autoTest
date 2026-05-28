@@ -31,6 +31,7 @@ import datetime
 import hashlib
 import math
 import random
+import sys
 from collections import deque
 from pathlib import Path
 
@@ -54,6 +55,13 @@ from model_structure.yolo_encoder_base import (
     DEFAULT_ENCODER_FF_MULT,
 )
 from model_structure.optimizer_factory import build_fqf_optimizer, FQFOptimizerConfig
+from model_structure.hyperparameter_dump import dump_hyperparameters
+from model_structure.rng_utils import seed_everything
+from model_structure.archive_manager import (
+    SessionArchiveManager,
+    RolloverTextLog,
+    swap_logger_file_handler,
+)
 from model_structure.adaptive_epsilon import AdaptiveEpsilonController
 from model_structure.history import TrainingHistory
 
@@ -74,6 +82,13 @@ if device.type == "cuda":
             torch.backends.cuda.enable_math_sdp(True)
     except Exception as exc:
         print(f"[V3] Failed to configure CUDA SDP backends: {exc}")
+
+# ── reproducibility ──────────────────────────────────────────────────
+# 模組 import 時生一個 32-bit seed 並 apply 到 random / numpy / torch / cuda。
+# 同 stage1,SEED 是 module-level ALL_CAPS int,會被 hyperparameter_dump 寫進
+# hyperparameters.txt,並在 agent.__init__ 印到 console 方便對照。
+# 想重現特定 run:把下面這行改成 `SEED: int = seed_everything(<數字>)`。
+SEED: int = seed_everything()
 
 # ── debug logger (寫到檔案，CMD 刷掉也能看) ──────────────────────────
 import logging as _logging
@@ -464,15 +479,59 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.action_log_every_n_episodes = 10
         self._log_actions_this_episode = False
 
-        # ── text log + TensorBoard ──
-        VISUAL_V3_TENSORBOARD_DIR.mkdir(parents=True, exist_ok=True)
-        self._io_log = open(VISUAL_V3_MODEL_PATH / "train_io_log.txt", "a", encoding="utf-8")
-        self._io_log.write(f"\n{'=' * 60}\n")
-        self._io_log.write(f"Session started: {datetime.datetime.now().isoformat()}\n")
-        self._io_log.write(f"Encoder dims: {ENCODER_DIMS}\n")
-        self._io_log.write(f"{'=' * 60}\n")
-        self._io_log.flush()
+        # ── Session / hour archive 目錄 ──────────────────────────────
+        # 每次啟動一個 training_<ts>/,每滿 1 hour 一個 hour_NN_<ts>/。
+        # canonical *.pth 仍寫在 VISUAL_V3_MODEL_PATH 頂層(try_load_model 直接讀);
+        # 當下時段的 io_log / cuda_debug.log 都導到 current_archive_dir。
+        # 目錄管理本體在 model_structure.archive_manager.SessionArchiveManager,
+        # 跟 stage1 共用。
+        self.archive = SessionArchiveManager(
+            model_path=VISUAL_V3_MODEL_PATH,
+            log_prefix="[V3]",
+        )
+        # SEED 是 module-level constant(由 seed_everything 產生);印出來方便事後
+        # 對照 hyperparameters.txt 與 console 訊息。
+        print(f"[V3] SEED = {SEED}")
 
+        # ── Hyperparameters dump(含 git commit + dirty flag) ─────────
+        # 把 module 內 ALL_CAPS 常數、reward_config dataclass、controller / optimizer
+        # 的關鍵欄位寫成單一 hyperparameters.txt,session 開始時 dump 一次。
+        try:
+            dump_hyperparameters(
+                out_path=self.archive.session_dir / "hyperparameters.txt",
+                modules=[sys.modules[__name__]],
+                dataclass_instances={"reward_config": MINESWEEPER_REWARD_CONFIG},
+                instance_attrs={
+                    "epsilon_controller": (
+                        self.epsilon_controller,
+                        ["wr_min", "wr_max", "eps_min", "eps_max"],
+                    ),
+                    "optimizer (AdamW)": self.optimizer,
+                },
+            )
+        except Exception as exc:
+            print(f"[V3] hyperparameters dump failed: {exc}")
+
+        # ── text log + TensorBoard ──
+        # io_log:plain-text append + 每小時 swap 到新 hour 資料夾。Banner 由
+        # _build_io_log_banner 產生。
+        VISUAL_V3_TENSORBOARD_DIR.mkdir(parents=True, exist_ok=True)
+        self._io_log = RolloverTextLog(banner_factory=self._build_io_log_banner)
+        self._io_log.swap_to(self.archive.current_archive_dir / "train_io_log.txt")
+
+        # cuda_debug.log 也跟著 archive dir 走(module-level handler 預設指向頂層,
+        # 這裡 swap 成 current_archive_dir 的版本)。CategorizedReplayBuffer 共用
+        # 同一個檔案路徑,在這裡同步更新。
+        dbg_path = self.archive.current_archive_dir / "cuda_debug.log"
+        swap_logger_file_handler(_dbg_logger, dbg_path)
+        _crb_module.DEBUG_CUDA_SAMPLE_LOG_PATH = dbg_path
+
+        # 註冊 hour rollover callback:io_log + dbg logger 翻檔。Console print 由
+        # SessionArchiveManager 在翻頁時負責。
+        self.archive.register_on_rollover(self._on_archive_rollover)
+
+        # TensorBoard log_dir 仍走頂層 VISUAL_V3_TENSORBOARD_DIR/<ts>,跟 archive
+        # dir 解耦 — 這樣同一個 TB 實例可以瀏覽歷史 run。
         tb_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.tensorboard_log_dir = VISUAL_V3_TENSORBOARD_DIR / tb_timestamp
         self.tb_writer = SummaryWriter(log_dir=str(self.tensorboard_log_dir))
@@ -689,6 +748,9 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.total_it += 1
         self.steps_since_resume += 1
         self._apply_lr_warmup()
+        # Wall-clock 滿 1 小時翻頁;io_log / cuda_debug.log 都會自動跟著新的 archive
+        # dir(註冊在 SessionArchiveManager 的 on_rollover callback 處理)。
+        self.archive.maybe_rollover()
         _dbg(f"[train_step] ENTER total_it={self.total_it} buf_size={buf_size}")
         _dbg_mem("train_step ENTER")
         _dbg("[train_step] before replay_buffer.sample")
@@ -1009,10 +1071,25 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
     def _save_model(self) -> None:
         VISUAL_V3_MODEL_PATH.mkdir(parents=True, exist_ok=True)
-        torch.save(self.backbone.state_dict(),  VISUAL_V3_MODEL_PATH / "backbone.pth")
-        torch.save(self.q_network.state_dict(), VISUAL_V3_MODEL_PATH / "fqf_network.pth")
-        torch.save(self.q_target.state_dict(),  VISUAL_V3_MODEL_PATH / "fqf_target.pth")
+        backbone_sd = self.backbone.state_dict()
+        qnet_sd     = self.q_network.state_dict()
+        qtarget_sd  = self.q_target.state_dict()
+        torch.save(backbone_sd, VISUAL_V3_MODEL_PATH / "backbone.pth")
+        torch.save(qnet_sd,     VISUAL_V3_MODEL_PATH / "fqf_network.pth")
+        torch.save(qtarget_sd,  VISUAL_V3_MODEL_PATH / "fqf_target.pth")
         self._save_optimizer_state()
+
+        # 同一份也寫到當下 hour 資料夾,做歷史快照(同一小時內多次 save 會 overwrite,
+        # 留下「該小時最後一次 save」的狀態 — 滿足「保留每次的訓練結果」)。
+        # Archive 失敗不擋 canonical save 的成功。跟 stage1 的 _save_model 同步驟。
+        try:
+            archive = self.archive.current_archive_dir
+            archive.mkdir(parents=True, exist_ok=True)
+            torch.save(backbone_sd, archive / "backbone.pth")
+            torch.save(qnet_sd,     archive / "fqf_network.pth")
+            torch.save(qtarget_sd,  archive / "fqf_target.pth")
+        except Exception as exc:
+            print(f"[V3] WARN: archive snapshot write failed: {exc}")
 
     def _log_checkpoint_message(self, message: str, *, warning: bool = False) -> None:
         prefix = "[V3 CHECKPOINT]"
@@ -1201,6 +1278,38 @@ class VisualAgentV3(VisualAgentCommonMixin):
             self._log_param_weight_and_grad_norm(f"{prefix}/cross_attn_out_proj", layer.multihead_attn.out_proj.weight, global_step)
             self._log_param_weight_and_grad_norm(f"{prefix}/ffn_linear1", layer.linear1.weight, global_step)
             self._log_param_weight_and_grad_norm(f"{prefix}/ffn_linear2", layer.linear2.weight, global_step)
+
+    # ──────────────────────────── archive / hour rollover ─────────────
+    # 目錄管理本體在 SessionArchiveManager(跟 stage1 共用同一個 class)。
+    # current_archive_dir 對外是 read-only @property delegate,讓外部呼叫端
+    # 沿用簡短名稱;_build_io_log_banner / _on_archive_rollover 是 manager 的
+    # 兩個 callback hook。
+
+    @property
+    def current_archive_dir(self) -> Path:
+        return self.archive.current_archive_dir
+
+    def _build_io_log_banner(self, path: Path) -> list[str]:
+        """RolloverTextLog banner:寫 session/hour 起始時間 + encoder dims + 檔案路徑。"""
+        return [
+            f"Session started: {self.archive.session_start.isoformat()}",
+            f"Hour {self.archive.hour_index:02d} started: {datetime.datetime.now().isoformat()}",
+            f"Encoder dims: {ENCODER_DIMS}",
+            f"Path: {path}",
+        ]
+
+    def _on_archive_rollover(self, new_dir: Path) -> None:
+        """SessionArchiveManager rollover callback:翻頁時 swap io_log + dbg logger。"""
+        now = datetime.datetime.now()
+        try:
+            self._io_log.write(f"\n--- hour rollover at {now.isoformat()} ---\n")
+            self._io_log.flush()
+        except Exception:
+            pass
+        self._io_log.swap_to(new_dir / "train_io_log.txt")
+        dbg_path = new_dir / "cuda_debug.log"
+        swap_logger_file_handler(_dbg_logger, dbg_path)
+        _crb_module.DEBUG_CUDA_SAMPLE_LOG_PATH = dbg_path
 
     # ──────────────────────────── cleanup ──────────────────────────────
 

@@ -3,7 +3,6 @@ import datetime
 import logging as _logging
 import math
 import random
-import secrets
 import sys
 from collections import defaultdict, deque
 from pathlib import Path
@@ -20,6 +19,12 @@ from model_structure.optimizer_factory import build_fqf_optimizer
 from model_structure.adaptive_epsilon import AdaptiveEpsilonController
 from model_structure.history import TrainingHistory
 from model_structure.hyperparameter_dump import dump_hyperparameters
+from model_structure.rng_utils import seed_everything
+from model_structure.archive_manager import (
+    SessionArchiveManager,
+    RolloverTextLog,
+    swap_logger_file_handler,
+)
 import model_structure.CategorizedReplayBuffer as _crb_module
 
 
@@ -28,16 +33,12 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # ── reproducibility ──────────────────────────────────────────────────
 # 模組 import 時生一個 32-bit seed,並 apply 到 random / numpy / torch / cuda。
 # 實際使用的 SEED 會被 hyperparameter_dump 自動寫進 hyperparameters.txt
-# (因為是 module-level ALL_CAPS int,符合 _dump_module 的篩選條件)。
-# 想重現特定 run:把這行改成 `SEED: int = <hyperparameters.txt 裡的數字>`,
+# (因為是 module-level ALL_CAPS int,符合 _dump_module 的篩選條件),
+# agent.__init__ 也會印到 console,方便事後對照。
+# 想重現特定 run:把下面這行改成 `SEED: int = seed_everything(<數字>)`,
 # 並從零開始訓練 — _save_model 會把 RNG state 存進 optimizer_state.pth,
 # resume 後 RNG trajectory 從 checkpoint 還原,SEED 只決定首次啟動的初始狀態。
-SEED: int = secrets.randbits(32)
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
+SEED: int = seed_everything()
 
 BATCH_SIZE = 128
 GRID_STATE_CHANNELS = 12
@@ -372,20 +373,19 @@ class TransformerDiscreteAgent:
         # Session / hour archive 目錄 ── 每次啟動一個 training_<ts>,每滿 1 hour 一個 hour_NN_<ts>。
         # canonical *.pth 仍寫在 TRANSFORMER_MODEL_PATH 頂層(try_load_model 直接讀),
         # 同時把同一份快照寫到 current_archive_dir,把當下時段的 logs 也都導到那邊去。
-        self._session_start = datetime.datetime.now()
-        self._session_timestamp = self._session_start.strftime("%Y%m%d_%H%M%S")
-        self.session_dir = TRANSFORMER_MODEL_PATH / f"training_{self._session_timestamp}"
-        self.session_dir.mkdir(parents=True, exist_ok=True)
-        self._hour_index = 0
-        self._hour_start = self._session_start
-        self.current_archive_dir = self._make_hour_dir(self._hour_index, self._session_start)
-        self.current_archive_dir.mkdir(parents=True, exist_ok=True)
-        print(f"[FQF] Session archive: {self.session_dir}")
-        print(f"[FQF] Current hour:    {self.current_archive_dir}")
+        # 目錄管理本身搬到 model_structure.archive_manager.SessionArchiveManager;
+        # 這裡只是組裝。
+        self.archive = SessionArchiveManager(
+            model_path=TRANSFORMER_MODEL_PATH,
+            log_prefix="[FQF]",
+        )
+        # SEED 是 module-level constant(由 seed_everything 產生);印出來方便事後
+        # 對照 hyperparameters.txt 與 console 訊息。
+        print(f"[FQF] SEED = {SEED}")
 
         try:
             dump_hyperparameters(
-                out_path=self.session_dir / "hyperparameters.txt",
+                out_path=self.archive.session_dir / "hyperparameters.txt",
                 modules=[sys.modules[__name__]],
                 dataclass_instances={"reward_config": MINESWEEPER_REWARD_CONFIG},
                 instance_attrs={
@@ -399,16 +399,21 @@ class TransformerDiscreteAgent:
         except Exception as exc:
             print(f"[FQF] hyperparameters dump failed: {exc}")
 
-        self._io_log = open(self.current_archive_dir / "train_io_log.txt", "a", encoding="utf-8")
-        self._io_log.write(f"\n{'=' * 60}\n")
-        self._io_log.write(f"Session started: {self._session_start.isoformat()}\n")
-        self._io_log.write(f"Hour 00 started: {self._session_start.isoformat()}\n")
-        self._io_log.write(f"{'=' * 60}\n")
-        self._io_log.flush()
+        # io_log:plain-text append + 每小時 swap 到新 hour 資料夾。Banner 由
+        # _build_io_log_banner 產生(寫 session/hour 起始時間 + 檔案路徑)。
+        self._io_log = RolloverTextLog(banner_factory=self._build_io_log_banner)
+        self._io_log.swap_to(self.archive.current_archive_dir / "train_io_log.txt")
 
         # cuda_debug.log 也跟著 archive dir 走(module-level handler 預設指向 top-level,
-        # 在這裡 swap 成 current_archive_dir 的版本)
-        self._update_dbg_logger_path(self.current_archive_dir / "cuda_debug.log")
+        # 在這裡 swap 成 current_archive_dir 的版本)。CategorizedReplayBuffer 共用
+        # 同一個檔案路徑,在這裡同步更新。
+        dbg_path = self.archive.current_archive_dir / "cuda_debug.log"
+        swap_logger_file_handler(_dbg_logger, dbg_path)
+        _crb_module.DEBUG_CUDA_SAMPLE_LOG_PATH = dbg_path
+
+        # 註冊 hour rollover callback:io_log + dbg logger + ReplayBuffer cuda log
+        # 全部跟著翻檔。本身的 console print 由 SessionArchiveManager 在翻頁時印。
+        self.archive.register_on_rollover(self._on_archive_rollover)
 
         # TensorBoard — own log_dir keyed by session timestamp, so the
         # training script (train_stage1_simple.py) can reuse it instead of
@@ -576,7 +581,8 @@ class TransformerDiscreteAgent:
         self.steps_since_resume += 1
         self._apply_lr_warmup()
         # Wall-clock 滿 1 小時翻頁;io_log / vclamp / save 都會自動跟著新的 archive dir
-        self._maybe_rollover_archive_dir()
+        # (註冊在 SessionArchiveManager 的 on_rollover callback 處理)
+        self.archive.maybe_rollover()
 
         try:
             _dbg(f"[train_step] ENTER total_it={self.total_it} buf_size={buf_size}")
@@ -1257,68 +1263,45 @@ class TransformerDiscreteAgent:
             pass
 
     # ──────────────────────────── archive directory / hour rollover ──────
+    # 目錄管理本體(session_dir / hour_index / current_archive_dir + 翻頁)在
+    # model_structure.archive_manager.SessionArchiveManager。這裡只剩 agent 自己
+    # 的耦合點:io_log banner 內容、翻頁時要 swap 哪些檔。
+    #
+    # current_archive_dir 對外是 read-only @property delegate,讓既有的呼叫端
+    # (例如 train_stage1_simple.py 的 `agent.current_archive_dir`)不用改。
 
-    def _make_hour_dir(self, idx, start_dt):
-        """組 hour 資料夾路徑:training_<session>/hour_NN_<hour_start_ts>/"""
-        ts = start_dt.strftime("%Y%m%d_%H%M%S")
-        return self.session_dir / f"hour_{idx:02d}_{ts}"
+    @property
+    def current_archive_dir(self) -> Path:
+        return self.archive.current_archive_dir
 
-    def _update_dbg_logger_path(self, new_path):
-        """把 _dbg_logger 跟 ReplayBuffer 的 cuda_debug.log 路徑都重指到 new_path。
+    def _build_io_log_banner(self, path: Path) -> list[str]:
+        """RolloverTextLog banner:寫 session/hour 起始時間 + 檔案路徑。"""
+        return [
+            f"Session started: {self.archive.session_start.isoformat()}",
+            f"Hour {self.archive.hour_index:02d} started: {datetime.datetime.now().isoformat()}",
+            f"Path: {path}",
+        ]
 
-        Module-level handler 是在 import 時建好的(指向 top-level),agent 起來之後
-        要重指到 archive dir。每次 hour rollover 也要再重指一次。delay=True 讓檔案
-        只在真的有 emit 時才開出來,避免每個 hour 資料夾留一個空 cuda_debug.log。
-        """
-        # 關掉現有所有 FileHandler 再 remove(避免 leak)
-        for h in list(_dbg_logger.handlers):
-            if isinstance(h, _logging.FileHandler):
-                try:
-                    h.flush()
-                    h.close()
-                except Exception:
-                    pass
-                _dbg_logger.removeHandler(h)
-        new_handler = _logging.FileHandler(new_path, mode="a", encoding="utf-8", delay=True)
-        new_handler.setFormatter(_logging.Formatter("%(asctime)s %(message)s"))
-        _dbg_logger.addHandler(new_handler)
-        # CategorizedReplayBuffer 也共用同一份路徑
-        _crb_module.DEBUG_CUDA_SAMPLE_LOG_PATH = new_path
+    def _on_archive_rollover(self, new_dir: Path) -> None:
+        """SessionArchiveManager rollover callback:翻頁時 swap io_log + dbg logger。
 
-    def _maybe_rollover_archive_dir(self):
-        """Wall-clock 滿 1 小時就翻到下一個 hour 資料夾。
-
-        - 關掉目前的 io_log handle,在新 hour 資料夾重新開檔
+        - io_log 先 inline 寫一行 rollover footer 再 swap;這樣舊檔尾巴有 marker,
+          新檔開頭有 RolloverTextLog 自己寫的 banner。
         - vclamp_events.log / training_log.csv 是 lazy-open(每次寫才開),
-          會自動跟著新的 current_archive_dir,不用在這裡顯式處理
-        - canonical *.pth 檔不動;_save_model 下次被叫到時自然會把 archive copy
-          寫到新的 hour 資料夾
+          會自動跟著 self.archive.current_archive_dir,不用在這裡顯式處理。
+        - canonical *.pth 不動;_save_model 下次被叫到時自然把 archive snapshot
+          寫到新的 hour 資料夾。
         """
         now = datetime.datetime.now()
-        if (now - self._hour_start).total_seconds() < 3600:
-            return False
-
-        # close current io_log
         try:
             self._io_log.write(f"\n--- hour rollover at {now.isoformat()} ---\n")
-            self._io_log.close()
+            self._io_log.flush()
         except Exception:
             pass
-
-        self._hour_index += 1
-        self._hour_start = now
-        self.current_archive_dir = self._make_hour_dir(self._hour_index, now)
-        self.current_archive_dir.mkdir(parents=True, exist_ok=True)
-        # reopen io_log
-        self._io_log = open(self.current_archive_dir / "train_io_log.txt", "a", encoding="utf-8")
-        self._io_log.write(f"\n{'=' * 60}\n")
-        self._io_log.write(f"Hour {self._hour_index:02d} started: {now.isoformat()}\n")
-        self._io_log.write(f"{'=' * 60}\n")
-        self._io_log.flush()
-        # cuda_debug.log 也跟著翻頁(delay=True 所以沒 emit 就不會建檔)
-        self._update_dbg_logger_path(self.current_archive_dir / "cuda_debug.log")
-        print(f"[FQF] Hour rollover -> {self.current_archive_dir}")
-        return True
+        self._io_log.swap_to(new_dir / "train_io_log.txt")
+        dbg_path = new_dir / "cuda_debug.log"
+        swap_logger_file_handler(_dbg_logger, dbg_path)
+        _crb_module.DEBUG_CUDA_SAMPLE_LOG_PATH = dbg_path
 
     # ──────────────────────────── diagnostics helpers (cont.) ─────────────
 
@@ -1633,43 +1616,18 @@ class TransformerDiscreteAgent:
         print(f"[FQF] Reward bucket distribution: {dict(saved_buckets)}")
         print("--- save end ---------------")
 
-    def _find_latest_archive_path(self, filename):
-        """掃 TRANSFORMER_MODEL_PATH/training_*/hour_*_<ts>/<filename>,回傳時間最新那份。
-
-        排序鍵是 hour 資料夾名稱裡的 timestamp(我們 save 時嵌進去的,代表 hour 起始時間),
-        不靠 mtime — 後者會被 git checkout / cp 動到,不可靠。
-
-        找不到回傳 None。
-        """
-        candidates = []
-        for session_dir in TRANSFORMER_MODEL_PATH.glob("training_*"):
-            if not session_dir.is_dir():
-                continue
-            for hour_dir in session_dir.glob("hour_*"):
-                if not hour_dir.is_dir():
-                    continue
-                # name 格式:hour_NN_YYYYMMDD_HHMMSS,timestamp 從第 3 段開始
-                parts = hour_dir.name.split("_", 2)
-                if len(parts) < 3:
-                    continue
-                ts_str = parts[2]  # "YYYYMMDD_HHMMSS",字典序 = 時間序
-                path = hour_dir / filename
-                if path.exists():
-                    candidates.append((ts_str, path))
-        if not candidates:
-            return None
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        return candidates[0][1]
-
     def _resolve_load_path(self, canonical_path):
         """Load path 決策:canonical 存在就用它;不存在就 fallback 到最新 archive。
 
         Corrupt(NaN/Inf)的 canonical 不算「不存在」,會在 _raise_if_corrupt 那層攔下,
         不會 silent 走 archive — 因為 corrupt 通常代表你需要主動處理(sanitize / rollback)。
+
+        Archive 掃描邏輯在 SessionArchiveManager.find_latest_archive;這裡只負責
+        canonical 與 archive 之間的優先序與 console message。
         """
         if canonical_path.exists():
             return canonical_path
-        archive_path = self._find_latest_archive_path(canonical_path.name)
+        archive_path = self.archive.find_latest_archive(canonical_path.name)
         if archive_path is not None:
             print(
                 f"[FQF] canonical {canonical_path.name} missing, "
