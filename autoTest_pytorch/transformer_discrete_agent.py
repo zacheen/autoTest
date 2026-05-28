@@ -278,7 +278,23 @@ class TransformerActorNetwork(nn.Module):
             elif key.startswith("decoder."):
                 normalized[f"core.decoder.{key[len('decoder.') :]}"] = value
 
-        return self.load_state_dict(normalized, strict=strict)
+        # Backward-compat: pre-HierarchicalEncoder Stage 1 checkpoints saved encoder
+        # weights as `core.transformer.layers.{i}.X` (raw nn.TransformerEncoderLayer).
+        # The new structure wraps each layer in HierarchicalEncoderLayer.attn, so the
+        # expected key is `core.transformer.layers.{i}.attn.X`. Migrate transparently
+        # so existing on-disk checkpoints keep loading.
+        migrated = {}
+        for key, value in normalized.items():
+            if key.startswith("core.transformer.layers."):
+                tail = key[len("core.transformer.layers."):]
+                idx_str, _, rest = tail.partition(".")
+                if rest and not rest.startswith(("attn.", "proj.", "proj")):
+                    # Old style — insert .attn between layer index and inner name.
+                    migrated[f"core.transformer.layers.{idx_str}.attn.{rest}"] = value
+                    continue
+            migrated[key] = value
+
+        return self.load_state_dict(migrated, strict=strict)
 
 
 def _quantile_huber_loss(current_quantiles, target_quantiles, tau_hats, return_stats=False):

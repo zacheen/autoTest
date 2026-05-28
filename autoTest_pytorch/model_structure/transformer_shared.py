@@ -86,20 +86,89 @@ class FixedSinusoidalPositionEmbedding(nn.Module):
         return pos
 
 
+class HierarchicalEncoderLayer(nn.Module):
+    """Self-attention block at d_in, then optional projection to d_out.
+
+    For uniform-dim configurations (d_in == d_out) the projection is `nn.Identity()`
+    so the layer is functionally equivalent to a plain `nn.TransformerEncoderLayer`
+    — just with one extra `attn.` prefix in the state_dict keys.
+    """
+
+    def __init__(self, d_in: int, d_out: int, nhead: int,
+                 dim_feedforward: int, dropout: float):
+        super().__init__()
+        self.attn = nn.TransformerEncoderLayer(
+            d_model=d_in, nhead=nhead, dim_feedforward=dim_feedforward,
+            dropout=dropout, activation="gelu", batch_first=True,
+            norm_first=True,
+        )
+        self.proj = (
+            nn.Sequential(nn.LayerNorm(d_in), nn.Linear(d_in, d_out))
+            if d_in != d_out else nn.Identity()
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(self.attn(x))
+
+
+class HierarchicalEncoder(nn.Module):
+    """Encoder whose d_model can shrink layer-by-layer (or stay uniform).
+
+    Shared by Stage 1 (`EncoderDecoderTransformer`) and Stage 2 (`YOLOEncoderBase`):
+    uniform-dim config gives a plain transformer stack; shrinking dims gives a
+    geometric-compression stack. Both agents read `DEFAULT_ENCODER_DIMS` from
+    `yolo_encoder_base` so a single constant change retunes both networks.
+    """
+
+    def __init__(self, dims: list[int], nhead: int, ff_mult: int, dropout: float):
+        super().__init__()
+        if len(dims) < 2:
+            raise ValueError(f"HierarchicalEncoder needs at least 2 dims, got {dims}")
+        for d in dims:
+            if d % nhead != 0:
+                raise ValueError(f"dim {d} must be divisible by nhead {nhead}")
+        self.layers = nn.ModuleList([
+            HierarchicalEncoderLayer(d_in, d_out, nhead, d_in * ff_mult, dropout)
+            for d_in, d_out in zip(dims[:-1], dims[1:])
+        ])
+        self.out_dim = dims[-1]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
 class EncoderDecoderTransformer(nn.Module):
-    """Shared encoder-decoder transformer core used by grid and visual agents."""
+    """Shared encoder-decoder transformer core used by grid and visual agents.
+
+    Encoder uses HierarchicalEncoder with uniform dims ([d_model] * (num_layers + 1)),
+    same building block V3 uses. Lets a single arch tweak (e.g. switching START_DIM)
+    propagate to Stage 1 and V3 together. The HierarchicalEncoderLayer wrapper introduces
+    one extra `attn.` prefix in encoder state_dict keys — callers loading old (pre-refactor)
+    checkpoints should auto-migrate (see TransformerActorNetwork.load_backbone_state).
+    """
 
     def __init__(self, d_model, nhead, num_layers, dim_feedforward, dropout):
         super().__init__()
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
+        if dim_feedforward % d_model != 0:
+            raise ValueError(
+                f"dim_feedforward ({dim_feedforward}) must be a multiple of d_model "
+                f"({d_model}) so it can be expressed as ff_mult for HierarchicalEncoder; "
+                f"got remainder {dim_feedforward % d_model}"
+            )
+        ff_mult = dim_feedforward // d_model
+
+        # Uniform-dim encoder: dims=[d_model]*(num_layers + 1) → num_layers HierarchicalEncoderLayer
+        # instances, each with proj=Identity (since d_in == d_out). Functionally identical to the
+        # previous nn.TransformerEncoder stack; only state_dict key paths differ (extra .attn prefix).
+        self.transformer = HierarchicalEncoder(
+            dims=[d_model] * (num_layers + 1),
             nhead=nhead,
-            dim_feedforward=dim_feedforward,
+            ff_mult=ff_mult,
             dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
         )
+
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -109,9 +178,6 @@ class EncoderDecoderTransformer(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        # enable_nested_tensor=False：nested-tensor fastpath 只支援 post-LN（norm_first=False），
-        # 我們用 pre-LN（norm_first=True）會跟它互斥，PyTorch 會自動關掉並 warn。明確設 False 消 warning。
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, enable_nested_tensor=False)
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
 
     def encode(self, memory_tokens):

@@ -21,8 +21,10 @@ Freezing API:
     freeze_feature_extractor() — V3 path: only freezes YOLO11n; lets encoder train
     unfreeze() / set_bn_eval() — unchanged
 
-Encoder shape is controlled by DEFAULT_ENCODER_FINAL_DIM / DEFAULT_ENCODER_TOTAL_LAYERS
-below — geometric halving from 128 down to final_dim, then uniform layers at final_dim.
+Encoder shape is controlled by DEFAULT_ENCODER_FINAL_DIM / DEFAULT_ENCODER_TOTAL_LAYERS /
+DEFAULT_ENCODER_START_DIM below — geometric halving from start_dim down to final_dim, then
+uniform layers at final_dim. Default config (start_dim == final_dim) gives an all-uniform
+encoder identical in shape to Stage 1's EncoderDecoderTransformer, so Stage 1 weights load 1:1.
 """
 
 from __future__ import annotations
@@ -32,7 +34,17 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from model_structure.transformer_shared import FixedSinusoidalPositionEmbedding
+from model_structure.transformer_shared import (
+    FixedSinusoidalPositionEmbedding,
+    HierarchicalEncoder,
+    HierarchicalEncoderLayer,
+)
+
+# Re-export so existing callers (yolo_grid_state_predictor, future consumers) can keep
+# importing these names from yolo_encoder_base. Authoritative definitions live in
+# transformer_shared so Stage 1's EncoderDecoderTransformer can use them too without
+# creating a circular dependency.
+__all__ = ["HierarchicalEncoder", "HierarchicalEncoderLayer"]
 
 
 YOLO_FEATURE_CHANNELS = 128
@@ -40,58 +52,69 @@ DEFAULT_ENCODER_NHEAD = 4
 DEFAULT_ENCODER_FF_MULT = 4
 DEFAULT_ENCODER_DROPOUT = 0.1
 
-# Encoder shape — geometric compression (128 → 64 → ... → final_dim) followed by
-# uniform-dim layers until reaching total_layers. Both v3 and YOLOGridStatePredictor
-# read DEFAULT_ENCODER_DIMS; change FINAL_DIM / TOTAL_LAYERS here to update both.
+# Encoder shape — 從 START_DIM 開始幾何壓縮 (每層除二) 直到 FINAL_DIM,再用 uniform
+# 層補滿到 TOTAL_LAYERS。START_DIM == FINAL_DIM 時 encoder 內不做壓縮,YOLO 128-ch →
+# FINAL_DIM 的維度轉換由 token_adapter (LayerNorm + Linear) 負責;此時 V3 encoder 就跟
+# Stage 1 的 EncoderDecoderTransformer 結構一致,可直接載 Stage 1 權重。把 START_DIM
+# 改回 YOLO_FEATURE_CHANNELS 則 encoder 第一層做 self-attn at d=128 再線性壓到 FINAL_DIM。
+# Both v3 and YOLOGridStatePredictor read DEFAULT_ENCODER_DIMS.
 DEFAULT_ENCODER_FINAL_DIM    = 64  # 編碼最終 dim (= decoder d_model)
-DEFAULT_ENCODER_TOTAL_LAYERS = 1   # encoder 總層數 (壓縮 + uniform);須 ≥ log2(128/final_dim)
+DEFAULT_ENCODER_TOTAL_LAYERS = 4   # encoder 總層數 (壓縮 + uniform);須 ≥ log2(start_dim/final_dim)
+DEFAULT_ENCODER_START_DIM    = DEFAULT_ENCODER_FINAL_DIM   # = FINAL_DIM → encoder 全 uniform
 
 
 def build_encoder_dims(
     final_dim: int,
     total_layers: int,
     nhead: int = DEFAULT_ENCODER_NHEAD,
+    start_dim: int = YOLO_FEATURE_CHANNELS,
 ) -> list[int]:
     """建立 HierarchicalEncoder 的 dims list。
 
-    從 YOLO_FEATURE_CHANNELS 每次除二降到 final_dim(壓縮段),再把 final_dim 重複
+    從 start_dim 每次除二降到 final_dim(壓縮段),再把 final_dim 重複
     補滿 uniform 層直到層數 = total_layers。回傳的 list 長度 = total_layers + 1,
-    第一個元素是 token_adapter 輸入 dim (= YOLO_FEATURE_CHANNELS),其餘 total_layers
+    第一個元素是 token_adapter 輸出 dim (= start_dim),其餘 total_layers
     個是每層的輸出 dim。
 
+    start_dim 預設 = YOLO_FEATURE_CHANNELS,token_adapter 不做維度壓縮、encoder 內負責;
+    若 start_dim == final_dim,encoder 全 uniform,token_adapter 負責把 YOLO_FEATURE_CHANNELS
+    壓到 final_dim(此時結構等同 Stage 1 的 EncoderDecoderTransformer)。
+
     範例:
-        build_encoder_dims(32, 5) → [128, 64, 32, 32, 32, 32]   (2 壓縮 + 3 uniform)
-        build_encoder_dims(64, 4) → [128, 64, 64, 64, 64]       (1 壓縮 + 3 uniform)
-        build_encoder_dims(32, 2) → [128, 64, 32]               (純壓縮,無 uniform)
-        build_encoder_dims(128, 4) → [128, 128, 128, 128, 128]  (純 uniform,無壓縮)
+        build_encoder_dims(32, 5)               → [128, 64, 32, 32, 32, 32]   (2 壓縮 + 3 uniform)
+        build_encoder_dims(64, 4)               → [128, 64, 64, 64, 64]       (1 壓縮 + 3 uniform)
+        build_encoder_dims(32, 2)               → [128, 64, 32]               (純壓縮,無 uniform)
+        build_encoder_dims(128, 4)              → [128, 128, 128, 128, 128]   (純 uniform,無壓縮)
+        build_encoder_dims(64, 4, start_dim=64) → [64, 64, 64, 64, 64]        (壓縮交給 token_adapter,encoder 純 uniform)
 
     Raises:
-        ValueError: final_dim 不是 2 的次方、不在 [nhead, YOLO_FEATURE_CHANNELS] 區間、
-                    YOLO_FEATURE_CHANNELS 不能整除 final_dim、或 total_layers 不夠壓到目標。
+        ValueError: final_dim/start_dim 不是 2 的次方、不在 [nhead, start_dim] 區間、
+                    start_dim 不能整除 final_dim、或 total_layers 不夠壓到目標。
     """
     if not isinstance(final_dim, int) or final_dim <= 0:
         raise ValueError(f"final_dim must be a positive int, got {final_dim!r}")
     if not isinstance(total_layers, int) or total_layers < 1:
         raise ValueError(f"total_layers must be int >= 1, got {total_layers!r}")
-    if final_dim > YOLO_FEATURE_CHANNELS:
+    if not isinstance(start_dim, int) or start_dim <= 0:
+        raise ValueError(f"start_dim must be a positive int, got {start_dim!r}")
+    if final_dim > start_dim:
         raise ValueError(
-            f"final_dim ({final_dim}) must be <= YOLO_FEATURE_CHANNELS ({YOLO_FEATURE_CHANNELS})"
+            f"final_dim ({final_dim}) must be <= start_dim ({start_dim})"
         )
     if final_dim < nhead:
         raise ValueError(f"final_dim ({final_dim}) must be >= nhead ({nhead})")
     if final_dim % nhead != 0:
         raise ValueError(f"final_dim ({final_dim}) must be divisible by nhead ({nhead})")
-    ratio = YOLO_FEATURE_CHANNELS // final_dim
-    if YOLO_FEATURE_CHANNELS % final_dim != 0 or (ratio & (ratio - 1)) != 0:
+    ratio = start_dim // final_dim
+    if start_dim % final_dim != 0 or (ratio & (ratio - 1)) != 0:
         raise ValueError(
-            f"YOLO_FEATURE_CHANNELS ({YOLO_FEATURE_CHANNELS}) / final_dim ({final_dim}) "
-            f"must be a power of 2 (got ratio={ratio}); final_dim must be a power-of-2 "
-            f"divisor of YOLO_FEATURE_CHANNELS."
+            f"start_dim ({start_dim}) / final_dim ({final_dim}) must be a power of 2 "
+            f"(got ratio={ratio}); final_dim must be a power-of-2 divisor of start_dim."
         )
 
-    # 壓縮段:128 → 64 → ... → final_dim
+    # 壓縮段:start_dim → start_dim/2 → ... → final_dim
     compression: list[int] = []
-    d = YOLO_FEATURE_CHANNELS
+    d = start_dim
     while d > final_dim:
         compression.append(d)
         d //= 2
@@ -102,7 +125,7 @@ def build_encoder_dims(
         raise ValueError(
             f"total_layers ({total_layers}) is less than the {num_compression_layers} "
             f"compression layers needed to reach final_dim={final_dim} from "
-            f"YOLO_FEATURE_CHANNELS={YOLO_FEATURE_CHANNELS}"
+            f"start_dim={start_dim}"
         )
 
     uniform_layers = total_layers - num_compression_layers
@@ -110,50 +133,10 @@ def build_encoder_dims(
 
 
 DEFAULT_ENCODER_DIMS = build_encoder_dims(
-    DEFAULT_ENCODER_FINAL_DIM, DEFAULT_ENCODER_TOTAL_LAYERS
+    DEFAULT_ENCODER_FINAL_DIM,
+    DEFAULT_ENCODER_TOTAL_LAYERS,
+    start_dim=DEFAULT_ENCODER_START_DIM,
 )
-
-
-class HierarchicalEncoderLayer(nn.Module):
-    """Self-attention block at d_in, then optional projection to d_out."""
-
-    def __init__(self, d_in: int, d_out: int, nhead: int,
-                 dim_feedforward: int, dropout: float):
-        super().__init__()
-        self.attn = nn.TransformerEncoderLayer(
-            d_model=d_in, nhead=nhead, dim_feedforward=dim_feedforward,
-            dropout=dropout, activation="gelu", batch_first=True,
-            norm_first=True,
-        )
-        self.proj = (
-            nn.Sequential(nn.LayerNorm(d_in), nn.Linear(d_in, d_out))
-            if d_in != d_out else nn.Identity()
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj(self.attn(x))
-
-
-class HierarchicalEncoder(nn.Module):
-    """Encoder whose d_model shrinks layer-by-layer."""
-
-    def __init__(self, dims: list[int], nhead: int, ff_mult: int, dropout: float):
-        super().__init__()
-        if len(dims) < 2:
-            raise ValueError(f"HierarchicalEncoder needs at least 2 dims, got {dims}")
-        for d in dims:
-            if d % nhead != 0:
-                raise ValueError(f"dim {d} must be divisible by nhead {nhead}")
-        self.layers = nn.ModuleList([
-            HierarchicalEncoderLayer(d_in, d_out, nhead, d_in * ff_mult, dropout)
-            for d_in, d_out in zip(dims[:-1], dims[1:])
-        ])
-        self.out_dim = dims[-1]
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        for layer in self.layers:
-            x = layer(x)
-        return x
 
 
 class YOLOEncoderBase(nn.Module):

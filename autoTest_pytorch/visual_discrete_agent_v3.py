@@ -14,14 +14,18 @@ Pipeline（dim/層數由 yolo_encoder_base 與下方 DECODER_* 常數決定）:
     Q-values (B, GRID_H, GRID_W) → masked argmax → action
 
 架構說明：
-    • VisualBackboneV3 繼承 YOLOEncoderBase（與 YOLOGridStatePredictor 共用）
-    • 從 YOLOGridStatePredictor checkpoint 載入 feature_extractor + token_adapter + encoder 權重
-    • YOLO11n backbone 凍結(BN eval mode);token_adapter + HierarchicalEncoder 解凍可訓練
+    • VisualBackboneV3 繼承 YOLOEncoderBase;encoder/decoder 結構跟 Stage 1
+      (TransformerActorNetwork) 一致 — 預設 DEFAULT_ENCODER_START_DIM == FINAL_DIM,
+      encoder 全 uniform 4 層 @ d=64,把 YOLO 128→64 的壓縮交給 token_adapter。
+    • 嘗試從 Stage 1 checkpoint (models/stage1_transformer/) 載入
+      encoder + decoder + query_tokens + FQF (all-or-nothing);缺檔 → 紅字 warning + random init。
+    • YOLO11n 從 yolo11n.pt 載入並凍結(BN eval mode);token_adapter / encoder /
+      decoder / query_tokens / FQF head 全部可訓練。
     • Replay buffer 改存 YOLO backbone 輸出 (128, 40, 40) 而不是原始截圖(3, 640, 640):
         - 每筆 transition 從 ~1.17 MB(uint8 截圖)降到 ~0.78 MB(fp32 特徵)
         - 訓練時跳過 YOLO11n forward,只跑 token_adapter + encoder + decoder
         - 因為 YOLO 凍結,cached features 對訓練等同每次重算
-    • 可訓練部分：token_adapter + encoder + decoder + query tokens + FQF head
+    • Dropout 起步關閉(p=0),win_rate(window=100) > 0.4 後 latch ON(對齊 PER spread_decay)。
 """
 
 from __future__ import annotations
@@ -42,7 +46,12 @@ import torchvision.transforms as transforms
 from PIL import Image
 from torch.utils.tensorboard import SummaryWriter
 
-from transformer_discrete_agent import FQF_ENTROPY_COEF, NUM_FQF_FRACTIONS, _quantile_huber_loss
+from transformer_discrete_agent import (
+    FQF_ENTROPY_COEF,
+    NUM_FQF_FRACTIONS,
+    TRANSFORMER_MODEL_PATH,
+    _quantile_huber_loss,
+)
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from model_structure.transformer_shared import FQFQNetwork
 from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
@@ -188,7 +197,7 @@ def _dbg_tensor(name: str, t, *, expect_max=None, expect_min=None, check_finite:
 # 注意:training_state.pth 仍在 MODEL_PATH(D 槽);它內含 replay_buffer_save 下的 .pt 絕對
 # 路徑(C 槽),pathlib 跨槽絕對路徑沒問題。如果手動清 C 槽快取,記得把對應的
 # training_state.pth 也一併處理,免得 _load_persistent_buffer 拿到失效路徑。
-YOLO_PREDICTOR_PATH = Path("./models/yolo_grid_predictor/best.pth")
+STAGE1_CKPT_DIR = TRANSFORMER_MODEL_PATH   # = Path("./models/stage1_transformer")
 
 VISUAL_V3_MODEL_PATH             = Path("./models/visual_transformer_v3_6x6")
 VISUAL_V3_REPLAY_BASE            = Path(r"C:\dont_move\temp\autotest")
@@ -205,9 +214,10 @@ NUM_ACTIONS = GRID_H * GRID_W
 VISUAL_BATCH_SIZE = 32
 MINIMUM_DATA_SIZE = 2000 # below this amount, won't start training
 
-# ── Encoder dims（與 YOLOGridStatePredictor 共用 DEFAULT_ENCODER_DIMS）──
-# 形狀由 model_structure.yolo_encoder_base.DEFAULT_ENCODER_FINAL_DIM /
-# DEFAULT_ENCODER_TOTAL_LAYERS 決定;改那邊兩個常數 v3 與 predictor 會同步更新。
+# ── Encoder dims ─────────────────────────────────────────────────────
+# 形狀由 model_structure.yolo_encoder_base 的 DEFAULT_ENCODER_FINAL_DIM /
+# DEFAULT_ENCODER_TOTAL_LAYERS / DEFAULT_ENCODER_START_DIM 決定;預設 [64]*5 (4 層 uniform,
+# 對齊 Stage 1 的 EncoderDecoderTransformer)。
 ENCODER_DIMS = DEFAULT_ENCODER_DIMS
 
 # ── Decoder spec ─────────────────────────────────────────────────────
@@ -218,6 +228,12 @@ DECODER_NUM_LAYERS = 4
 # when d_model changes. Shared with encoder side (DEFAULT_ENCODER_FF_MULT).
 DECODER_FF_DIM     = DECODER_D_MODEL * DEFAULT_ENCODER_FF_MULT
 DECODER_DROPOUT    = 0.1
+# Dropout starts at 0 and only turns on after the agent reaches the same competence threshold
+# used by the PER spread_decay latch (transformer_discrete_agent.py:610-612). Rationale: early
+# RL training has high variance and dropout adds more noise on top — we don't want to fight the
+# initial bootstrap. Once win_rate(100) > threshold the model is mature enough that dropout
+# helps regularize against overfitting to the current high-priority replay slice.
+DROPOUT_LATCH_WR_THRESHOLD = 0.4
 
 # ── training hyper-params ────────────────────────────────────────────
 VISUAL_N_STEP = 1
@@ -238,13 +254,15 @@ USE_AMP = False
 
 # ── learning rates ───────────────────────────────────────────────────
 # 大部分 LR / weight_decay 走 FQFOptimizerConfig 預設(lr_backbone=lr_head=5e-5)。
-# 但 v3 多了一個 catastrophic forgetting 防護:把 backbone 內 pretrained 的部分
-# (encoder + token_adapter,從 YOLOGridStatePredictor 的 best.pth 載入)用 0.1× LR,
-# 避免 RL 階段稀疏雜訊大的 gradient 把預訓練學到的 self-attn pattern 洗掉。
+# 但 v3 多了一個 catastrophic forgetting 防護:Stage 1 載入成功時,把從 Stage 1 載入的
+# 部分(encoder + decoder + query_tokens)用 0.1× LR,避免 RL 階段稀疏雜訊大的 gradient
+# 把 Stage 1 學到的 cell-level attention pattern 洗掉。token_adapter 永遠是 random init
+# (Stage 1 沒對應的 Linear(128→64)),所以走 fresh LR。Stage 1 缺檔時所有 backbone 都是
+# random init,pretrained_prefixes 動態設為空 tuple → 全部 fresh LR。
 # 觀察 TB 的 weight_norm/encoder.* 與 grad_norm/encoder.* 來調整:
 #   - encoder weight delta 太久不動 → 調大 LR_BACKBONE_PRETRAINED
 #   - encoder weight 在前 1000 step 內 RMS 變化 > 50% → 調小
-LR_BACKBONE_PRETRAINED = 5e-6   # encoder + token_adapter (0.1× backbone fresh LR)
+LR_BACKBONE_PRETRAINED = 5e-6   # Stage 1 載入時:encoder + decoder + query_tokens (0.1× backbone fresh LR)
 # Linear LR warmup over the first N optimizer steps (transformer 早期穩定)
 # 從 base_lr * LR_WARMUP_START_FACTOR 線性增加到 base_lr
 LR_WARMUP_STEPS         = 2000   # 第一次從頭訓練的 warmup 長度
@@ -271,9 +289,11 @@ LOG_ACTIONS = True
 class VisualBackboneV3(YOLOEncoderBase):
     """screenshot (B,3,H,W) → cell features (B, grid_h*grid_w, encoder_final_dim).
 
-    YOLO + token_adapter + HierarchicalEncoder 繼承自 YOLOEncoderBase，
-    並在初始化時從 YOLOGridStatePredictor checkpoint 載入後凍結。
-    Decoder（cross-attn + queries）為 random init，是唯一可訓練的部分。
+    YOLO + token_adapter + HierarchicalEncoder 繼承自 YOLOEncoderBase。預設 encoder
+    結構 (start_dim == final_dim, 4 uniform 層 @ d=64) 跟 Stage 1 的 EncoderDecoderTransformer
+    完全一致 — VisualAgentV3 會嘗試載入 Stage 1 權重 warm-start encoder + decoder + queries。
+    YOLO11n backbone 在 VisualAgentV3 內凍結;token_adapter (random init,Stage 1 沒對應)
+    跟 encoder/decoder/queries 都跟著 RL 訓練更新。
     """
 
     def __init__(
@@ -361,14 +381,13 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.log_prefix = "[V3]"
         self.log_actions = LOG_ACTIONS
 
-        # ── Backbone：載入 Predictor 權重；YOLO11n 凍結，token_adapter+encoder 可訓練 ──
+        # ── Backbone：YOLO11n 凍結,其餘可訓練;encoder/decoder/queries 等下從 Stage 1 載入 ──
         # Replay buffer 改存 YOLO backbone 輸出 (128, h, w) 而不是原始截圖,所以 YOLO
-        # 必須保持凍結(否則 cache 的 features 會與更新後的權重不一致)。token_adapter
-        # 與 HierarchicalEncoder 是 RL 階段的 fine-tune 目標 — 預訓練學的是
-        # YOLOGridStatePredictor 的「每格分類」資訊交換 pattern,Q-value 任務需要不同
-        # 的全域聚合 pattern,所以解凍它讓 RL gradient 把它特化。
+        # 必須保持凍結(否則 cache 的 features 會與更新後的權重不一致)。token_adapter +
+        # encoder + decoder + query_tokens 都是 RL fine-tune 目標 — 其中 encoder/decoder/
+        # queries 之後會嘗試從 Stage 1 checkpoint warm-start(見 _load_stage1_weights);
+        # token_adapter 永遠是 random init(Stage 1 沒對應的 Linear(128→64))。
         self.backbone = VisualBackboneV3(grid_h=grid_h, grid_w=grid_w).to(device)
-        self.backbone.load_encoder_weights_from_checkpoint(YOLO_PREDICTOR_PATH)
         self.backbone.freeze_feature_extractor()
         # BN 必須切到 eval,否則接下來的 dummy forward 會以 momentum=0.1 把全零輸入的
         # batch stats 混進剛從 checkpoint 載入的 running_mean/running_var,污染 YOLO BN。
@@ -407,23 +426,32 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.q_target.load_state_dict(self.q_network.state_dict())
         self.q_target.eval()
 
+        # ── Stage 1 warm-start (all-or-nothing) ─────────────────────────────
+        # encoder/decoder/query_tokens 結構跟 Stage 1 (TransformerActorNetwork) 對齊,
+        # 所以可以直接從 Stage 1 checkpoint 載入這幾個模組 + FQF online/target。
+        # 三個檔(backbone/fqf_network/fqf_target)缺任一就放棄整批,各模組維持 random init。
+        # _stage1_loaded 決定 optimizer 的 pretrained_prefixes 怎麼切。
+        self._stage1_loaded = self._load_stage1_weights(STAGE1_CKPT_DIR)
+
         # ── Optimizer ───────────────────────────────────────────────────────
         # 只有 YOLO11n (feature_extractor) 凍結。token_adapter + encoder + decoder +
         # query_tokens + FQF head 都會更新。
         #
-        # 拆 3 個 param group:
-        #   group 0: backbone fresh    = decoder + query_tokens (random init)
-        #            → lr = config.lr_backbone = 5e-5
-        #   group 1: backbone pretrained = token_adapter + encoder (從 best.pth 載入)
-        #            → lr = LR_BACKBONE_PRETRAINED = 5e-6 (0.1×,防 catastrophic forgetting)
-        #   group 2: head              = q_network (random init)
-        #            → lr = config.lr_head = 5e-5
-        # build_fqf_optimizer 內部已過濾 requires_grad=False,YOLO 不會進來。
+        # pretrained_prefixes 動態:
+        #   • Stage 1 載入成功 → encoder/decoder/query_tokens 用 LR_BACKBONE_PRETRAINED
+        #     (5e-6, 0.1× backbone fresh,防 RL gradient 把預訓 attention pattern 洗掉)
+        #   • Stage 1 缺檔   → 全部 backbone 都是 random init,prefixes 設空,統一 5e-5
+        # token_adapter 永遠 random init(Stage 1 沒對應),走 fresh LR group。
+        #
+        # build_fqf_optimizer 內部已過濾 requires_grad=False,凍結的 YOLO 不會進來。
+        pretrained_prefixes: tuple[str, ...] = (
+            ("encoder.", "decoder.", "query_tokens") if self._stage1_loaded else ()
+        )
         self.optimizer = build_fqf_optimizer(
             self.backbone,
             self.q_network,
             config=FQFOptimizerConfig(lr_backbone_pretrained=LR_BACKBONE_PRETRAINED),
-            pretrained_prefixes=("token_adapter.", "encoder."),
+            pretrained_prefixes=pretrained_prefixes,
         )
         # 紀錄每個 param group 的 base lr，warmup 期間根據 total_it 動態縮放
         self._base_lrs = [group["lr"] for group in self.optimizer.param_groups]
@@ -580,6 +608,17 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self._init_weight_reference = self._capture_trainable_weight_snapshot()
         self._rolling_weight_reference = self._capture_trainable_weight_snapshot()
         self._rolling_weight_reference_step = self.total_it
+
+        # ── Dropout latch ───────────────────────────────────────────────────
+        # 起步 p=0;train_step 每次檢查 win_rate(100) > DROPOUT_LATCH_WR_THRESHOLD,
+        # 第一次跨過就 latch ON、永不關回。對齊 PER spread_decay 的 latch 設計。
+        # latch flag 不存檔(就跟 spread_decay 一樣)— training_history.pth 載回來後,
+        # 這裡先做一次 re-evaluate,resume 後不用等到第一個 train_step 才 latch。
+        self._dropout_latched = False
+        self._set_backbone_dropout_p(0.0)
+        if self.training_history.win_rate(window=100) > DROPOUT_LATCH_WR_THRESHOLD:
+            self._latch_dropout_on(reason="resume: training_history win_rate already above threshold")
+
         self._set_runtime_modes()
         # 註冊順序 = LIFO:close 最先註冊 → 最後執行;存檔最後註冊 → 最先執行
         # _close_training_logger 一次關 CSV file handle + SummaryWriter,取代
@@ -588,6 +627,106 @@ class VisualAgentV3(VisualAgentCommonMixin):
         atexit.register(self._close_io_log)
         atexit.register(self.save_persistent)
         atexit.register(self._save_model)
+
+    # ──────────────────────────── Stage 1 warm-start ──────────────────────
+
+    def _load_stage1_weights(self, stage1_dir: Path) -> bool:
+        """從 Stage 1 checkpoint 載 encoder/decoder/queries/FQF(all-or-nothing)。
+
+        三個檔(backbone.pth / fqf_network.pth / fqf_target.pth)缺任一就放棄整批,
+        各模組維持 random init,回傳 False。三個都在才實際呼叫 load_state_dict,
+        回傳 True 表示 optimizer 應該把 encoder/decoder/query_tokens 切到 pretrained group。
+
+        Key remapping (Stage 1 → V3):
+            query_tokens                              → query_tokens                       (1:1)
+            core.transformer.layers.{i}.attn.<...>    → encoder.layers.{i}.attn.<...>      (new-style, post-HierarchicalEncoder)
+            core.transformer.layers.{i}.<...>         → encoder.layers.{i}.attn.<...>      (old-style, pre-refactor — auto-insert .attn)
+            core.decoder.layers.{i}.<...>             → decoder.layers.{i}.<...>           (1:1)
+            token_embed / output_head / position → 丟棄
+        FQF online/target 直接 1:1 載入。
+        """
+        backbone_pth = stage1_dir / "backbone.pth"
+        qnet_pth     = stage1_dir / "fqf_network.pth"
+        qtgt_pth     = stage1_dir / "fqf_target.pth"
+
+        missing = [p for p in (backbone_pth, qnet_pth, qtgt_pth) if not p.exists()]
+        if missing:
+            for p in missing:
+                self._log_checkpoint_message(
+                    f"Stage 1 checkpoint 不存在: {p} — all-or-nothing 放棄整批,使用 random init",
+                    warning=True,
+                )
+            return False
+
+        # backbone.pth: remap encoder/decoder/query_tokens.
+        # Handles both old (raw nn.TransformerEncoder) and new (HierarchicalEncoder)
+        # Stage 1 formats — the only difference is whether the `attn.` prefix is already
+        # present after the layer index.
+        sd = torch.load(backbone_pth, map_location="cpu", weights_only=False)
+        remapped: dict[str, torch.Tensor] = {}
+        for key, value in sd.items():
+            if key == "query_tokens":
+                remapped["query_tokens"] = value
+            elif key.startswith("core.transformer.layers."):
+                tail = key[len("core.transformer.layers."):]
+                idx_str, _, rest = tail.partition(".")
+                if not rest:
+                    continue
+                if rest.startswith(("attn.", "proj.", "proj")):
+                    # New-style: .attn / .proj prefix already there — strip outer `core.transformer.` only
+                    remapped[f"encoder.layers.{idx_str}.{rest}"] = value
+                else:
+                    # Old-style: insert .attn to align with HierarchicalEncoderLayer wrapping
+                    remapped[f"encoder.layers.{idx_str}.attn.{rest}"] = value
+            elif key.startswith("core.decoder."):
+                # core.decoder.X → decoder.X (1:1)
+                remapped[key[len("core."):]] = value
+            # token_embed / output_head / position / 其他 — 丟棄(架構不同 or 不需要)
+        missing_keys, unexpected_keys = self.backbone.load_state_dict(remapped, strict=False)
+        # missing 預期包含 feature_extractor.* / token_adapter.* / memory_position.* —
+        # 那些 V3 有但 Stage 1 沒有,屬於正常;unexpected 應為空。
+        self._log_checkpoint_message(
+            f"Stage 1 backbone loaded ({len(remapped)} tensors from {backbone_pth.name})"
+        )
+        if unexpected_keys:
+            self._log_checkpoint_message(
+                f"Stage 1 backbone unexpected keys (應為空): {unexpected_keys[:5]}"
+                f"{'...' if len(unexpected_keys) > 5 else ''}",
+                warning=True,
+            )
+
+        # FQF online + target
+        self.q_network.load_state_dict(
+            torch.load(qnet_pth, map_location="cpu", weights_only=False)
+        )
+        self._log_checkpoint_message(f"Stage 1 fqf_network loaded ({qnet_pth.name})")
+        self.q_target.load_state_dict(
+            torch.load(qtgt_pth, map_location="cpu", weights_only=False)
+        )
+        self._log_checkpoint_message(f"Stage 1 fqf_target loaded ({qtgt_pth.name})")
+
+        return True
+
+    # ──────────────────────────── dropout latch ────────────────────────────
+
+    def _set_backbone_dropout_p(self, p: float) -> None:
+        """掃 backbone 內所有 nn.Dropout (encoder + decoder 各層的內部 dropout),改 p。
+
+        FQFQNetwork 內沒有 Dropout(只有 Linear + GELU),所以這裡只動 backbone。
+        nn.Dropout.p 是 Python attribute、不是 Parameter/buffer,不會進 state_dict —
+        所以 latch 後 _save_model / try_load_model 不會影響這個 p。
+        """
+        for module in self.backbone.modules():
+            if isinstance(module, nn.Dropout):
+                module.p = float(p)
+
+    def _latch_dropout_on(self, *, reason: str) -> None:
+        self._dropout_latched = True
+        self._set_backbone_dropout_p(DECODER_DROPOUT)
+        self._log_checkpoint_message(
+            f"dropout latch ON (p={DECODER_DROPOUT}, threshold={DROPOUT_LATCH_WR_THRESHOLD}) — {reason}",
+            warning=True,
+        )
 
     # ──────────────────────────── runtime modes ──────────────────────────
 
@@ -783,6 +922,17 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.total_it += 1
         self.steps_since_resume += 1
         self._apply_lr_warmup()
+
+        # Dropout latch — 對齊 transformer_discrete_agent.py:610 的 spread_decay latch 位置。
+        # 一次性 switch:跨過 threshold 就 ON 永不關回。training_history.win_rate 是 100-window
+        # rolling, on_episode_end 才 .record(),所以這個 check 對同一個 episode 內多次 train_step
+        # 給出穩定的結果。
+        if not self._dropout_latched:
+            if self.training_history.win_rate(window=100) > DROPOUT_LATCH_WR_THRESHOLD:
+                self._latch_dropout_on(
+                    reason=f"train_step total_it={self.total_it}: win_rate(100) crossed threshold"
+                )
+
         # Wall-clock 滿 1 小時翻頁;io_log / cuda_debug.log 都會自動跟著新的 archive
         # dir(註冊在 SessionArchiveManager 的 on_rollover callback 處理)。
         self.archive.maybe_rollover()
