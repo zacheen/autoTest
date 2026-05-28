@@ -62,6 +62,7 @@ from model_structure.archive_manager import (
     RolloverTextLog,
     swap_logger_file_handler,
 )
+from model_structure.training_logger import TrainingLogger
 from model_structure.adaptive_epsilon import AdaptiveEpsilonController
 from model_structure.history import TrainingHistory
 
@@ -533,12 +534,35 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.archive.register_on_rollover(self._on_archive_rollover)
 
         # TensorBoard log_dir 仍走頂層 VISUAL_V3_TENSORBOARD_DIR/<ts>,跟 archive
-        # dir 解耦 — 這樣同一個 TB 實例可以瀏覽歷史 run。
+        # dir 解耦 — 這樣同一個 TB 實例可以瀏覽歷史 run。SummaryWriter 不再對外
+        # 暴露為 self.tb_writer;它變成 TrainingLogger 的內部 detail,所有 TB 寫入
+        # 都從 self.training_logger 走。
         tb_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.tensorboard_log_dir = VISUAL_V3_TENSORBOARD_DIR / tb_timestamp
-        self.tb_writer = SummaryWriter(log_dir=str(self.tensorboard_log_dir))
         print(f"[V3] TensorBoard: tensorboard --logdir {VISUAL_V3_TENSORBOARD_DIR}")
         print(f"[V3] Current run: {self.tensorboard_log_dir}")
+
+        # CSV + TB dispatcher — 每 episode summary 兩邊一起寫,raw value(不 format)
+        # 給 AI 讀。Hour rollover 時跟著翻新 csv 檔。跟 stage1 的 csv_fields 結構
+        # 對齊,只是 v3 沒有 eval(目前 Demo_test_Minesweeper 沒有 eval loop),
+        # 所以省略 eval/* 欄位。Q_loss / q_mean 也省略 — 那兩條由 agent.train_step
+        # 自己每 step 寫 TB,不適合塞進 episode-level CSV row。
+        # SummaryWriter 直接餵進 TrainingLogger,agent 不再單獨持有引用。
+        csv_fields = [
+            "timestamp", "episode",
+            "reward_mean", "is_win", "invalid_click_rate",
+            "win_rate_recent", "epsilon",
+        ]
+        csv_path = self.archive.current_archive_dir / "training_log.csv"
+        self.training_logger = TrainingLogger(
+            csv_path=csv_path,
+            csv_fields=csv_fields,
+            tb_writer=SummaryWriter(log_dir=str(self.tensorboard_log_dir)),
+        )
+        self.archive.register_on_rollover(
+            lambda new_dir: self.training_logger.swap_csv_to(new_dir / "training_log.csv")
+        )
+        print(f"[V3] CSV log: {csv_path}")
 
         # 砍掉上一版架構留下的 replay buffer .pt(shape mismatch 或損毀)。
         # 一定要在 try_load_model() 之前跑,否則 _load_persistent_training_state
@@ -550,9 +574,11 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self._rolling_weight_reference = self._capture_trainable_weight_snapshot()
         self._rolling_weight_reference_step = self.total_it
         self._set_runtime_modes()
-        # 註冊順序 = LIFO：close 最先註冊 → 最後執行；存檔最後註冊 → 最先執行
+        # 註冊順序 = LIFO:close 最先註冊 → 最後執行;存檔最後註冊 → 最先執行
+        # _close_training_logger 一次關 CSV file handle + SummaryWriter,取代
+        # 原本的 _close_episode_logger + _close_tb_writer。
+        atexit.register(self._close_training_logger)
         atexit.register(self._close_io_log)
-        atexit.register(self._close_tb_writer)
         atexit.register(self.save_persistent)
         atexit.register(self._save_model)
 
@@ -973,32 +999,36 @@ class VisualAgentV3(VisualAgentCommonMixin):
         )
         self._io_log.flush()
 
-        self.tb_writer.add_scalar("train/Q_loss",            loss.item(),                  self.total_it)
-        self.tb_writer.add_scalar("train/q_mean",            q_mean,                       self.total_it)
-        self.tb_writer.add_scalar("train/real_reward_mean",  real_reward_mean,             self.total_it)
-        self.tb_writer.add_scalar("train/epsilon",           self.epsilon,                 self.total_it)
-        self.tb_writer.add_scalar("train/frac_huber_clipped", frac_clipped,                 self.total_it)
-        self.tb_writer.add_scalar("fpn/norm_entropy",         fpn_norm_entropy,             self.total_it)
-        self.tb_writer.add_scalar("fpn/tau_std",              fpn_tau_std,                  self.total_it)
-        self.tb_writer.add_scalar("train/td_error_mean",     td_error.mean().item(),       self.total_it)
-        self.tb_writer.add_scalar("train/td_error_max",      td_error.max().item(),        self.total_it)
-        self.tb_writer.add_scalar("train/target_q_mean",     target_quantiles.float().mean().item(), self.total_it)
-        self.tb_writer.add_scalar("grad/total_norm",         grad_norm_total_value,        self.total_it)
-        self.tb_writer.add_scalar("grad/post_total_norm",    grad_post_total,             self.total_it)
-        self.tb_writer.add_scalar("grad/clip_threshold",     grad_clip_threshold,         self.total_it)
-        self.tb_writer.add_scalar("grad/clip_percent",       grad_clip_percent,           self.total_it)
-        self.tb_writer.add_scalar("grad/clip_excess_norm",   grad_clip_excess_norm,       self.total_it)
-        self.tb_writer.add_scalar("grad/clip_excess_ratio",  grad_clip_excess_ratio,      self.total_it)
-        self.tb_writer.add_scalar("grad_pre/backbone",       backbone_pre,                 self.total_it)
-        self.tb_writer.add_scalar("grad_pre/head",           head_pre,                     self.total_it)
-        self.tb_writer.add_scalar("grad_post/backbone",      backbone_post,                self.total_it)
-        self.tb_writer.add_scalar("grad_post/head",          head_post,                    self.total_it)
+        # Per-step diagnostics 全部走 training_logger.log(... csv=False) —— csv=False
+        # 表示「只進 TB,不入 CSV row」。logger 收到後 call SummaryWriter.add_scalar,
+        # 等同直接寫,但介面跟 episode summary 統一。
+        step = self.total_it
+        self.training_logger.log("train/Q_loss",            loss.item(),                                   step=step, csv=False)
+        self.training_logger.log("train/q_mean",            q_mean,                                        step=step, csv=False)
+        self.training_logger.log("train/real_reward_mean",  real_reward_mean,                              step=step, csv=False)
+        self.training_logger.log("train/epsilon",           self.epsilon,                                  step=step, csv=False)
+        self.training_logger.log("train/frac_huber_clipped", frac_clipped,                                 step=step, csv=False)
+        self.training_logger.log("fpn/norm_entropy",        fpn_norm_entropy,                              step=step, csv=False)
+        self.training_logger.log("fpn/tau_std",             fpn_tau_std,                                   step=step, csv=False)
+        self.training_logger.log("train/td_error_mean",     td_error.mean().item(),                        step=step, csv=False)
+        self.training_logger.log("train/td_error_max",      td_error.max().item(),                         step=step, csv=False)
+        self.training_logger.log("train/target_q_mean",     target_quantiles.float().mean().item(),        step=step, csv=False)
+        self.training_logger.log("grad/total_norm",         grad_norm_total_value,                         step=step, csv=False)
+        self.training_logger.log("grad/post_total_norm",    grad_post_total,                               step=step, csv=False)
+        self.training_logger.log("grad/clip_threshold",     grad_clip_threshold,                           step=step, csv=False)
+        self.training_logger.log("grad/clip_percent",       grad_clip_percent,                             step=step, csv=False)
+        self.training_logger.log("grad/clip_excess_norm",   grad_clip_excess_norm,                         step=step, csv=False)
+        self.training_logger.log("grad/clip_excess_ratio",  grad_clip_excess_ratio,                        step=step, csv=False)
+        self.training_logger.log("grad_pre/backbone",       backbone_pre,                                  step=step, csv=False)
+        self.training_logger.log("grad_pre/head",           head_pre,                                      step=step, csv=False)
+        self.training_logger.log("grad_post/backbone",      backbone_post,                                 step=step, csv=False)
+        self.training_logger.log("grad_post/head",          head_post,                                     step=step, csv=False)
         if weight_distance_log is not None:
-            self.tb_writer.add_scalar("weights/delta_from_init", weight_distance_log["from_init"], self.total_it)
-            self.tb_writer.add_scalar("weights/delta_from_prev_window", weight_distance_log["from_prev_window"], self.total_it)
+            self.training_logger.log("weights/delta_from_init",        weight_distance_log["from_init"],        step=step, csv=False)
+            self.training_logger.log("weights/delta_from_prev_window", weight_distance_log["from_prev_window"], step=step, csv=False)
 
         if self.scaler.is_enabled():
-            self.tb_writer.add_scalar("train/scaler_scale", self.scaler.get_scale(), self.total_it)
+            self.training_logger.log("train/scaler_scale", self.scaler.get_scale(), step=step, csv=False)
 
         # ── LR scalars(每個 param group 一條,在 TB 上歸在 lr/ 分類底下)──
         # build_fqf_optimizer 在每個 group 內塞了 "name" key;若舊 checkpoint 載入後沒
@@ -1007,9 +1037,9 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # 真正生效的 LR — TB 上能直接看到 warmup ramp + 三個 group 的 ratio。
         for idx, group in enumerate(self.optimizer.param_groups):
             tag = group.get("name") or f"group_{idx}"
-            self.tb_writer.add_scalar(f"lr/{tag}", group["lr"], self.total_it)
+            self.training_logger.log(f"lr/{tag}", group["lr"], step=step, csv=False)
 
-        self.tb_writer.flush()
+        self.training_logger.flush()
         _dbg(f"[train_step] EXIT total_it={self.total_it}")
         _dbg_mem("train_step EXIT")
         return {"Q_loss": loss.item(), "q_mean": q_mean}
@@ -1038,7 +1068,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self._flush_n_step_buffer()
         # episode_count 是 @property delegate,history.record() 已自動 += 1。
         # epsilon 也已在 log_episode_metrics() 透過 controller.update 更新好。
-        self.tb_writer.add_scalar("episode/epsilon", self.epsilon, self.episode_count)
+        self.training_logger.log("episode/epsilon", self.epsilon, step=self.episode_count, csv=False)
         self._save_model()
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
             print(f"[V3] Periodic save at episode {self.episode_count} | epsilon={self.epsilon:.4f}")
@@ -1062,25 +1092,34 @@ class VisualAgentV3(VisualAgentCommonMixin):
         rolling_wr = self.training_history.win_rate(window=100)
         next_eps = self.epsilon_controller.update(rolling_wr)
 
-        # 拿掉 `episode/win` — 0/1 binary 噪音大,看 `episode/win_rate_recent` 就好。
-        self.tb_writer.add_scalar("episode/reward_mean",        float(reward_mean),        ep_idx)
-        self.tb_writer.add_scalar("episode/invalid_click_rate", float(invalid_click_rate), ep_idx)
-        self.tb_writer.add_scalar("episode/win_rate_recent",    rolling_wr,                ep_idx)
+        # Episode summary metrics 走 TrainingLogger — 一次寫 TB + CSV。CSV row
+        # 累積到結尾 commit_csv_row 才落地。NOTE: 拿掉 `episode/win` — 0/1 binary
+        # 噪音大,看 `episode/win_rate_recent` 就好;但 `is_win` 仍寫 CSV(AI
+        # 端可自己 rolling 任意 window)。
+        self.training_logger.log("episode/reward_mean",        float(reward_mean),        step=ep_idx, csv_col="reward_mean")
+        self.training_logger.log("episode/invalid_click_rate", float(invalid_click_rate), step=ep_idx, csv_col="invalid_click_rate")
+        self.training_logger.log("episode/win_rate_recent",    rolling_wr,                step=ep_idx, csv_col="win_rate_recent")
+        self.training_logger.log("is_win",                     int(bool(win)),            step=ep_idx, tb=False)
+        self.training_logger.log("epsilon",                    next_eps,                  step=ep_idx, tb=False)  # TB 端由 on_episode_end 寫
+        self.training_logger.log("timestamp",                  datetime.datetime.now().isoformat(), step=ep_idx, tb=False)
+        self.training_logger.log("episode",                    ep_idx,                    step=ep_idx, tb=False)
 
         # Replay buffer composition — agent.train_step 內也寫,但 buffer 沒滿
         # MINIMUM_DATA_SIZE 前 train_step return None,那段時間 TB 空白。每個 episode
-        # 從這寫保證 fill curve 與 4 個 bucket 比例從 ep 1 開始就有。
+        # 從這寫保證 fill curve 與 4 個 bucket 比例從 ep 1 開始就有。TB only —
+        # 走 logger 統一介面跟 csv=False。
         for bucket_name, count in self.replay_buffer.bucket_sizes().items():
-            self.tb_writer.add_scalar(f"buffer/bucket_{bucket_name}", count, ep_idx)
-        self.tb_writer.add_scalar("buffer/total_size", self.replay_buffer.size(), ep_idx)
+            self.training_logger.log(f"buffer/bucket_{bucket_name}", count, step=ep_idx, csv=False)
+        self.training_logger.log("buffer/total_size", self.replay_buffer.size(), step=ep_idx, csv=False)
 
         # Agent 內部 counter — total_it 看 train_step 跑了幾次;n_step_buffer_len 在
         # episode 邊界預期 = 0(reset_episode 與 on_episode_end 都 flush),長期非 0
-        # 代表 flush 沒生效。
-        self.tb_writer.add_scalar("train/total_it",             self.total_it,             ep_idx)
-        self.tb_writer.add_scalar("train/n_step_buffer_len",    len(self.n_step_buffer),   ep_idx)
+        # 代表 flush 沒生效。TB only。
+        self.training_logger.log("train/total_it",          self.total_it,           step=ep_idx, csv=False)
+        self.training_logger.log("train/n_step_buffer_len", len(self.n_step_buffer), step=ep_idx, csv=False)
 
-        self.tb_writer.flush()
+        self.training_logger.commit_csv_row()
+        self.training_logger.flush()
 
         status = "WIN " if win else "LOSE"
         print(
@@ -1275,10 +1314,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
             return
         weight_norm = self._tensor_norm(param)
         if weight_norm is not None:
-            self.tb_writer.add_scalar(f"weight_norm/{tag_prefix}", weight_norm, global_step)
+            self.training_logger.log(f"weight_norm/{tag_prefix}", weight_norm, step=global_step, csv=False)
         grad_norm = self._tensor_norm(param.grad)
         if grad_norm is not None:
-            self.tb_writer.add_scalar(f"grad_norm/{tag_prefix}", grad_norm, global_step)
+            self.training_logger.log(f"grad_norm/{tag_prefix}", grad_norm, step=global_step, csv=False)
 
     def _log_backbone_weight_norms(self, global_step: int) -> None:
         # Log per-layer transformer norms to pinpoint where instability starts.
@@ -1340,9 +1379,16 @@ class VisualAgentV3(VisualAgentCommonMixin):
         if self._io_log and not self._io_log.closed:
             self._io_log.close()
 
-    def _close_tb_writer(self) -> None:
-        if getattr(self, "tb_writer", None) is not None:
-            self.tb_writer.close()
+    def _close_training_logger(self) -> None:
+        """Atexit hook:同時關 CSV file handle 與 SummaryWriter。
+
+        SummaryWriter 自 `__init__` 以來只活在 self.training_logger 內部,沒有外
+        部引用;這裡只需要 call training_logger.close() 一次,內部會把 csv 與
+        TB writer 都關掉。
+        """
+        logger = getattr(self, "training_logger", None)
+        if logger is not None and not logger.closed:
+            logger.close()
 
     # ──────────────────────────── action image log ─────────────────────
 

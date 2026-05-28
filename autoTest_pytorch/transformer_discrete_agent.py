@@ -25,6 +25,7 @@ from model_structure.archive_manager import (
     RolloverTextLog,
     swap_logger_file_handler,
 )
+from model_structure.training_logger import TrainingLogger
 import model_structure.CategorizedReplayBuffer as _crb_module
 
 
@@ -297,13 +298,25 @@ def _quantile_huber_loss(current_quantiles, target_quantiles, tau_hats, return_s
     return loss
 
 
+_DEFAULT_CSV_FIELDS = (
+    "episode", "reward", "steps", "is_win", "invalid_rate",
+    "Q_loss", "q_mean", "epsilon",
+    "eval_avg_reward", "eval_win_rate", "eval_avg_steps", "eval_avg_invalid_rate",
+    "timestamp",
+)
+
+
 class TransformerDiscreteAgent:
     """FQF agent with grid encoder-decoder transformer backbone."""
 
-    def __init__(self, grid_h=10, grid_w=10):
+    def __init__(self, grid_h=10, grid_w=10, *, csv_fields: list[str] | None = None):
         self.grid_h = grid_h
         self.grid_w = grid_w
         self.num_actions = grid_h * grid_w
+        # csv_fields 預設值對到 train_stage1_simple.py 主迴圈會寫入的欄位。Train
+        # script 想加 / 改欄位就 caller 傳進來。Agent 自己只負責建 TrainingLogger,
+        # 不對 schema 細節下決策(field 是「給 AI 看什麼資料」的訓練設定)。
+        self._csv_fields = list(csv_fields) if csv_fields else list(_DEFAULT_CSV_FIELDS)
 
         self.backbone = TransformerActorNetwork(grid_h=grid_h, grid_w=grid_w).to(device)
         self.q_network = FQFQNetwork(
@@ -419,16 +432,29 @@ class TransformerDiscreteAgent:
         # 全部跟著翻檔。本身的 console print 由 SessionArchiveManager 在翻頁時印。
         self.archive.register_on_rollover(self._on_archive_rollover)
 
-        # TensorBoard — own log_dir keyed by session timestamp, so the
-        # training script (train_stage1_simple.py) can reuse it instead of
-        # creating a second writer.
+        # TensorBoard log_dir keyed by session timestamp。SummaryWriter 變成
+        # TrainingLogger 的內部 detail,agent 不再對外暴露 self.tb_writer ──
+        # 所有 TB 寫入(包含 per-step diagnostics)都從 self.training_logger.log
+        # /log_text / flush 走。
         tb_root = TRANSFORMER_MODEL_PATH / "tensorboard"
         tb_root.mkdir(parents=True, exist_ok=True)
         tb_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.tensorboard_log_dir = tb_root / tb_timestamp
-        self.tb_writer = SummaryWriter(log_dir=str(self.tensorboard_log_dir))
         print(f"[FQF] TensorBoard: tensorboard --logdir {tb_root}")
         print(f"[FQF] Current run: {self.tensorboard_log_dir}")
+
+        # TrainingLogger — episode summary 兩邊一起寫 + 接管所有 train_step
+        # per-step TB scalar。CSV 寫到當下 hour 資料夾,翻頁時跟著 swap。
+        csv_path = self.archive.current_archive_dir / "training_log.csv"
+        self.training_logger = TrainingLogger(
+            csv_path=csv_path,
+            csv_fields=self._csv_fields,
+            tb_writer=SummaryWriter(log_dir=str(self.tensorboard_log_dir)),
+        )
+        self.archive.register_on_rollover(
+            lambda new_dir: self.training_logger.swap_csv_to(new_dir / "training_log.csv")
+        )
+        print(f"[FQF] CSV log: {csv_path}")
         self._write_metric_docs()
 
         self.try_load_model()
@@ -441,9 +467,10 @@ class TransformerDiscreteAgent:
         self._rolling_weight_reference_step = self.total_it
 
         # atexit order is LIFO. Desired run order: _save_model (which flushes
-        # tb) → save_persistent → close io_log → close tb_writer. So register
-        # closes first (run last) and saves last (run first).
-        atexit.register(self._close_tb_writer)
+        # tb via training_logger.flush()) → save_persistent → close io_log →
+        # close training_logger (closes CSV + SummaryWriter together). So
+        # register closes first (run last) and saves last (run first).
+        atexit.register(self._close_training_logger)
         atexit.register(self._close_io_log)
         atexit.register(self.save_persistent)
         atexit.register(self._save_model)
@@ -928,8 +955,8 @@ class TransformerDiscreteAgent:
             rolling_distance = self._snapshot_distance(current_snapshot, self._rolling_weight_reference)
             self._rolling_weight_reference = current_snapshot
             self._rolling_weight_reference_step = self.total_it
-            self.tb_writer.add_scalar("weights/delta_from_init", init_distance, self.total_it)
-            self.tb_writer.add_scalar("weights/delta_from_prev_window", rolling_distance, self.total_it)
+            self.training_logger.log("weights/delta_from_init", init_distance, step=self.total_it, csv=False)
+            self.training_logger.log("weights/delta_from_prev_window", rolling_distance, step=self.total_it, csv=False)
 
         # ── Diagnostic / logging — only every DIAGNOSTIC_LOG_EVERY steps ──
         # 把 io_log / TB / no_grad stats 區塊降頻;其他 step 直接 return None,
@@ -1022,39 +1049,39 @@ class TransformerDiscreteAgent:
 
         # ── TensorBoard scalars ──
         step = self.total_it
-        self.tb_writer.add_scalar("train/Q_loss", loss_value, step)
-        self.tb_writer.add_scalar("train/q_mean", q_mean, step)
-        self.tb_writer.add_scalar("train/real_reward_mean", real_reward_mean, step)
-        self.tb_writer.add_scalar("train/q_taken_std", q_taken_std, step)
-        self.tb_writer.add_scalar("train/q_max", q_all_max, step)
-        self.tb_writer.add_scalar("train/q_min", q_all_min, step)
-        self.tb_writer.add_scalar("train/target_q_mean", target_q_mean, step)
-        self.tb_writer.add_scalar("train/target_q_std", target_q_std, step)
-        self.tb_writer.add_scalar("train/td_error_mean", td_error_mean, step)
-        self.tb_writer.add_scalar("train/td_error_max", td_error_max, step)
-        self.tb_writer.add_scalar("train/frac_huber_clipped", frac_huber_clipped, step)
-        self.tb_writer.add_scalar("train/epsilon", self.epsilon, step)
-        self.tb_writer.add_scalar("fpn/norm_entropy", fpn_norm_entropy, step)
-        self.tb_writer.add_scalar("fpn/tau_std", fpn_tau_std, step)
-        self.tb_writer.add_scalar("grad/total_pre_clip", grad_norm_total_value, step)
-        self.tb_writer.add_scalar("grad/total_post_clip", grad_post_total, step)
-        self.tb_writer.add_scalar("grad/clip_percent", grad_clip_percent, step)
-        self.tb_writer.add_scalar("grad/clip_excess_norm", grad_clip_excess_norm, step)
-        self.tb_writer.add_scalar("grad/clip_excess_ratio", grad_clip_excess_ratio, step)
-        self.tb_writer.add_scalar("grad_pre/backbone", backbone_pre, step)
-        self.tb_writer.add_scalar("grad_pre/head", head_pre, step)
-        self.tb_writer.add_scalar("grad_post/backbone", backbone_post, step)
-        self.tb_writer.add_scalar("grad_post/head", head_post, step)
-        self.tb_writer.add_scalar("grad_pre/extras", extras_pre, step)
-        self.tb_writer.add_scalar("grad_post/extras", extras_post, step)
+        self.training_logger.log("train/Q_loss", loss_value, step=step, csv=False)
+        self.training_logger.log("train/q_mean", q_mean, step=step, csv=False)
+        self.training_logger.log("train/real_reward_mean", real_reward_mean, step=step, csv=False)
+        self.training_logger.log("train/q_taken_std", q_taken_std, step=step, csv=False)
+        self.training_logger.log("train/q_max", q_all_max, step=step, csv=False)
+        self.training_logger.log("train/q_min", q_all_min, step=step, csv=False)
+        self.training_logger.log("train/target_q_mean", target_q_mean, step=step, csv=False)
+        self.training_logger.log("train/target_q_std", target_q_std, step=step, csv=False)
+        self.training_logger.log("train/td_error_mean", td_error_mean, step=step, csv=False)
+        self.training_logger.log("train/td_error_max", td_error_max, step=step, csv=False)
+        self.training_logger.log("train/frac_huber_clipped", frac_huber_clipped, step=step, csv=False)
+        self.training_logger.log("train/epsilon", self.epsilon, step=step, csv=False)
+        self.training_logger.log("fpn/norm_entropy", fpn_norm_entropy, step=step, csv=False)
+        self.training_logger.log("fpn/tau_std", fpn_tau_std, step=step, csv=False)
+        self.training_logger.log("grad/total_pre_clip", grad_norm_total_value, step=step, csv=False)
+        self.training_logger.log("grad/total_post_clip", grad_post_total, step=step, csv=False)
+        self.training_logger.log("grad/clip_percent", grad_clip_percent, step=step, csv=False)
+        self.training_logger.log("grad/clip_excess_norm", grad_clip_excess_norm, step=step, csv=False)
+        self.training_logger.log("grad/clip_excess_ratio", grad_clip_excess_ratio, step=step, csv=False)
+        self.training_logger.log("grad_pre/backbone", backbone_pre, step=step, csv=False)
+        self.training_logger.log("grad_pre/head", head_pre, step=step, csv=False)
+        self.training_logger.log("grad_post/backbone", backbone_post, step=step, csv=False)
+        self.training_logger.log("grad_post/head", head_post, step=step, csv=False)
+        self.training_logger.log("grad_pre/extras", extras_pre, step=step, csv=False)
+        self.training_logger.log("grad_post/extras", extras_post, step=step, csv=False)
         # check/ namespace — 驗證用,不是核心訓練指標。
-        self.tb_writer.add_scalar("check/is_weight_mean", is_weight_mean, step)
-        self.tb_writer.add_scalar("check/is_weight_min", is_weight_min, step)
+        self.training_logger.log("check/is_weight_mean", is_weight_mean, step=step, csv=False)
+        self.training_logger.log("check/is_weight_min", is_weight_min, step=step, csv=False)
         # IS weight 是 max-normalized 所以 max 恆為 1.0,ratio = 1/min。
         # 健康範圍 < 10;若 > 100 代表 IS 公式可能又 broken(死條目 weight 爆炸之類)。
-        self.tb_writer.add_scalar("check/is_weight_ratio", 1.0 / max(is_weight_min, 1e-12), step)
+        self.training_logger.log("check/is_weight_ratio", 1.0 / max(is_weight_min, step=1e-12, csv=False), step)
         # 每筆 entry 平均被抽到幾次。數值單調隨訓練步數成長;高 mean 代表 PER 集中度高,batch 多樣性低。
-        self.tb_writer.add_scalar("check/mean_sample_count", self.replay_buffer.mean_sample_count(), step)
+        self.training_logger.log("check/mean_sample_count", self.replay_buffer.mean_sample_count(), step=step, csv=False)
 
         # Per-layer weight/grad norms — collected pre-clip inside the try
         # block above; written here so we never leave orphan rows on a
@@ -1064,8 +1091,8 @@ class TransformerDiscreteAgent:
 
         # Buffer composition — diagnoses replay drift over time.
         for bucket_name, count in self.replay_buffer.bucket_sizes().items():
-            self.tb_writer.add_scalar(f"buffer/bucket_{bucket_name}", count, step)
-        self.tb_writer.add_scalar("buffer/total_size", self.replay_buffer.size(), step)
+            self.training_logger.log(f"buffer/bucket_{bucket_name}", count, step=step, csv=False)
+        self.training_logger.log("buffer/total_size", self.replay_buffer.size(), step=step, csv=False)
 
         return {
             "Q_loss": loss_value,
@@ -1093,7 +1120,7 @@ class TransformerDiscreteAgent:
             "搭配 β annealing 看走勢:β 上升時 mean 應緩慢下降;若反向上升 "
             "代表 priority 分佈在塌掉。"
         )
-        self.tb_writer.add_text("docs/is_weight_mean", is_weight_mean_doc, 0)
+        self.training_logger.log_text("docs/is_weight_mean", is_weight_mean_doc, step=0)
 
         is_weight_ratio_doc = (
             "**`check/is_weight_ratio`** — IS weight 的 max/min 比例 (= 1.0 / min,"
@@ -1111,7 +1138,7 @@ class TransformerDiscreteAgent:
             "_effective_priority=0 在 IS 公式裡撞到 `(1e-10)^(-β) ≈ 10^4` 變 max,"
             "把活條目的 weight 壓到 ~1e-5。"
         )
-        self.tb_writer.add_text("docs/is_weight_ratio", is_weight_ratio_doc, 0)
+        self.training_logger.log_text("docs/is_weight_ratio", is_weight_ratio_doc, step=0)
 
     def _assert_finite(self, stage, name, tensor):
         """訓練流程的 NaN/Inf probe:命中就 raise,訊息含 stage / tensor / step。
@@ -1267,9 +1294,9 @@ class TransformerDiscreteAgent:
             self._vclamp_total = 0
         self._vclamp_total += total
         try:
-            self.tb_writer.add_scalar("vclamp/elements_this_step", total, self.total_it)
-            self.tb_writer.add_scalar("vclamp/elements_total", self._vclamp_total, self.total_it)
-            self.tb_writer.add_scalar("vclamp/params_this_step", len(detections), self.total_it)
+            self.training_logger.log("vclamp/elements_this_step", total, step=self.total_it, csv=False)
+            self.training_logger.log("vclamp/elements_total", self._vclamp_total, step=self.total_it, csv=False)
+            self.training_logger.log("vclamp/params_this_step", len(detections), step=self.total_it, csv=False)
         except Exception:
             pass
 
@@ -1439,13 +1466,19 @@ class TransformerDiscreteAgent:
         """Write previously-collected per-layer snapshots to TensorBoard."""
         for tag_prefix, weight_norm, grad_norm in snapshots:
             if weight_norm is not None:
-                self.tb_writer.add_scalar(f"weight_norm/{tag_prefix}", weight_norm, global_step)
+                self.training_logger.log(f"weight_norm/{tag_prefix}", weight_norm, step=global_step, csv=False)
             if grad_norm is not None:
-                self.tb_writer.add_scalar(f"grad_norm/{tag_prefix}", grad_norm, global_step)
+                self.training_logger.log(f"grad_norm/{tag_prefix}", grad_norm, step=global_step, csv=False)
 
-    def _close_tb_writer(self):
-        if getattr(self, "tb_writer", None) is not None:
-            self.tb_writer.close()
+    def _close_training_logger(self):
+        """Atexit hook:同時關 CSV file handle 與 SummaryWriter。
+
+        SummaryWriter 自 __init__ 起只活在 self.training_logger 內,沒有外部
+        引用;這裡一次 call .close() 把兩邊關掉,取代原本分開的 _close_tb_writer。
+        """
+        logger = getattr(self, "training_logger", None)
+        if logger is not None and not logger.closed:
+            logger.close()
 
     def _close_io_log(self):
         if self._io_log and not self._io_log.closed:
@@ -1456,7 +1489,7 @@ class TransformerDiscreteAgent:
         # episode_count 已在 log_episode_metrics() 內 history.record() 時自動
         # 從 training_history 推導出來,這裡不再 += 1(它是 @property delegate)。
         # epsilon 也已在 log_episode_metrics() 透過 controller.update 更新好。
-        self.tb_writer.add_scalar("episode/epsilon", self.epsilon, self.episode_count)
+        self.training_logger.log("episode/epsilon", self.epsilon, step=self.episode_count, csv=False)
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
             print(
                 f"[FQF] Periodic save at episode {self.episode_count}"
@@ -1494,8 +1527,8 @@ class TransformerDiscreteAgent:
         rolling_wr = self.training_history.win_rate(window=100)
         self.epsilon_controller.update(rolling_wr)
 
-        self.tb_writer.add_scalar("episode/reward_mean",        float(reward_mean),        ep_idx)
-        self.tb_writer.add_scalar("episode/invalid_click_rate", float(invalid_click_rate), ep_idx)
+        self.training_logger.log("episode/reward_mean", float(reward_mean), step=ep_idx, csv=False)
+        self.training_logger.log("episode/invalid_click_rate", float(invalid_click_rate), step=ep_idx, csv=False)
 
     # ──────────────────────────── lr warmup ────────────────────────────
 
@@ -1521,7 +1554,7 @@ class TransformerDiscreteAgent:
     def _save_model(self):
         # Flush TB before saving — pair the on-disk model checkpoint with the
         # matching TB scalars from this point in training.
-        self.tb_writer.flush()
+        self.training_logger.flush()
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
 
         backbone_sd = self.backbone.state_dict()
