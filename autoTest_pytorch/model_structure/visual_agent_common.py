@@ -32,6 +32,18 @@ class VisualAgentCommonMixin:
     def _training_history_path(self) -> Path:
         return self.model_path / "training_history.pth"
 
+    def _to_storage_state(self, state: torch.Tensor | None) -> torch.Tensor | None:
+        """Hook: convert a raw env state into what should live in the replay buffer.
+
+        Default: detach + move to CPU (used by v1/v2 which store raw screenshots).
+        V3 overrides this to run the frozen YOLO backbone once and store the
+        (128, h, w) feature tensor instead of the (3, H, W) screenshot, cutting
+        per-entry size and skipping the YOLO forward at every gradient step.
+        """
+        if state is None:
+            return None
+        return state.detach().cpu()
+
     def store_transition(
         self,
         state: torch.Tensor,
@@ -42,9 +54,9 @@ class VisualAgentCommonMixin:
     ) -> None:
         self.recent_real_rewards.append(float(reward))
         transition = {
-            "state": state.detach().cpu(),
+            "state": self._to_storage_state(state),
             "action": int(action),
-            "next_state": next_state.detach().cpu() if next_state is not None else None,
+            "next_state": self._to_storage_state(next_state),
             "reward": float(reward),
             "done": bool(done),
         }
@@ -216,34 +228,61 @@ class VisualAgentCommonMixin:
         for file_path in self.replay_path.glob("*.pt"):
             file_path.unlink()
 
+        # Agents can declare a non-screenshot state shape via `replay_state_shape`
+        # (V3 stores YOLO backbone features (128, h, w) instead of raw screenshots).
+        # Default = (3, *image_size) so v1/v2 keep their screenshot validation.
+        expected_shape = tuple(getattr(self, "replay_state_shape", (3, *self.image_size)))
+
         loaded_count = 0
+        skipped_missing = 0
+        skipped_shape_mismatch = 0
+        skipped_load_error = 0
         self.replay_buffer.index = []
         for entry in persistent_entries[: self.replay_buffer.max_size]:
             state_src_str = entry.get("state", entry.get("state_path"))
             if state_src_str is None:
+                skipped_missing += 1
                 continue
             state_src = Path(state_src_str)
             if not state_src.exists():
+                skipped_missing += 1
                 continue
 
+            # weights_only=True：peek 出來的東西必定是 tensor;限制反序列化能執行的
+            # opcode,避免 replay_buffer_save/ 底下的 .pt 被惡意/損毀檔案 RCE。
             try:
-                peek = torch.load(str(state_src), map_location="cpu")
-                if not torch.is_tensor(peek) or tuple(peek.shape) != (3, *self.image_size):
+                peek = torch.load(str(state_src), map_location="cpu", weights_only=True)
+                if not torch.is_tensor(peek) or tuple(peek.shape) != expected_shape:
+                    skipped_shape_mismatch += 1
                     continue
             except Exception:
+                skipped_load_error += 1
                 continue
+
+            # next_state 也要 peek+驗 shape,避免 state.pt 是新格式但 next_state.pt 是舊
+            # 格式(版本切換時的混雜狀態)造成 train_step 拿到形狀錯誤的 tensor 而 crash。
+            next_state_dst_candidate = None
+            next_src_str = entry.get("next_state", entry.get("next_state_path"))
+            if next_src_str:
+                next_src = Path(next_src_str)
+                if next_src.exists():
+                    try:
+                        next_peek = torch.load(
+                            str(next_src), map_location="cpu", weights_only=True
+                        )
+                        if torch.is_tensor(next_peek) and tuple(next_peek.shape) == expected_shape:
+                            next_state_dst_candidate = next_src
+                    except Exception:
+                        next_state_dst_candidate = None
 
             storage_id = loaded_count
             state_dst = self.replay_path / f"state_{storage_id}.pt"
             shutil.copy2(str(state_src), str(state_dst))
 
             next_state_dst = None
-            next_src_str = entry.get("next_state", entry.get("next_state_path"))
-            if next_src_str:
-                next_src = Path(next_src_str)
-                if next_src.exists():
-                    next_state_dst = self.replay_path / f"next_state_{storage_id}.pt"
-                    shutil.copy2(str(next_src), str(next_state_dst))
+            if next_state_dst_candidate is not None:
+                next_state_dst = self.replay_path / f"next_state_{storage_id}.pt"
+                shutil.copy2(str(next_state_dst_candidate), str(next_state_dst))
 
             runtime_entry = {
                 "storage_id": storage_id,
@@ -276,7 +315,87 @@ class VisualAgentCommonMixin:
         self.replay_buffer.size_count = loaded_count
         self.replay_buffer.next_storage_id = loaded_count
         self.replay_buffer.insert_counter = loaded_count
-        print(f"{self.log_prefix} Loaded {loaded_count} replay buffer entries")
+        # 把略過原因攤開,避免 expected_shape 改了之後使用者只看到 "Loaded 0"
+        # (例如 v3 從截圖切到 cached features 那一次,所有舊 entries 都會 shape mismatch)。
+        skipped_total = skipped_missing + skipped_shape_mismatch + skipped_load_error
+        suffix = ""
+        if skipped_total > 0:
+            suffix = (
+                f" | skipped {skipped_total} "
+                f"(missing={skipped_missing}, shape!={tuple(expected_shape)}={skipped_shape_mismatch}, "
+                f"load_error={skipped_load_error})"
+            )
+        print(f"{self.log_prefix} Loaded {loaded_count} replay buffer entries{suffix}")
+
+    def _purge_stale_replay_files(self) -> None:
+        """刪除 replay_path / replay_persistent_path 內 shape 與目前 replay_state_shape
+        不一致的 .pt 檔(以及讀檔失敗的損毀檔)。
+
+        呼叫時機:agent __init__ 內、try_load_model() 之前。用途是把上一版架構留下的
+        殘留資料砍乾淨,例如 v3 從 (3, 640, 640) 截圖切到 (128, h, w) cached features
+        那一次,舊 .pt 全部都會 shape mismatch。
+
+        若 replay_persistent_path 內有 .pt 被刪,順手把 training_state.pth 一起刪 —
+        它的 persistent_entries 內路徑已部分指向不存在的檔,留著只會讓
+        _load_persistent_training_state 印一堆 missing warning。
+        """
+        expected_shape = tuple(
+            getattr(self, "replay_state_shape", (3, *self.image_size))
+        )
+
+        def _purge_dir(dir_path: Path) -> int:
+            if not dir_path.exists():
+                return 0
+            deleted = 0
+            for pt_file in dir_path.glob("*.pt"):
+                keep = False
+                try:
+                    # weights_only=True 限制 pickle 反序列化能跑的 opcode,
+                    # 避免損毀/惡意檔案 RCE。
+                    peek = torch.load(
+                        str(pt_file), map_location="cpu", weights_only=True
+                    )
+                    if torch.is_tensor(peek) and tuple(peek.shape) == expected_shape:
+                        keep = True
+                except Exception:
+                    keep = False  # 讀失敗 → 損毀 → 也視為該刪
+                if not keep:
+                    try:
+                        pt_file.unlink()
+                        deleted += 1
+                    except Exception as exc:
+                        print(
+                            f"{self.log_prefix} Failed to unlink stale "
+                            f"{pt_file}: {exc}"
+                        )
+            return deleted
+
+        deleted_runtime = _purge_dir(self.replay_path)
+        deleted_persistent = _purge_dir(self.replay_persistent_path)
+
+        # Persistent .pt 被砍 → training_state.pth 的 entries 指向不存在的檔。
+        # 直接刪掉它,避免 _load_persistent_training_state 拿過時 metadata。
+        if deleted_persistent > 0:
+            ts_path = self._training_state_path()
+            if ts_path.exists():
+                try:
+                    ts_path.unlink()
+                    print(
+                        f"{self.log_prefix} Purged stale training_state.pth "
+                        f"(referenced deleted files)"
+                    )
+                except Exception as exc:
+                    print(
+                        f"{self.log_prefix} Failed to unlink stale "
+                        f"{ts_path}: {exc}"
+                    )
+
+        if deleted_runtime or deleted_persistent:
+            print(
+                f"{self.log_prefix} Purged stale replay buffer files "
+                f"(runtime={deleted_runtime}, persistent={deleted_persistent}) "
+                f"— expected shape {expected_shape}"
+            )
 
     def _module_grad_norm(self, module) -> float:
         grad_sq_sum = 0.0
