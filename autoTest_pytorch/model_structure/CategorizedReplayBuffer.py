@@ -609,9 +609,10 @@ class CategorizedReplayBuffer:
               Phase 2 用 PER 全域競爭 50% 名額。
             - ``balanced_ratio = 0.0``:純 PER 全域抽,沒 stratification。
 
-        Note for specific models:
-        Visual Agent typically doesn't use IS weights (ignores it),
-        Transformer Agent heavily relies on them.
+        IS weight 由 caller 自行決定要不要乘進 loss;v3 / stage1 兩邊的 train_step
+        都採 ``loss = (is_weights * per_sample_loss).mean()``,所以 ``beta`` 的
+        annealing 是 caller 的責任(buffer 端只在沒帶 ``beta`` 參數時 fallback 到
+        ``self.beta`` = ctor 的 ``beta_start``,不會自動 anneal)。
         """
         if self.size_count <= 0:
             raise RuntimeError("CategorizedReplayBuffer is empty")

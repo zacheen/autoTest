@@ -279,6 +279,12 @@ VISUAL_PRIORITY_MIN    = 0.05
 VISUAL_PRIORITY_MAX    = 5.0
 VISUAL_PRIORITY_EPS    = 1e-3
 VISUAL_AGE_DECAY       = 0.002
+# PER β annealing — 對齊 transformer_discrete_agent.py 的 PER_BETA_START/END。
+# β 從 BETA_START 線性 anneal 到 BETA_END,在 episode_count = BETA_EP 時飽和。
+# β 小 → IS weight 偏平均(弱修正,訓練初期穩);β=1 → 完全修正 priority 抽樣 bias。
+VISUAL_PER_BETA_START  = 0.4
+VISUAL_PER_BETA_END    = 1.0
+VISUAL_PER_BETA_EP     = 5000
 
 LOG_ACTIONS = True
 
@@ -474,6 +480,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
             priority_max=VISUAL_PRIORITY_MAX,
             priority_eps=VISUAL_PRIORITY_EPS,
             age_decay=VISUAL_AGE_DECAY,
+            beta_start=VISUAL_PER_BETA_START,
             quota_check_class="win",  # Minesweeper: win is the rare-event bottleneck class
         )
 
@@ -939,9 +946,16 @@ class VisualAgentV3(VisualAgentCommonMixin):
         _dbg(f"[train_step] ENTER total_it={self.total_it} buf_size={buf_size}")
         _dbg_mem("train_step ENTER")
         _dbg("[train_step] before replay_buffer.sample")
+        # PER β annealing — 對齊 transformer_discrete_agent.py:641-646。β 從
+        # BETA_START 線性 anneal 到 BETA_END(VISUAL_PER_BETA_EP 個 episode 飽和),
+        # 早期偏平均(弱修正、訓練穩),後期完全修正 priority 抽樣 bias。
+        per_beta = VISUAL_PER_BETA_START + (VISUAL_PER_BETA_END - VISUAL_PER_BETA_START) * min(
+            self.episode_count / VISUAL_PER_BETA_EP, 1.0
+        )
         state, action, next_state, reward, done, sample_indices, is_weights, discounts, n_steps = (
             self.replay_buffer.sample(
                 VISUAL_BATCH_SIZE,
+                beta=per_beta,
                 device=device,
                 include_extra=True,
             )
