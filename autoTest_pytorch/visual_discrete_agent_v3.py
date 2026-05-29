@@ -1704,7 +1704,9 @@ VisualAgentV3._module_grad_norm = VisualAgentCommonMixin._module_grad_norm
 VisualAgentV3._capture_trainable_weight_snapshot = VisualAgentCommonMixin._capture_trainable_weight_snapshot
 VisualAgentV3._snapshot_distance = VisualAgentCommonMixin._snapshot_distance
 VisualAgentV3._tensor_norm = VisualAgentCommonMixin._tensor_norm
-VisualAgentV3._log_param_weight_and_grad_norm = VisualAgentCommonMixin._log_param_weight_and_grad_norm
+# 不 rebind _log_param_weight_and_grad_norm:V3 已在 class body 自帶版本,寫到
+# self.training_logger.log()。Mixin 版本還在用舊的 self.tb_writer,V3 沒有那個
+# attribute,rebind 進來會 AttributeError。
 VisualAgentV3.log_action_image = VisualAgentCommonMixin.log_action_image
 VisualAgentV3._save_optimizer_state = VisualAgentCommonMixin._save_optimizer_state
 VisualAgentV3._load_optimizer_state = VisualAgentCommonMixin._load_optimizer_state
