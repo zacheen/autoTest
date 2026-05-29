@@ -285,6 +285,13 @@ VISUAL_AGE_DECAY       = 0.002
 VISUAL_PER_BETA_START  = 0.4
 VISUAL_PER_BETA_END    = 1.0
 VISUAL_PER_BETA_EP     = 5000
+# PER spread_decay latch — 對齊 transformer_discrete_agent.py 的 spread_decay 設計。
+# FQF quantile spread 進 priority modifier:wide spread = uncertain prediction → 抑制
+# 這類 sample 的有效 priority(避免被 env 隨機性主宰)。起步關閉(early RL variance
+# 大,spread 不能代表 uncertainty);win_rate(100) > LATCH_WR_THRESHOLD 後一次性
+# latch ON、永不關回 — 跟 dropout latch 同 threshold、同 monotone 設計。
+VISUAL_SPREAD_DECAY             = 2.0
+SPREAD_DECAY_LATCH_WR_THRESHOLD = DROPOUT_LATCH_WR_THRESHOLD
 
 LOG_ACTIONS = True
 
@@ -481,6 +488,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
             priority_eps=VISUAL_PRIORITY_EPS,
             age_decay=VISUAL_AGE_DECAY,
             beta_start=VISUAL_PER_BETA_START,
+            spread_decay=VISUAL_SPREAD_DECAY,
             quota_check_class="win",  # Minesweeper: win is the rare-event bottleneck class
         )
 
@@ -940,6 +948,14 @@ class VisualAgentV3(VisualAgentCommonMixin):
                     reason=f"train_step total_it={self.total_it}: win_rate(100) crossed threshold"
                 )
 
+        # Spread-decay latch — 對齊 transformer_discrete_agent.py:621-628。FQF quantile
+        # spread 進 priority modifier 的 master switch。同 threshold、同 monotone:跨過
+        # 就 ON、永不關回。state 在 buffer 物件上(self.replay_buffer.enable_spread_decay),
+        # 不存檔(stage1 也是)— resume 後第一個 train_step 重新 evaluate 即可。
+        if not self.replay_buffer.enable_spread_decay:
+            if self.training_history.win_rate(window=100) > SPREAD_DECAY_LATCH_WR_THRESHOLD:
+                self.replay_buffer.enable_spread_decay = True
+
         # Wall-clock 滿 1 小時翻頁;io_log / cuda_debug.log 都會自動跟著新的 archive
         # dir(註冊在 SessionArchiveManager 的 on_rollover callback 處理)。
         self.archive.maybe_rollover()
@@ -1058,6 +1074,11 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
             target_mean = target_quantiles.mean(dim=1, keepdim=True)
             td_error = (q_taken.detach().float() - target_mean.detach().float()).abs()
+            # Per-sample quantile spread for the chosen action — 餵 buffer 的 spread_decay
+            # modifier(_effective_priority 內,僅在 enable_spread_decay=True 時參與)。
+            # 對齊 transformer_discrete_agent.py:760:不論 latch 是否 ON 都寫,讓 latch 翻
+            # ON 時不會有 cold-start 期間(entry 內 quantile_spread 從上一輪 sample 起就有值)。
+            chosen_q_spread = chosen_quantiles.std(dim=1).detach()
             # fpn 兩條維持 tensor;.item() 延後到 DIAGNOSTIC gate 內跟其他 scalar
             # 一起 batch,省掉每步 2 個 GPU→CPU sync。
             fpn_norm_entropy_t = entropy.mean() / math.log(NUM_FQF_FRACTIONS)
@@ -1065,8 +1086,6 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
         _dbg_tensor("train_step.loss", loss)
         _dbg_tensor("train_step.td_error", td_error)
-        self.replay_buffer.update_priorities(sample_indices, td_error)
-        _dbg("[train_step] after update_priorities")
 
         self.optimizer.zero_grad(set_to_none=True)
         _dbg("[train_step] before backward")
@@ -1113,6 +1132,18 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.scaler.update()
         _dbg("[train_step] after optimizer.step")
         _dbg_mem("train_step after optimizer.step")
+
+        # 對齊 transformer_discrete_agent.py:955-959 ── update_priorities 放在 backward
+        # + clip + optimizer.step 全部成功後才寫;backward 失敗會直接 raise,priority
+        # 維持上一輪的值,避免「失敗的 step 仍把 priority 改掉」的不一致。
+        # quantile_spreads 不論 enable_spread_decay 是 True/False 都寫,讓 latch 翻 ON
+        # 時直接拿 sample 累積的真實 spread,而不是從 0 開始 cold-start。
+        self.replay_buffer.update_priorities(
+            sample_indices,
+            td_error.squeeze(-1).cpu().numpy(),
+            quantile_spreads=chosen_q_spread.cpu().numpy(),
+        )
+        _dbg("[train_step] after update_priorities")
 
         if self.total_it % TARGET_UPDATE_FREQ == 0:
             _dbg("[train_step] before target update")

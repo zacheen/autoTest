@@ -310,6 +310,11 @@ class VisualAgentCommonMixin:
                     )
                 ),
                 "insert_order": loaded_count + 1,
+                # 對齊 stage1(RAM 走 load_from_entries 會 setdefault 這兩欄,但 disk 路徑
+                # 漏帶)— 沒這兩欄會讓 resume 後 spread_decay 連續性斷掉、age_decay 的
+                # sample_count 也歸零。Legacy entry 沒這欄就 default 0 / 0.0。
+                "sample_count": int(entry.get("sample_count", 0)),
+                "quantile_spread": float(entry.get("quantile_spread", 0.0)),
             }
             if "reward_type" in entry:
                 runtime_entry["reward_type"] = entry["reward_type"]
