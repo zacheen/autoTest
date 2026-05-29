@@ -561,6 +561,15 @@ class VisualAgentV3(VisualAgentCommonMixin):
                     ),
                     "optimizer (AdamW)": self.optimizer,
                 },
+                models={
+                    # backbone:freeze status(YOLO frozen / token_adapter+encoder+decoder
+                    # trainable) + torchinfo layer summary。input_size 是真實 screenshot
+                    # shape (1, 3, 640, 640)。torchinfo 會跑一次 YOLO forward,~50ms 可接受。
+                    "model.backbone": (self.backbone, (1, 3, *IMAGE_SIZE)),
+                    # q_network 不傳 input_size — 跟 stage1 同理(freeze status / param 統計
+                    # 已足夠,forward 回 dict 不適合 torchinfo)。
+                    "model.q_network": (self.q_network, None),
+                },
             )
         except Exception as exc:
             print(f"[V3] hyperparameters dump failed: {exc}")

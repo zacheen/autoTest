@@ -428,6 +428,18 @@ class TransformerDiscreteAgent:
                     ),
                     "optimizer (AdamW)": self.optimizer,
                 },
+                models={
+                    # backbone:freeze status + torchinfo layer summary。
+                    # input_size 用 grid state tensor 的真實 shape。
+                    "model.backbone": (
+                        self.backbone,
+                        (1, GRID_STATE_CHANNELS, self.grid_h, self.grid_w),
+                    ),
+                    # q_network 不傳 input_size — 它吃的是 backbone 的 cell features
+                    # (B, num_tokens, d_model)且 forward 回 dict,torchinfo 上面
+                    # 處理意義不大。只看 freeze status / param count。
+                    "model.q_network": (self.q_network, None),
+                },
             )
         except Exception as exc:
             print(f"[FQF] hyperparameters dump failed: {exc}")

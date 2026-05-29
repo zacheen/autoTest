@@ -19,6 +19,7 @@ import dataclasses
 import datetime
 import re
 import subprocess
+from collections import defaultdict
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -73,6 +74,68 @@ def _dump_optimizer(section_name: str, optimizer: Any) -> list[str]:
     return lines
 
 
+def _dump_model_summary(
+    section_name: str,
+    model: Any,
+    input_size: tuple[int, ...] | None = None,
+) -> list[str]:
+    """Dump 一個 nn.Module 的兩段資料:
+
+    1) Freeze status —— per top-level submodule(讀 `param.requires_grad` 算出來,
+       不依賴 hardcoded flag。確實反映 build 後 freeze 設定)。
+    2) torchinfo summary —— 帶 input_size 才寫,因為 torchinfo 要 dummy forward。
+       輸出包含 layer-by-layer 的 output shape + param count + estimated MB。
+
+    requirements.txt 已包含 torchinfo;這裡直接 import,不做 graceful fallback ──
+    若環境有問題就讓 ImportError 噴出來,不要 silent 跳過。
+    """
+    lines = [f"[{section_name}]"]
+
+    # 1. Freeze status per top-level submodule
+    groups: dict[str, list[int]] = defaultdict(lambda: [0, 0])  # [total, trainable]
+    for pname, param in model.named_parameters():
+        top = pname.split(".", 1)[0]
+        groups[top][0] += param.numel()
+        if param.requires_grad:
+            groups[top][1] += param.numel()
+
+    lines.append("# Freeze status (per top-level submodule, derived from param.requires_grad)")
+    for name in sorted(groups.keys()):
+        total, trainable = groups[name]
+        if trainable == 0:
+            status = "FROZEN"
+        elif trainable == total:
+            status = "trainable"
+        else:
+            status = f"mixed (trainable={trainable:,}/{total:,})"
+        lines.append(f"{name}: {status}, params={total:,}")
+
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_total = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    lines.append(
+        f"TOTAL: params={total_params:,} "
+        f"(trainable={trainable_total:,}, frozen={total_params - trainable_total:,})"
+    )
+
+    # 2. torchinfo summary(需要 input_size)
+    if input_size is not None:
+        from torchinfo import summary  # 必須裝(requirements.txt + colab ipynb 已加)
+        lines.append("")
+        lines.append(f"# torchinfo summary (input_size={tuple(input_size)})")
+        # device=str(model device) 讓 dummy input 落在跟 model 同個 device。
+        device = next(model.parameters()).device
+        stats = summary(
+            model,
+            input_size=tuple(input_size),
+            depth=10,
+            verbose=0,
+            device=str(device),
+        )
+        lines.extend(str(stats).splitlines())
+
+    return lines
+
+
 def _dump_object_attrs(section_name: str, target: Any) -> list[str]:
     """target 可以是物件,或 (物件, [field 名單]) tuple 指定白名單。"""
     if (
@@ -122,8 +185,22 @@ def dump_hyperparameters(
     modules: list[ModuleType] | None = None,
     dataclass_instances: dict[str, Any] | None = None,
     instance_attrs: dict[str, Any] | None = None,
+    models: dict[str, tuple[Any, tuple[int, ...] | None]] | None = None,
 ) -> None:
-    """One-shot dump of training settings to out_path."""
+    """One-shot dump of training settings to out_path。
+
+    Args:
+        out_path: output file path(寫文字檔,utf-8)。
+        modules: 取裡面 module 的 ALL_CAPS module-level 常數。
+        dataclass_instances: dict[section_name → dataclass instance]。
+        instance_attrs: dict[section_name → object 或 (object, [field_whitelist])]。
+            若 object 有 `param_groups` 屬性,走 optimizer 特例。
+        models: dict[section_name → (nn.Module, input_size | None)]。
+            每個 model 印兩段:
+              (a) freeze status per top-level submodule(讀 requires_grad)
+              (b) torchinfo summary(input_size 是 None 就跳過 (b))
+            input_size 應該是 `(batch, *input_shape)`,例如 `(1, 3, 640, 640)`。
+    """
     lines: list[str] = [
         "# Hyperparameters dump",
         f"# Session:   {out_path.parent.name}",
@@ -153,6 +230,10 @@ def dump_hyperparameters(
             lines.extend(_dump_optimizer(section_name, target))
         else:
             lines.extend(_dump_object_attrs(section_name, target))
+        lines.append("")
+
+    for section_name, (model, input_size) in (models or {}).items():
+        lines.extend(_dump_model_summary(section_name, model, input_size))
         lines.append("")
 
     out_path.write_text("\n".join(lines), encoding="utf-8")

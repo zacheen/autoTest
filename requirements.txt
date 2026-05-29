@@ -9,6 +9,7 @@ pyautogui
 selenium
 torch
 torchvision
+torchinfo
 ultralytics
 pynput
 numpy
