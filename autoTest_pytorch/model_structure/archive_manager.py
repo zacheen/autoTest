@@ -10,26 +10,23 @@ session_start / hour_index / current_archive_dir 一堆狀態。
         training_<session_ts>/          ← session_dir(hyperparameters.txt 寫這層)
             hour_00_<hour_ts>/          ← current_archive_dir
                 train_io_log.txt
-                cuda_debug.log
                 training_log.csv
                 <每次 save 時的 *.pth 快照>
             hour_01_<hour_ts>/
             ...
 
-訂閱者(io_log、cuda_debug.log 等)透過 ``register_on_rollover`` 註冊 callback。
+訂閱者(io_log 等)透過 ``register_on_rollover`` 註冊 callback。
 每次翻頁時 manager 會把新的 ``current_archive_dir`` 傳給每個 callback,訂閱者各自
 負責關掉舊 handle、開新 handle。
 
-提供三個 building block:
+提供兩個 building block:
     SessionArchiveManager   ── 目錄管理本身
     RolloverTextLog         ── plain-text append 檔,支援 swap_to(new_path)
-    swap_logger_file_handler ── logging.Logger 的 FileHandler 換指向
 """
 
 from __future__ import annotations
 
 import datetime
-import logging
 from pathlib import Path
 from typing import Callable, TextIO
 
@@ -227,35 +224,3 @@ class RolloverTextLog:
                 self._file.close()
             except Exception:
                 pass
-
-
-def swap_logger_file_handler(
-    logger: logging.Logger,
-    new_path: Path,
-    *,
-    fmt: str = "%(asctime)s %(message)s",
-    delay: bool = True,
-) -> None:
-    """關掉 ``logger`` 上現有的 FileHandler,加一個指向 ``new_path`` 的新 FileHandler。
-
-    用於 cuda_debug.log 之類的 logging.Logger 在每次 hour rollover 時換檔。
-
-    ``delay=True`` 讓檔案只在真的有 emit 時才開出來,避免每個 hour 資料夾留一個
-    空的 cuda_debug.log。
-
-    其他類型的 handler(Console、Stream 等)不會被動到,保證 propagate=False 的
-    File-only logger 翻檔後不會 leak 任何 console output。
-    """
-    new_path = Path(new_path)
-    new_path.parent.mkdir(parents=True, exist_ok=True)
-    for h in list(logger.handlers):
-        if isinstance(h, logging.FileHandler):
-            try:
-                h.flush()
-                h.close()
-            except Exception:
-                pass
-            logger.removeHandler(h)
-    handler = logging.FileHandler(new_path, mode="a", encoding="utf-8", delay=delay)
-    handler.setFormatter(logging.Formatter(fmt))
-    logger.addHandler(handler)

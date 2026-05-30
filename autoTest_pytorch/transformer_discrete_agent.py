@@ -1,6 +1,5 @@
 import atexit
 import datetime
-import logging as _logging
 import math
 import random
 import sys
@@ -23,10 +22,8 @@ from model_structure.rng_utils import seed_everything
 from model_structure.archive_manager import (
     SessionArchiveManager,
     RolloverTextLog,
-    swap_logger_file_handler,
 )
 from model_structure.training_logger import TrainingLogger
-import model_structure.CategorizedReplayBuffer as _crb_module
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -88,131 +85,13 @@ if device.type == "cuda":
     except Exception:
         pass
 
-# ── debug logger (寫到檔案，不噴 CMD；DEBUG_CUDA_SAMPLE=True 才會啟用) ──
-# True 時會插入 cuda.synchronize + 寫 log，會拖慢訓練；只在除錯 CUDA error 時開。
-DEBUG_CUDA_SAMPLE = False
-
-_DBG_LOG_PATH = TRANSFORMER_MODEL_PATH / "cuda_debug.log"
-_DBG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-_dbg_logger = _logging.getLogger("cuda_dbg.stage1")
-_dbg_logger.setLevel(_logging.DEBUG)
-_dbg_logger.propagate = False  # 不往 root logger 傳，避免 CMD 也印
-# Module-level handler:agent 還沒 instantiate 之前的 fallback 寫到 top-level。
-# delay=True 讓檔案只在真的有 emit 時才開出來(DEBUG_CUDA_SAMPLE=False + 沒 CUDA crash
-# 的情況下就不會留下空檔)。Agent __init__ 會把這個 handler 換成指到 archive dir 的。
-if not _dbg_logger.handlers:
-    _fh = _logging.FileHandler(_DBG_LOG_PATH, mode="a", encoding="utf-8", delay=True)
-    _fh.setFormatter(_logging.Formatter("%(asctime)s %(message)s"))
-    _dbg_logger.addHandler(_fh)
-
-# 把 ReplayBuffer 的 [DBG sample] log 也導到同一個檔（取代它原本的 print）。
-_crb_module.DEBUG_CUDA_SAMPLE_LOG_PATH = _DBG_LOG_PATH
-
-
-def _dbg(msg: str) -> None:
-    """log+flush first, then sync — 最後寫到磁碟的那一行 = 即將同步的 op。"""
-    if not DEBUG_CUDA_SAMPLE:
-        return
-    _dbg_logger.debug(msg)
-    for _h in _dbg_logger.handlers:
-        try:
-            _h.flush()
-        except Exception:
-            pass
-    if device.type == "cuda":
-        try:
-            torch.cuda.synchronize()
-        except Exception:
-            pass
-
-
-def _dbg_mem(tag: str) -> None:
-    """記錄 GPU memory 使用量。"""
-    if not DEBUG_CUDA_SAMPLE or device.type != "cuda":
-        return
-    try:
-        alloc = torch.cuda.memory_allocated() / 1024 ** 2
-        reserved = torch.cuda.memory_reserved() / 1024 ** 2
-        peak = torch.cuda.max_memory_allocated() / 1024 ** 2
-        _dbg_logger.debug(f"[MEM {tag}] alloc={alloc:.1f}MB reserved={reserved:.1f}MB peak={peak:.1f}MB")
-    except Exception as e:
-        _dbg_logger.debug(f"[MEM {tag}] failed: {e}")
-
-
-def _dbg_tensor(name: str, t, *, expect_max=None, expect_min=None, check_finite: bool = True) -> None:
-    """檢查 tensor 的 NaN/Inf 與超界，記錄 shape/dtype/range。
-
-    expect_max / expect_min: 整數 tensor 的硬界，超出記為 OOB（很可能是壞 index）。
-    """
-    if not DEBUG_CUDA_SAMPLE:
-        return
-    _dbg_logger.debug(f"[TENSOR {name}] entering")
-    for _h in _dbg_logger.handlers:
-        try:
-            _h.flush()
-        except Exception:
-            pass
-    try:
-        if t is None:
-            _dbg_logger.debug(f"[TENSOR {name}] is None")
-            return
-        if not torch.is_tensor(t):
-            _dbg_logger.debug(f"[TENSOR {name}] type={type(t).__name__}")
-            return
-        if t.is_cuda:
-            torch.cuda.synchronize()
-        info = f"shape={tuple(t.shape)} dtype={t.dtype} dev={t.device}"
-        if t.numel() == 0:
-            _dbg_logger.debug(f"[TENSOR {name}] {info} EMPTY")
-            return
-        if t.dtype.is_floating_point:
-            tmin = t.min().item()
-            tmax = t.max().item()
-            tnan = bool(torch.isnan(t).any().item()) if check_finite else False
-            tinf = bool(torch.isinf(t).any().item()) if check_finite else False
-            tag = ""
-            if tnan:
-                tag += " !!NAN!!"
-            if tinf:
-                tag += " !!INF!!"
-            _dbg_logger.debug(f"[TENSOR {name}] {info} min={tmin:.4g} max={tmax:.4g}{tag}")
-        else:
-            tmin = t.min().item()
-            tmax = t.max().item()
-            tag = ""
-            if expect_max is not None and tmax >= expect_max:
-                tag += f" !!OOB max>={expect_max}!!"
-            if expect_min is not None and tmin < expect_min:
-                tag += f" !!OOB min<{expect_min}!!"
-            _dbg_logger.debug(f"[TENSOR {name}] {info} min={tmin} max={tmax}{tag}")
-        for _h in _dbg_logger.handlers:
-            try:
-                _h.flush()
-            except Exception:
-                pass
-    except Exception as e:
-        _dbg_logger.debug(f"[TENSOR {name}] CHECK FAILED: {e!r}")
-        for _h in _dbg_logger.handlers:
-            try:
-                _h.flush()
-            except Exception:
-                pass
-
-
-def log_unhandled_exception(context: str = "") -> None:
-    """供呼叫端在最外層 except 用，把 traceback 寫進 cuda_debug.log。
-
-    無視 DEBUG_CUDA_SAMPLE 開關 — exception 一律要落地。
-    """
-    try:
-        _dbg_logger.error(f"[UNHANDLED]{(' ' + context) if context else ''}", exc_info=True)
-        for _h in _dbg_logger.handlers:
-            try:
-                _h.flush()
-            except Exception:
-                pass
-    except Exception:
-        pass
+# ── NaN/Inf 偵測 ─────────────────────────────────────────────────────
+# Stage1 用 self._assert_finite(stage, name, tensor)(method,見類別內定義),
+# 各 stage 邊界呼叫一次抓 NaN/Inf。__main__ 跑 train_step 時 stage 0~7
+# 形成完整的 trace,出包能直接定位是哪一層先壞。
+#
+# 之前那一套 cuda_debug.log + cuda.synchronize 全部移除 — CUDA error 屬於硬體問題,
+# 換 GPU(GCP / 新機)後不會再出現;NaN 才是 code 能修的問題,所以留 _assert_finite。
 
 
 class TransformerActorNetwork(nn.Module):
@@ -449,15 +328,8 @@ class TransformerDiscreteAgent:
         self._io_log = RolloverTextLog(banner_factory=self._build_io_log_banner)
         self._io_log.swap_to(self.archive.current_archive_dir / "train_io_log.txt")
 
-        # cuda_debug.log 也跟著 archive dir 走(module-level handler 預設指向 top-level,
-        # 在這裡 swap 成 current_archive_dir 的版本)。CategorizedReplayBuffer 共用
-        # 同一個檔案路徑,在這裡同步更新。
-        dbg_path = self.archive.current_archive_dir / "cuda_debug.log"
-        swap_logger_file_handler(_dbg_logger, dbg_path)
-        _crb_module.DEBUG_CUDA_SAMPLE_LOG_PATH = dbg_path
-
-        # 註冊 hour rollover callback:io_log + dbg logger + ReplayBuffer cuda log
-        # 全部跟著翻檔。本身的 console print 由 SessionArchiveManager 在翻頁時印。
+        # 註冊 hour rollover callback:io_log 跟著翻檔。本身的 console print 由
+        # SessionArchiveManager 在翻頁時印。
         self.archive.register_on_rollover(self._on_archive_rollover)
 
         # TensorBoard log_dir keyed by session timestamp。SummaryWriter 變成
@@ -646,323 +518,218 @@ class TransformerDiscreteAgent:
         # (註冊在 SessionArchiveManager 的 on_rollover callback 處理)
         self.archive.maybe_rollover()
 
-        try:
-            _dbg(f"[train_step] ENTER total_it={self.total_it} buf_size={buf_size}")
-            _dbg_mem("train_step ENTER")
-            _dbg("[train_step] before replay_buffer.sample")
-            state, action, next_state, reward, done, per_indices, is_weights, discounts, n_steps = self.replay_buffer.sample(
-                BATCH_SIZE,
-                beta=PER_BETA_START + (PER_BETA_END - PER_BETA_START) * min(self.episode_count / 5000.0, 1.0),
-                device=device,
-                include_extra=True,
-            )
-            _dbg("[train_step] after replay_buffer.sample")
-            _dbg_tensor("train_step.state",      state)
-            _dbg_tensor("train_step.next_state", next_state)
-            _dbg_tensor("train_step.action",     action,
-                        expect_min=0, expect_max=max(self.grid_h, self.grid_w))
-            _dbg_tensor("train_step.reward",     reward)
-            _dbg_tensor("train_step.done",       done)
-            _dbg_tensor("train_step.is_weights", is_weights)
-            _dbg_tensor("train_step.discounts",  discounts)
+        state, action, next_state, reward, done, per_indices, is_weights, discounts, n_steps = self.replay_buffer.sample(
+            BATCH_SIZE,
+            beta=PER_BETA_START + (PER_BETA_END - PER_BETA_START) * min(self.episode_count / 5000.0, 1.0),
+            device=device,
+            include_extra=True,
+        )
 
-            # Stage 0: buffer sample — 命中代表 replay buffer 內容已壞(load 或 store 路徑)
-            self._assert_finite("stage0_sample", "state", state)
-            self._assert_finite("stage0_sample", "next_state", next_state)
-            self._assert_finite("stage0_sample", "reward", reward)
-            self._assert_finite("stage0_sample", "is_weights", is_weights)
-            self._assert_finite("stage0_sample", "discounts", discounts)
+        # Stage 0: buffer sample — 命中代表 replay buffer 內容已壞(load 或 store 路徑)
+        self._assert_finite("stage0_sample", "state", state)
+        self._assert_finite("stage0_sample", "next_state", next_state)
+        self._assert_finite("stage0_sample", "reward", reward)
+        self._assert_finite("stage0_sample", "is_weights", is_weights)
+        self._assert_finite("stage0_sample", "discounts", discounts)
 
-            action = action.long()
-            row_idx = action[:, 0]
-            col_idx = action[:, 1]
-            action_flat = row_idx * self.grid_w + col_idx
-            batch_size = state.size(0)
-            _dbg_tensor("train_step.row_idx", row_idx, expect_min=0, expect_max=self.grid_h)
-            _dbg_tensor("train_step.col_idx", col_idx, expect_min=0, expect_max=self.grid_w)
-            _dbg_tensor("train_step.action_flat", action_flat,
-                        expect_min=0, expect_max=self.num_actions)
-            _dbg(f"[train_step] batch_size={batch_size} num_actions={self.num_actions} grid={self.grid_h}x{self.grid_w}")
+        action = action.long()
+        row_idx = action[:, 0]
+        col_idx = action[:, 1]
+        action_flat = row_idx * self.grid_w + col_idx
+        batch_size = state.size(0)
 
-            # Preprocess current state WITH gradients so end-to-end training flows back
-            if preprocessor is not None:
-                state = preprocessor(state)
-                _dbg_tensor("train_step.state(after preprocessor)", state)
+        # Preprocess current state WITH gradients so end-to-end training flows back
+        if preprocessor is not None:
+            state = preprocessor(state)
 
-            with torch.no_grad():
-                next_proc = preprocessor(next_state) if preprocessor is not None else next_state
-                _dbg("[train_step] before next backbone")
-                next_features = self.backbone.get_features(next_proc)
-                _dbg_tensor("train_step.next_features", next_features)
-                _dbg("[train_step] after next backbone")
-                # Stage 1a: backbone forward on next_state — 命中代表 backbone weights 或
-                #           next_state 已壞;這條也是訓練中最早能偵測到 backbone 損毀的點
-                self._assert_finite("stage1a_target_backbone", "next_features", next_features)
+        with torch.no_grad():
+            next_proc = preprocessor(next_state) if preprocessor is not None else next_state
+            next_features = self.backbone.get_features(next_proc)
+            # Stage 1a: backbone forward on next_state — 命中代表 backbone weights 或
+            #           next_state 已壞;這條也是訓練中最早能偵測到 backbone 損毀的點
+            self._assert_finite("stage1a_target_backbone", "next_features", next_features)
 
-                next_online = self.q_network(next_features)
-                next_q_2d = next_online["q_values"]
-                _dbg_tensor("train_step.next_online.q_values", next_q_2d)
-                next_q_flat = next_q_2d.view(batch_size, -1)
-                best_flat = next_q_flat.argmax(dim=1)
-                _dbg_tensor("train_step.next_best_flat", best_flat,
-                            expect_min=0, expect_max=self.num_actions)
-                best_rows = best_flat // self.grid_w
-                best_cols = best_flat % self.grid_w
+            next_online = self.q_network(next_features)
+            next_q_2d = next_online["q_values"]
+            next_q_flat = next_q_2d.view(batch_size, -1)
+            best_flat = next_q_flat.argmax(dim=1)
+            best_rows = best_flat // self.grid_w
+            best_cols = best_flat % self.grid_w
 
-                next_target = self.q_target(next_features)
-                _dbg_tensor("train_step.next_target.quantiles", next_target["quantiles"])
-                _dbg("[train_step] after q_target")
-                # Stage 1b: q_target forward — 命中代表 q_target weights 已壞
-                self._assert_finite("stage1b_q_target", "next_target.quantiles", next_target["quantiles"])
+            next_target = self.q_target(next_features)
+            # Stage 1b: q_target forward — 命中代表 q_target weights 已壞
+            self._assert_finite("stage1b_q_target", "next_target.quantiles", next_target["quantiles"])
 
-                next_target_quantiles = next_target["quantiles"][
-                    torch.arange(batch_size, device=device), best_flat
-                ]
-                _dbg_tensor("train_step.next_target_quantiles", next_target_quantiles)
-                target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
-                _dbg_tensor("train_step.target_quantiles", target_quantiles)
-                # Stage 1c: target_quantiles 算完 — 命中代表 reward / discounts / done 異常
-                #           (如果 next_target_quantiles 在 stage1b 是 finite 的話)
-                self._assert_finite("stage1c_target_combine", "target_quantiles", target_quantiles)
-            _dbg("[train_step] target branch done")
-
-            _dbg("[train_step] before current backbone")
-            features = self.backbone.get_features(state)
-            _dbg_tensor("train_step.features", features)
-            _dbg("[train_step] after current backbone")
-            # Stage 2: current backbone forward — 命中代表 backbone weights 或 state 已壞
-            #          (跟 stage1a 互相對照,可以判斷壞的是 backbone 還是 state)
-            self._assert_finite("stage2_current_backbone", "features", features)
-
-            q_output = self.q_network(features)
-            q_2d = q_output["q_values"]
-            q_quantiles = q_output["quantiles"]
-            tau_hats = q_output["tau_hats"]
-            fraction_probs = q_output["fraction_probs"]
-            _dbg_tensor("train_step.q_2d", q_2d)
-            _dbg_tensor("train_step.q_quantiles", q_quantiles)
-            _dbg_tensor("train_step.tau_hats", tau_hats)
-            _dbg_tensor("train_step.fraction_probs", fraction_probs)
-            # Stage 3: q_network forward (FQF head 四個輸出分別檢)
-            #   - fraction_probs 壞 → fraction_proposal / softmax 入口問題
-            #   - tau_hats 壞     → cumsum / mean(基本上 follow fraction_probs)
-            #   - quantiles 壞    → cosine_embedding 或 value_head 問題
-            #   - q_values 壞     → 上面任一條
-            self._assert_finite("stage3_q_network", "fraction_probs", fraction_probs)
-            self._assert_finite("stage3_q_network", "tau_hats", tau_hats)
-            self._assert_finite("stage3_q_network", "quantiles", q_quantiles)
-            self._assert_finite("stage3_q_network", "q_values", q_2d)
-            _dbg(f"[train_step] q_2d.shape={tuple(q_2d.shape)} q_quantiles.shape={tuple(q_quantiles.shape)}")
-            q_taken = q_2d[
-                torch.arange(batch_size, device=device), row_idx, col_idx
-            ].unsqueeze(1)
-            _dbg("[train_step] after q_taken gather")
-            chosen_quantiles = q_quantiles[
-                torch.arange(batch_size, device=device), action_flat
+            next_target_quantiles = next_target["quantiles"][
+                torch.arange(batch_size, device=device), best_flat
             ]
-            _dbg("[train_step] after chosen_quantiles gather")
+            target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
+            # Stage 1c: target_quantiles 算完 — 命中代表 reward / discounts / done 異常
+            #           (如果 next_target_quantiles 在 stage1b 是 finite 的話)
+            self._assert_finite("stage1c_target_combine", "target_quantiles", target_quantiles)
 
-            with torch.no_grad():
-                target_mean = target_quantiles.mean(dim=1, keepdim=True)
-                td_error = (q_taken - target_mean).abs().detach()
-                # Per-sample quantile spread for the chosen action — feeds the buffer's
-                # spread_decay modifier in _effective_priority (only consulted when the
-                # buffer-side latch enable_spread_decay is True; we always compute and
-                # write the value so the latch flip doesn't have a cold-start period).
-                chosen_q_spread = chosen_quantiles.std(dim=1).detach()
+        features = self.backbone.get_features(state)
+        # Stage 2: current backbone forward — 命中代表 backbone weights 或 state 已壞
+        #          (跟 stage1a 互相對照,可以判斷壞的是 backbone 還是 state)
+        self._assert_finite("stage2_current_backbone", "features", features)
 
-            per_sample_quantile_loss, frac_huber_clipped = _quantile_huber_loss(
-                current_quantiles=chosen_quantiles,
-                target_quantiles=target_quantiles.detach(),
-                tau_hats=tau_hats.detach(),
-                return_stats=True,
+        q_output = self.q_network(features)
+        q_2d = q_output["q_values"]
+        q_quantiles = q_output["quantiles"]
+        tau_hats = q_output["tau_hats"]
+        fraction_probs = q_output["fraction_probs"]
+        # Stage 3: q_network forward (FQF head 四個輸出分別檢)
+        #   - fraction_probs 壞 → fraction_proposal / softmax 入口問題
+        #   - tau_hats 壞     → cumsum / mean(基本上 follow fraction_probs)
+        #   - quantiles 壞    → cosine_embedding 或 value_head 問題
+        #   - q_values 壞     → 上面任一條
+        self._assert_finite("stage3_q_network", "fraction_probs", fraction_probs)
+        self._assert_finite("stage3_q_network", "tau_hats", tau_hats)
+        self._assert_finite("stage3_q_network", "quantiles", q_quantiles)
+        self._assert_finite("stage3_q_network", "q_values", q_2d)
+        q_taken = q_2d[
+            torch.arange(batch_size, device=device), row_idx, col_idx
+        ].unsqueeze(1)
+        chosen_quantiles = q_quantiles[
+            torch.arange(batch_size, device=device), action_flat
+        ]
+
+        with torch.no_grad():
+            target_mean = target_quantiles.mean(dim=1, keepdim=True)
+            td_error = (q_taken - target_mean).abs().detach()
+            # Per-sample quantile spread for the chosen action — feeds the buffer's
+            # spread_decay modifier in _effective_priority (only consulted when the
+            # buffer-side latch enable_spread_decay is True; we always compute and
+            # write the value so the latch flip doesn't have a cold-start period).
+            chosen_q_spread = chosen_quantiles.std(dim=1).detach()
+
+        per_sample_quantile_loss, frac_huber_clipped = _quantile_huber_loss(
+            current_quantiles=chosen_quantiles,
+            target_quantiles=target_quantiles.detach(),
+            tau_hats=tau_hats.detach(),
+            return_stats=True,
+        )
+        # Stage 4a: quantile huber loss — 命中通常代表 chosen_quantiles 或 target_quantiles
+        #            其中一個極端(如 td² overflow),內部 torch.where 雖能選 finite 分支,
+        #            但 backward 經 0×inf 仍會在 stage5 噴 NaN 到 grad
+        self._assert_finite("stage4a_quantile_loss", "per_sample_quantile_loss", per_sample_quantile_loss)
+
+        entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
+        # Stage 4b: entropy — 命中代表 fraction_probs 含 NaN(stage3 應該先抓到)
+        self._assert_finite("stage4b_entropy", "entropy", entropy)
+
+        per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy
+        loss = (is_weights * per_sample_loss).mean()
+
+        # FQF distribution-health diagnostics (cheap, computed inside no_grad).
+        with torch.no_grad():
+            # 留作 tensor,實際 .item() 在後面 diagnostic 階段跟其他 stats 一起 batch。
+            fpn_norm_entropy_t = entropy.mean() / math.log(NUM_FQF_FRACTIONS)
+            fpn_tau_std_t = tau_hats.std(dim=1).mean()
+
+        # Stage 4c: 最終 loss — per-step NaN check(Q1=b:每個 train_step 都查 loss
+        # 是否 NaN,出現就立刻 raise,不等到下一次 save)。
+        if not torch.isfinite(loss):
+            raise RuntimeError(
+                f"[NaN-probe] non-finite at stage='stage4c_final_loss' tensor='loss' "
+                f"step={self.total_it} value={loss.item()} "
+                f"(quantile={per_sample_quantile_loss.mean().item()}, "
+                f"entropy={entropy.mean().item()})"
             )
-            # Stage 4a: quantile huber loss — 命中通常代表 chosen_quantiles 或 target_quantiles
-            #            其中一個極端(如 td² overflow),內部 torch.where 雖能選 finite 分支,
-            #            但 backward 經 0×inf 仍會在 stage5 噴 NaN 到 grad
-            self._assert_finite("stage4a_quantile_loss", "per_sample_quantile_loss", per_sample_quantile_loss)
 
-            entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
-            # Stage 4b: entropy — 命中代表 fraction_probs 含 NaN(stage3 應該先抓到)
-            self._assert_finite("stage4b_entropy", "entropy", entropy)
-
-            per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy
-            loss = (is_weights * per_sample_loss).mean()
-            _dbg_tensor("train_step.loss", loss)
-            _dbg_tensor("train_step.td_error", td_error)
-
-            # FQF distribution-health diagnostics (cheap, computed inside no_grad).
-            with torch.no_grad():
-                # 留作 tensor,實際 .item() 在後面 diagnostic 階段跟其他 stats 一起 batch。
-                fpn_norm_entropy_t = entropy.mean() / math.log(NUM_FQF_FRACTIONS)
-                fpn_tau_std_t = tau_hats.std(dim=1).mean()
-
-            # Stage 4c: 最終 loss — 既有的 NaN check,訊息升級成 stage tag 格式
-            if not torch.isfinite(loss):
+        self.optimizer.zero_grad()
+        loss.backward()
+        all_params = list(self.backbone.parameters()) + list(self.q_network.parameters())
+        if extra_params_to_clip is not None:
+            all_params += list(extra_params_to_clip)
+        # Stage 5: backward 之後 — 命中代表 backward 路徑產生 NaN/Inf 梯度
+        #          常見原因:torch.where(td²) 在 td 過大時 backward 經 0×inf
+        for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
+            if param.grad is not None and not torch.isfinite(param.grad).all():
+                nan_n = int(torch.isnan(param.grad).sum().item())
+                inf_n = int(torch.isinf(param.grad).sum().item())
                 raise RuntimeError(
-                    f"[NaN-probe] non-finite at stage='stage4c_final_loss' tensor='loss' "
-                    f"step={self.total_it} value={loss.item()} "
-                    f"(quantile={per_sample_quantile_loss.mean().item()}, "
-                    f"entropy={entropy.mean().item()})"
+                    f"[NaN-probe] non-finite at stage='stage5_post_backward' tensor='grad.{name}' "
+                    f"step={self.total_it} shape={tuple(param.grad.shape)} "
+                    f"nan={nan_n} inf={inf_n}"
                 )
 
-            self.optimizer.zero_grad()
-            _dbg("[train_step] before backward")
-            try:
-                loss.backward()
-            except RuntimeError as exc:
-                msg = str(exc)
-                if any(tag in msg for tag in ("CUDA error", "illegal instruction", "device-side assert")):
-                    _dbg_logger.warning(
-                        f"[train_step] backward CUDA crash at total_it={self.total_it}; "
-                        f"dropping batch and continuing. msg={msg!r}"
-                    )
-                    for _h in _dbg_logger.handlers:
-                        try:
-                            _h.flush()
-                        except Exception:
-                            pass
-                    self.optimizer.zero_grad(set_to_none=True)
-                    if device.type == "cuda":
-                        try:
-                            torch.cuda.empty_cache()
-                        except Exception:
-                            pass
-                    return None
-                raise  # 其他 RuntimeError 交給外層 try/except 寫 traceback
-            _dbg("[train_step] after backward")
-            _dbg_mem("train_step after backward")
-            all_params = list(self.backbone.parameters()) + list(self.q_network.parameters())
-            if extra_params_to_clip is not None:
-                all_params += list(extra_params_to_clip)
-            _dbg("[train_step] before grad-finite check")
-            # Stage 5: backward 之後 — 命中代表 backward 路徑產生 NaN/Inf 梯度
-            #          常見原因:torch.where(td²) 在 td 過大時 backward 經 0×inf
-            for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
-                if param.grad is not None and not torch.isfinite(param.grad).all():
-                    nan_n = int(torch.isnan(param.grad).sum().item())
-                    inf_n = int(torch.isinf(param.grad).sum().item())
-                    raise RuntimeError(
-                        f"[NaN-probe] non-finite at stage='stage5_post_backward' tensor='grad.{name}' "
-                        f"step={self.total_it} shape={tuple(param.grad.shape)} "
-                        f"nan={nan_n} inf={inf_n}"
-                    )
-            _dbg("[train_step] after grad-finite check")
+        # Pre-clip gradient norms — must be captured BEFORE clip_grad_norm_,
+        # otherwise the per-param tensors are scaled in-place and we lose
+        # the true magnitude that caused any explosion.
+        backbone_pre = self._module_grad_norm(self.backbone)
+        head_pre = self._module_grad_norm(self.q_network)
+        # Extras (e.g. YOLO when Stage 2 plugs in) contribute to the clip
+        # norm; track them separately so pre/post totals match the
+        # parameter set actually passed to clip_grad_norm_.
+        extras_pre_sq = 0.0
+        if extra_params_to_clip is not None:
+            for param in extra_params_to_clip:
+                if param.grad is None:
+                    continue
+                extras_pre_sq += float(param.grad.detach().float().pow(2).sum().item())
+        extras_pre = extras_pre_sq ** 0.5
+        # Capture per-layer norm snapshots BEFORE clip(in-place 縮過就看不出爆點)。
+        backbone_norm_snapshots = None
+        if self.total_it % HISTOGRAM_EVERY == 0:
+            backbone_norm_snapshots = self._collect_backbone_weight_norm_snapshots()
 
-            # Pre-clip gradient norms — must be captured BEFORE clip_grad_norm_,
-            # otherwise the per-param tensors are scaled in-place and we lose
-            # the true magnitude that caused any explosion.
-            backbone_pre = self._module_grad_norm(self.backbone)
-            head_pre = self._module_grad_norm(self.q_network)
-            # Extras (e.g. YOLO when Stage 2 plugs in) contribute to the clip
-            # norm; track them separately so pre/post totals match the
-            # parameter set actually passed to clip_grad_norm_.
-            extras_pre_sq = 0.0
-            if extra_params_to_clip is not None:
-                for param in extra_params_to_clip:
-                    if param.grad is None:
-                        continue
-                    extras_pre_sq += float(param.grad.detach().float().pow(2).sum().item())
-            extras_pre = extras_pre_sq ** 0.5
-            # Capture per-layer norm snapshots BEFORE clip — but DON'T write
-            # to TB yet; writes belong in the post-try success path so a CUDA
-            # crash on clip / step doesn't leave orphan per-layer rows in TB
-            # without the matching global rows.
-            backbone_norm_snapshots = None
-            if self.total_it % HISTOGRAM_EVERY == 0:
-                backbone_norm_snapshots = self._collect_backbone_weight_norm_snapshots()
+        grad_norm_total = torch.nn.utils.clip_grad_norm_(all_params, max_norm=GRAD_CLIP_NORM)
+        grad_norm_total_value = float(grad_norm_total)
+        grad_clip_threshold = float(GRAD_CLIP_NORM)
+        grad_clip_scale = min(1.0, grad_clip_threshold / (grad_norm_total_value + 1e-12))
+        grad_clip_percent = 1.0 - grad_clip_scale
+        grad_clip_excess_norm = max(0.0, grad_norm_total_value - grad_clip_threshold)
+        grad_clip_excess_ratio = grad_clip_excess_norm / (grad_clip_threshold + 1e-12)
 
-            grad_norm_total = torch.nn.utils.clip_grad_norm_(all_params, max_norm=GRAD_CLIP_NORM)
-            grad_norm_total_value = float(grad_norm_total)
-            grad_clip_threshold = float(GRAD_CLIP_NORM)
-            grad_clip_scale = min(1.0, grad_clip_threshold / (grad_norm_total_value + 1e-12))
-            grad_clip_percent = 1.0 - grad_clip_scale
-            grad_clip_excess_norm = max(0.0, grad_norm_total_value - grad_clip_threshold)
-            grad_clip_excess_ratio = grad_clip_excess_norm / (grad_clip_threshold + 1e-12)
-
-            # Stage 6: clip 之後再掃一次 grad — 抓 clip 內部 0×inf
-            #          (理論上 stage5 已先攔 inf,但 clip 自己 in-place 寫的也要驗一次)
-            for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
-                if param.grad is not None and not torch.isfinite(param.grad).all():
-                    nan_n = int(torch.isnan(param.grad).sum().item())
-                    inf_n = int(torch.isinf(param.grad).sum().item())
-                    raise RuntimeError(
-                        f"[NaN-probe] non-finite at stage='stage6_post_clip' tensor='grad.{name}' "
-                        f"step={self.total_it} shape={tuple(param.grad.shape)} "
-                        f"nan={nan_n} inf={inf_n}"
-                    )
-
-            backbone_post = self._module_grad_norm(self.backbone)
-            head_post = self._module_grad_norm(self.q_network)
-            extras_post_sq = 0.0
-            if extra_params_to_clip is not None:
-                for param in extra_params_to_clip:
-                    if param.grad is None:
-                        continue
-                    extras_post_sq += float(param.grad.detach().float().pow(2).sum().item())
-            extras_post = extras_post_sq ** 0.5
-            grad_post_total = (backbone_post ** 2 + head_post ** 2 + extras_post_sq) ** 0.5
-
-            _dbg("[train_step] after clip_grad_norm_")
-            # Pre-step v-clamp:HW bit flip 把 v 翻成負 → sqrt(neg)=NaN → 下一步 weight=NaN。
-            # 在 optimizer.step() 之前 clamp,讓 Adam 永遠看到 v >= 0 的 invariant。
-            # 命中時詳細寫到 stdout / io_log / vclamp_events.log / TB,事後 grep 統計頻率。
-            self._clamp_optimizer_v_and_log()
-            _dbg("[train_step] before optimizer.step")
-            self.optimizer.step()
-            _dbg("[train_step] after optimizer.step")
-            _dbg_mem("train_step after optimizer.step")
-
-            # Stage 7: optimizer.step 之後掃 weight — ★ 本次失敗最可能的源頭 ★
-            #          finite grad 進 AdamW 卻產生 NaN weight,常見原因:
-            #          (a) v 接近 denormal underflow → sqrt(v)+eps 異常小 → 巨大 update
-            #          (b) fused/non-fused kernel 罕見數值 edge case
-            #          (c) 硬體 transient bit flip(機率極低)
-            #          命中時:weight 已壞,但這一步的 grad / m / v 還在 optimizer state 裡,
-            #                  可以離線分析(crash 後 atexit 會把 optimizer state 寫到 .crash 檔)
-            for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
-                if not torch.isfinite(param.data).all():
-                    nan_n = int(torch.isnan(param.data).sum().item())
-                    inf_n = int(torch.isinf(param.data).sum().item())
-                    finite_mask = torch.isfinite(param.data)
-                    absmax = (
-                        float(param.data[finite_mask].abs().max().item())
-                        if finite_mask.any() else float("nan")
-                    )
-                    raise RuntimeError(
-                        f"[NaN-probe] non-finite at stage='stage7_post_step' tensor='weight.{name}' "
-                        f"step={self.total_it} shape={tuple(param.data.shape)} "
-                        f"nan={nan_n} inf={inf_n} finite_absmax={absmax:.4g}"
-                    )
-        except Exception as exc:
-            # ── 非 backward 區段的 CUDA crash（forward / loss / grad-check / clip / optimizer.step / 結尾 sync）──
-            # tag 成 "non-backward CUDA crash" 方便和 backward 的 grep 區分，用來統計撞牆位置。
-            # 其他 (非 CUDA error 的) 例外才當真錯誤，寫 traceback 後往上丟。
-            msg = str(exc)
-            if isinstance(exc, RuntimeError) and any(
-                tag in msg for tag in ("CUDA error", "illegal instruction", "device-side assert")
-            ):
-                _dbg_logger.warning(
-                    f"[train_step] non-backward CUDA crash at total_it={self.total_it}; "
-                    f"dropping batch and continuing. msg={msg!r}"
+        # Stage 6: clip 之後再掃一次 grad — 抓 clip 內部 0×inf
+        #          (理論上 stage5 已先攔 inf,但 clip 自己 in-place 寫的也要驗一次)
+        for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
+            if param.grad is not None and not torch.isfinite(param.grad).all():
+                nan_n = int(torch.isnan(param.grad).sum().item())
+                inf_n = int(torch.isinf(param.grad).sum().item())
+                raise RuntimeError(
+                    f"[NaN-probe] non-finite at stage='stage6_post_clip' tensor='grad.{name}' "
+                    f"step={self.total_it} shape={tuple(param.grad.shape)} "
+                    f"nan={nan_n} inf={inf_n}"
                 )
-                for _h in _dbg_logger.handlers:
-                    try:
-                        _h.flush()
-                    except Exception:
-                        pass
-                try:
-                    self.optimizer.zero_grad(set_to_none=True)
-                except Exception:
-                    pass
-                if device.type == "cuda":
-                    try:
-                        torch.cuda.empty_cache()
-                    except Exception:
-                        pass
-                return None
-            log_unhandled_exception(f"train_step total_it={self.total_it}")
-            raise
+
+        backbone_post = self._module_grad_norm(self.backbone)
+        head_post = self._module_grad_norm(self.q_network)
+        extras_post_sq = 0.0
+        if extra_params_to_clip is not None:
+            for param in extra_params_to_clip:
+                if param.grad is None:
+                    continue
+                extras_post_sq += float(param.grad.detach().float().pow(2).sum().item())
+        extras_post = extras_post_sq ** 0.5
+        grad_post_total = (backbone_post ** 2 + head_post ** 2 + extras_post_sq) ** 0.5
+
+        # Pre-step v-clamp:HW bit flip 把 v 翻成負 → sqrt(neg)=NaN → 下一步 weight=NaN。
+        # 在 optimizer.step() 之前 clamp,讓 Adam 永遠看到 v >= 0 的 invariant。
+        # 命中時詳細寫到 stdout / io_log / vclamp_events.log / TB,事後 grep 統計頻率。
+        self._clamp_optimizer_v_and_log()
+        self.optimizer.step()
+
+        # Stage 7: optimizer.step 之後掃 weight — ★ 本次失敗最可能的源頭 ★
+        #          finite grad 進 AdamW 卻產生 NaN weight,常見原因:
+        #          (a) v 接近 denormal underflow → sqrt(v)+eps 異常小 → 巨大 update
+        #          (b) fused/non-fused kernel 罕見數值 edge case
+        #          (c) 硬體 transient bit flip(機率極低)
+        for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
+            if not torch.isfinite(param.data).all():
+                nan_n = int(torch.isnan(param.data).sum().item())
+                inf_n = int(torch.isinf(param.data).sum().item())
+                finite_mask = torch.isfinite(param.data)
+                absmax = (
+                    float(param.data[finite_mask].abs().max().item())
+                    if finite_mask.any() else float("nan")
+                )
+                raise RuntimeError(
+                    f"[NaN-probe] non-finite at stage='stage7_post_step' tensor='weight.{name}' "
+                    f"step={self.total_it} shape={tuple(param.data.shape)} "
+                    f"nan={nan_n} inf={inf_n} finite_absmax={absmax:.4g}"
+                )
 
         self.replay_buffer.update_priorities(
             per_indices,
@@ -1349,7 +1116,7 @@ class TransformerDiscreteAgent:
         ]
 
     def _on_archive_rollover(self, new_dir: Path) -> None:
-        """SessionArchiveManager rollover callback:翻頁時 swap io_log + dbg logger。
+        """SessionArchiveManager rollover callback:翻頁時 swap io_log。
 
         - io_log 先 inline 寫一行 rollover footer 再 swap;這樣舊檔尾巴有 marker,
           新檔開頭有 RolloverTextLog 自己寫的 banner。
@@ -1365,9 +1132,6 @@ class TransformerDiscreteAgent:
         except Exception:
             pass
         self._io_log.swap_to(new_dir / "train_io_log.txt")
-        dbg_path = new_dir / "cuda_debug.log"
-        swap_logger_file_handler(_dbg_logger, dbg_path)
-        _crb_module.DEBUG_CUDA_SAMPLE_LOG_PATH = dbg_path
 
     # ──────────────────────────── diagnostics helpers (cont.) ─────────────
 
@@ -1637,7 +1401,12 @@ class TransformerDiscreteAgent:
             torch.save(payload,      TRANSFORMER_MODEL_PATH / f"optimizer_state{suffix}")
             print(f"[NaN-probe] wrote *{suffix} files for offline analysis;"
                   f" canonical *.pth left untouched (last good state preserved)")
-            return
+            # Raise 中止訓練 — atexit 會再 trigger 一次 _save_model,probe 會再次
+            # raise(canonical 不會被蓋掉)。
+            raise RuntimeError(
+                f"[NaN-probe] _save_model: non-finite tensors at step {self.total_it}; "
+                f"canonical checkpoints preserved, see *{suffix} for forensics"
+            )
 
         torch.save(backbone_sd,        TRANSFORMER_MODEL_PATH / "backbone.pth")
         torch.save(qnet_sd,            TRANSFORMER_MODEL_PATH / "fqf_network.pth")

@@ -55,7 +55,6 @@ from transformer_discrete_agent import (
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from model_structure.transformer_shared import FQFQNetwork
 from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
-import model_structure.CategorizedReplayBuffer as _crb_module
 from model_structure.visual_agent_common import VisualAgentCommonMixin
 from model_structure.yolo_encoder_base import (
     YOLOEncoderBase,
@@ -69,7 +68,6 @@ from model_structure.rng_utils import seed_everything
 from model_structure.archive_manager import (
     SessionArchiveManager,
     RolloverTextLog,
-    swap_logger_file_handler,
 )
 from model_structure.training_logger import TrainingLogger
 from model_structure.adaptive_epsilon import AdaptiveEpsilonController
@@ -100,90 +98,24 @@ if device.type == "cuda":
 # 想重現特定 run:把下面這行改成 `SEED: int = seed_everything(<數字>)`。
 SEED: int = seed_everything()
 
-# ── debug logger (寫到檔案，CMD 刷掉也能看) ──────────────────────────
-import logging as _logging
-_dbg_log_path = Path("./models/visual_transformer_v3_6x6/cuda_debug.log")
-_dbg_log_path.parent.mkdir(parents=True, exist_ok=True)
-_dbg_logger = _logging.getLogger("cuda_dbg")
-_dbg_logger.setLevel(_logging.DEBUG)
-_dbg_logger.propagate = False  # 不往 root logger 傳，避免 CMD 也被印
-if not _dbg_logger.handlers:
-    _fh = _logging.FileHandler(_dbg_log_path, mode="a", encoding="utf-8")
-    _fh.setFormatter(_logging.Formatter("%(asctime)s %(message)s"))
-    _dbg_logger.addHandler(_fh)
+# ── NaN/Inf 偵測 ─────────────────────────────────────────────────────
+# 只剩唯一一個 helper:撞到 NaN/Inf 直接 raise,讓訓練中止。
+# 之前那一套 cuda_debug.log + cuda.synchronize 全部移除 — CUDA error 屬於硬體問題,
+# 換 GPU(GCP / 新機)後不會再出現;NaN 才是 code 能修的問題,所以留這個。
+def _check_finite(name: str, t) -> None:
+    """Raise RuntimeError 若 tensor 含 NaN / Inf。非 float / empty / 非 tensor 直接 skip。
 
-# 把 CategorizedReplayBuffer 的 [DBG sample] / !!BAD ACTIONS!! 也導到同一個檔
-# （取代原本 hard-coded 的 print 與 open(...) 寫法）。
-_crb_module.DEBUG_CUDA_SAMPLE_LOG_PATH = _dbg_log_path
-
-def _dbg(msg: str) -> None:
-    """log+flush first, then sync — last entry on disk = op about to be sync'd."""
-    _dbg_logger.debug(msg)
-    for _h in _dbg_logger.handlers:
-        try: _h.flush()
-        except Exception: pass
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-
-def _dbg_mem(tag: str) -> None:
-    """log GPU memory usage."""
-    if device.type != "cuda":
-        return
-    try:
-        alloc = torch.cuda.memory_allocated() / 1024**2
-        reserved = torch.cuda.memory_reserved() / 1024**2
-        peak = torch.cuda.max_memory_allocated() / 1024**2
-        _dbg_logger.debug(f"[MEM {tag}] alloc={alloc:.1f}MB reserved={reserved:.1f}MB peak={peak:.1f}MB")
-    except Exception as e:
-        _dbg_logger.debug(f"[MEM {tag}] failed: {e}")
-
-def _dbg_tensor(name: str, t, *, expect_max=None, expect_min=None, check_finite: bool = True) -> None:
-    """Check a tensor for NaN/Inf and out-of-range values; log shape, dtype, range.
-
-    expect_max/expect_min: hard bounds; logs FATAL if violated (likely bad index).
+    成本 = 一次 ``.any().item()``(會 sync)。只放在 hot loop 的策略點(loss 出來
+    那一刻)。沒寫 log、沒額外 sync — 出問題就讓 stack trace 自己講故事。
     """
-    # write an enter marker first (and flush) so we can see exactly which tensor
-    # was about to be checked when sync raised.
-    _dbg_logger.debug(f"[TENSOR {name}] entering")
-    for _h in _dbg_logger.handlers:
-        try: _h.flush()
-        except Exception: pass
-    try:
-        if t is None:
-            _dbg_logger.debug(f"[TENSOR {name}] is None"); return
-        if not torch.is_tensor(t):
-            _dbg_logger.debug(f"[TENSOR {name}] type={type(t).__name__}"); return
-        # sync so any pending error surfaces here, not later
-        if t.is_cuda:
-            torch.cuda.synchronize()
-        info = f"shape={tuple(t.shape)} dtype={t.dtype} dev={t.device}"
-        if t.numel() == 0:
-            _dbg_logger.debug(f"[TENSOR {name}] {info} EMPTY"); return
-        # only check stats on numeric tensors
-        if t.dtype.is_floating_point:
-            tmin = t.min().item(); tmax = t.max().item()
-            tnan = bool(torch.isnan(t).any().item()) if check_finite else False
-            tinf = bool(torch.isinf(t).any().item()) if check_finite else False
-            tag = ""
-            if tnan: tag += " !!NAN!!"
-            if tinf: tag += " !!INF!!"
-            _dbg_logger.debug(f"[TENSOR {name}] {info} min={tmin:.4g} max={tmax:.4g}{tag}")
-        else:
-            tmin = t.min().item(); tmax = t.max().item()
-            tag = ""
-            if expect_max is not None and tmax >= expect_max:
-                tag += f" !!OOB max>={expect_max}!!"
-            if expect_min is not None and tmin < expect_min:
-                tag += f" !!OOB min<{expect_min}!!"
-            _dbg_logger.debug(f"[TENSOR {name}] {info} min={tmin} max={tmax}{tag}")
-        for _h in _dbg_logger.handlers:
-            try: _h.flush()
-            except Exception: pass
-    except Exception as e:
-        _dbg_logger.debug(f"[TENSOR {name}] CHECK FAILED: {e!r}")
-        for _h in _dbg_logger.handlers:
-            try: _h.flush()
-            except Exception: pass
+    if t is None or not torch.is_tensor(t):
+        return
+    if not t.dtype.is_floating_point or t.numel() == 0:
+        return
+    if torch.isnan(t).any().item() or torch.isinf(t).any().item():
+        raise RuntimeError(
+            f"[NaN/Inf] {name}: shape={tuple(t.shape)} dtype={t.dtype}"
+        )
 
 # ── paths ────────────────────────────────────────────────────────────
 # Disk layout（v3,2026-05-23 起):
@@ -535,7 +467,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # ── Session / hour archive 目錄 ──────────────────────────────
         # 每次啟動一個 training_<ts>/,每滿 1 hour 一個 hour_NN_<ts>/。
         # canonical *.pth 仍寫在 VISUAL_V3_MODEL_PATH 頂層(try_load_model 直接讀);
-        # 當下時段的 io_log / cuda_debug.log 都導到 current_archive_dir。
+        # 當下時段的 io_log 導到 current_archive_dir。
         # 目錄管理本體在 model_structure.archive_manager.SessionArchiveManager,
         # 跟 stage1 共用。
         self.archive = SessionArchiveManager(
@@ -581,14 +513,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self._io_log = RolloverTextLog(banner_factory=self._build_io_log_banner)
         self._io_log.swap_to(self.archive.current_archive_dir / "train_io_log.txt")
 
-        # cuda_debug.log 也跟著 archive dir 走(module-level handler 預設指向頂層,
-        # 這裡 swap 成 current_archive_dir 的版本)。CategorizedReplayBuffer 共用
-        # 同一個檔案路徑,在這裡同步更新。
-        dbg_path = self.archive.current_archive_dir / "cuda_debug.log"
-        swap_logger_file_handler(_dbg_logger, dbg_path)
-        _crb_module.DEBUG_CUDA_SAMPLE_LOG_PATH = dbg_path
-
-        # 註冊 hour rollover callback:io_log + dbg logger 翻檔。Console print 由
+        # 註冊 hour rollover callback:io_log 翻檔。Console print 由
         # SessionArchiveManager 在翻頁時負責。
         self.archive.register_on_rollover(self._on_archive_rollover)
 
@@ -842,44 +767,20 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.backbone.set_bn_eval()
         self.q_network.eval()
         self.q_target.eval()
-        _dbg(f"[select_action] ENTER total_it={self.total_it} blocked_size={len(blocked)} available_size={len(available)}")
-        _dbg_mem("select_action ENTER")
-        _dbg_tensor("select_action.state(input)", state)
-        _dbg("[select_action] before state.to(device)")
         screenshot_batch = state.unsqueeze(0).to(device)
-        _dbg_tensor("select_action.screenshot_batch", screenshot_batch)
-        _dbg("[select_action] after state.to(device)")
         with torch.no_grad():
-            _dbg("[select_action] before backbone")
             features  = self.backbone.get_features(screenshot_batch)
-            _dbg_tensor("select_action.features", features)
-            _dbg("[select_action] after backbone")
             q_2d = self.q_network(features)["q_values"].squeeze(0)
-            _dbg_tensor("select_action.q_2d", q_2d)
-            _dbg("[select_action] after q_network")
             q_flat = q_2d.view(-1)
-            _dbg_tensor("select_action.q_flat", q_flat)
-            _dbg(f"[select_action] q_flat.numel()={q_flat.numel()} num_actions={self.num_actions}")
 
             masked_q = q_flat.clone()
             if blocked:
-                blocked_sorted = sorted(blocked)
-                # bounds-check BEFORE indexing — out-of-range = illegal memory access
-                bad = [b for b in blocked_sorted if not (0 <= b < q_flat.numel())]
-                if bad:
-                    _dbg(f"[select_action] !!OOB blocked indices {bad} vs numel={q_flat.numel()}!!")
-                blocked_idx = torch.tensor(blocked_sorted, dtype=torch.long, device=masked_q.device)
-                _dbg_tensor("select_action.blocked_idx", blocked_idx,
-                            expect_min=0, expect_max=q_flat.numel())
+                blocked_idx = torch.tensor(sorted(blocked), dtype=torch.long, device=masked_q.device)
                 masked_q[blocked_idx] = float("-inf")
-                _dbg("[select_action] after blocked-mask scatter")
 
             action_id = int(masked_q.argmax().item())
-            _dbg(f"[select_action] action_id={action_id} (num_actions={self.num_actions})")
             topk = min(5, len(available))
             top_vals, top_idx = torch.topk(masked_q, k=topk)
-        _dbg("[select_action] done")
-        _dbg_mem("select_action EXIT")
         self._set_runtime_modes()
 
         row, col = self.action_to_grid(action_id)
@@ -965,12 +866,9 @@ class VisualAgentV3(VisualAgentCommonMixin):
             if self.training_history.win_rate(window=100) > SPREAD_DECAY_LATCH_WR_THRESHOLD:
                 self.replay_buffer.enable_spread_decay = True
 
-        # Wall-clock 滿 1 小時翻頁;io_log / cuda_debug.log 都會自動跟著新的 archive
-        # dir(註冊在 SessionArchiveManager 的 on_rollover callback 處理)。
+        # Wall-clock 滿 1 小時翻頁;io_log 自動跟著新的 archive dir(註冊在
+        # SessionArchiveManager 的 on_rollover callback 處理)。
         self.archive.maybe_rollover()
-        _dbg(f"[train_step] ENTER total_it={self.total_it} buf_size={buf_size}")
-        _dbg_mem("train_step ENTER")
-        _dbg("[train_step] before replay_buffer.sample")
         # PER β annealing — 對齊 transformer_discrete_agent.py:641-646。β 從
         # BETA_START 線性 anneal 到 BETA_END(VISUAL_PER_BETA_EP 個 episode 飽和),
         # 早期偏平均(弱修正、訓練穩),後期完全修正 priority 抽樣 bias。
@@ -985,18 +883,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
                 include_extra=True,
             )
         )
-        _dbg("[train_step] after replay_buffer.sample")
-        # ---- sanity-check sampled tensors ----
-        _dbg_tensor("train_step.state",      state)
-        _dbg_tensor("train_step.next_state", next_state)
-        _dbg_tensor("train_step.action",     action,
-                    expect_min=0, expect_max=self.num_actions)
-        _dbg_tensor("train_step.reward",     reward)
-        _dbg_tensor("train_step.done",       done)
-        _dbg_tensor("train_step.is_weights", is_weights)
-        _dbg_tensor("train_step.discounts",  discounts)
         batch_size = state.size(0)
-        _dbg(f"[train_step] batch_size={batch_size} num_actions={self.num_actions} grid={self.grid_h}x{self.grid_w}")
         self._set_runtime_modes()
 
         # ── target branch (no gradients) ──
@@ -1016,27 +903,15 @@ class VisualAgentV3(VisualAgentCommonMixin):
         with torch.no_grad():
             with torch.autocast(device_type=device.type, dtype=torch.float16,
                                 enabled=(USE_AMP and device.type == "cuda")):
-                _dbg("[train_step] before next backbone")
                 next_features  = self.backbone.get_features_from_cached(next_state)
-                _dbg_tensor("train_step.next_features", next_features)
-                _dbg("[train_step] after next backbone")
                 next_online    = self.q_network(next_features)
-                _dbg_tensor("train_step.next_online.q_values", next_online["q_values"])
                 next_online_q_flat = next_online["q_values"].view(batch_size, -1)
-                _dbg_tensor("train_step.next_online_q_flat", next_online_q_flat)
                 next_best_flat = next_online_q_flat.argmax(dim=1)
-                _dbg_tensor("train_step.next_best_flat", next_best_flat,
-                            expect_min=0, expect_max=self.num_actions)
                 next_target    = self.q_target(next_features)
-                _dbg_tensor("train_step.next_target.quantiles", next_target["quantiles"])
-                _dbg("[train_step] after q_target")
                 next_target_quantiles = next_target["quantiles"][
                     torch.arange(batch_size, device=device), next_best_flat
                 ]
-                _dbg_tensor("train_step.next_target_quantiles", next_target_quantiles)
                 target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
-                _dbg_tensor("train_step.target_quantiles", target_quantiles)
-        _dbg("[train_step] target branch done")
         # Restore 訓練模式 — current branch 要 dropout/BN-stats 都進去
         self._set_runtime_modes()
 
@@ -1044,32 +919,18 @@ class VisualAgentV3(VisualAgentCommonMixin):
         #                    YOLO11n 已凍結，且其 forward 已在 store_transition 階段完成）──
         with torch.autocast(device_type=device.type, dtype=torch.float16,
                             enabled=(USE_AMP and device.type == "cuda")):
-            _dbg("[train_step] before current backbone")
             features  = self.backbone.get_features_from_cached(state)
-            _dbg_tensor("train_step.features", features)
-            _dbg("[train_step] after current backbone")
             q_output  = self.q_network(features)
             q_2d           = q_output["q_values"]
             q_quantiles    = q_output["quantiles"]
             tau_hats       = q_output["tau_hats"]
             fraction_probs = q_output["fraction_probs"]
-            _dbg_tensor("train_step.q_2d", q_2d)
-            _dbg_tensor("train_step.q_quantiles", q_quantiles)
-            _dbg_tensor("train_step.tau_hats", tau_hats)
-            _dbg_tensor("train_step.fraction_probs", fraction_probs)
 
             action_flat = action.long()
-            _dbg_tensor("train_step.action_flat", action_flat,
-                        expect_min=0, expect_max=self.num_actions)
             row_idx = action_flat // self.grid_w
             col_idx = action_flat %  self.grid_w
-            _dbg_tensor("train_step.row_idx", row_idx, expect_min=0, expect_max=self.grid_h)
-            _dbg_tensor("train_step.col_idx", col_idx, expect_min=0, expect_max=self.grid_w)
-            _dbg(f"[train_step] q_2d.shape={tuple(q_2d.shape)} q_quantiles.shape={tuple(q_quantiles.shape)}")
             q_taken = q_2d[torch.arange(batch_size, device=device), row_idx, col_idx].unsqueeze(1)
-            _dbg("[train_step] after q_taken gather")
             chosen_quantiles = q_quantiles[torch.arange(batch_size, device=device), action_flat]
-            _dbg("[train_step] after chosen_quantiles gather")
 
             per_sample_quantile_loss, frac_clipped = _quantile_huber_loss(
                 current_quantiles=chosen_quantiles.float(),
@@ -1093,21 +954,16 @@ class VisualAgentV3(VisualAgentCommonMixin):
             fpn_norm_entropy_t = entropy.mean() / math.log(NUM_FQF_FRACTIONS)
             fpn_tau_std_t = tau_hats.std(dim=1).mean()
 
-        _dbg_tensor("train_step.loss", loss)
-        _dbg_tensor("train_step.td_error", td_error)
+        # Per-step NaN check(Q1=b)— loss 出現 NaN/Inf 就立刻 raise,不等到下一次 save。
+        _check_finite("train_step.loss", loss)
 
         self.optimizer.zero_grad(set_to_none=True)
-        _dbg("[train_step] before backward")
         self.scaler.scale(loss).backward()
-        _dbg("[train_step] after backward")
-        _dbg_mem("train_step after backward")
         self.scaler.unscale_(self.optimizer)
-        _dbg("[train_step] after unscale_")
 
         # ── pre-clip gradient norms (diagnostic) ──
         backbone_pre = self._module_grad_norm(self.backbone)
         head_pre     = self._module_grad_norm(self.q_network)
-        _dbg(f"[train_step] grad backbone_pre={backbone_pre:.4g} head_pre={head_pre:.4g}")
 
         # ── per-layer grad/weight norms must be logged BEFORE clip_grad_norm_，
         # 否則 grad 會被 in-place 縮過,看不出哪一層真的爆掉。
@@ -1125,22 +981,13 @@ class VisualAgentV3(VisualAgentCommonMixin):
         grad_clip_percent = 1.0 - grad_clip_scale
         grad_clip_excess_norm = max(0.0, grad_norm_total_value - grad_clip_threshold)
         grad_clip_excess_ratio = grad_clip_excess_norm / (grad_clip_threshold + 1e-12)
-        _dbg(
-            "[train_step] after clip "
-            f"grad_norm_total={grad_norm_total_value:.4g} "
-            f"clip_scale={grad_clip_scale:.4g} "
-            f"clip_percent={grad_clip_percent:.2%}"
-        )
 
         backbone_post = self._module_grad_norm(self.backbone)
         head_post     = self._module_grad_norm(self.q_network)
         grad_post_total = (backbone_post ** 2 + head_post ** 2) ** 0.5
 
-        _dbg("[train_step] before optimizer.step")
         self.scaler.step(self.optimizer)
         self.scaler.update()
-        _dbg("[train_step] after optimizer.step")
-        _dbg_mem("train_step after optimizer.step")
 
         # 對齊 transformer_discrete_agent.py:955-959 ── update_priorities 放在 backward
         # + clip + optimizer.step 全部成功後才寫;backward 失敗會直接 raise,priority
@@ -1152,13 +999,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
             td_error.squeeze(-1).cpu().numpy(),
             quantile_spreads=chosen_q_spread.cpu().numpy(),
         )
-        _dbg("[train_step] after update_priorities")
 
         if self.total_it % TARGET_UPDATE_FREQ == 0:
-            _dbg("[train_step] before target update")
             self.q_target.load_state_dict(self.q_network.state_dict())
             self.q_target.eval()
-            _dbg("[train_step] after target update")
 
         weight_distance_log = None
         if self.total_it % WEIGHT_DISTANCE_LOG_EVERY == 0:
@@ -1283,8 +1127,6 @@ class VisualAgentV3(VisualAgentCommonMixin):
             self.training_logger.log(f"lr/{tag}", group["lr"], step=step, csv=False)
 
         self.training_logger.flush()
-        _dbg(f"[train_step] EXIT total_it={self.total_it}")
-        _dbg_mem("train_step EXIT")
         # 用 batched scalar(loss_value)而不是 loss.item() — 上面已經 sync 過,
         # 不要再多一次。Demo_test_Minesweeper 端 `if loss_info:` 判 None,所以
         # throttle 跳過時(return None)caller 自動 silent skip。
@@ -1377,11 +1219,88 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
     # ──────────────────────────── checkpoints ──────────────────────────
 
+    def _scan_state_dict_finite(self, sd_label, state_dict):
+        """掃 state_dict 內所有 float tensor,回傳 [(label, msg)] 列表。不 raise。
+
+        Caller 自己決定要 raise 還是改寫 .crash 檔。跟 stage1 的同名 method 對齊。
+        """
+        bad = []
+        for key, tensor in state_dict.items():
+            if not hasattr(tensor, "dtype"):
+                continue
+            if not tensor.dtype.is_floating_point:
+                continue
+            if torch.isfinite(tensor).all():
+                continue
+            nan_n = int(torch.isnan(tensor).sum().item())
+            inf_n = int(torch.isinf(tensor).sum().item())
+            bad.append((f"{sd_label}.{key}", f"nan={nan_n} inf={inf_n}"))
+        return bad
+
+    def _scan_optimizer_state(self, label, opt_state_dict):
+        """掃 optimizer state_dict(nested:state[pid][key])。檢查 NaN/Inf + exp_avg_sq<0。
+
+        Adam 的 second moment 數學上恆 >= 0;出現負值必為 bit-level corruption,
+        會讓下次 load 後 sqrt(neg)=NaN。回傳 [(label, msg)] 列表,不 raise。
+        """
+        bad = []
+        state = opt_state_dict.get("state", {}) if isinstance(opt_state_dict, dict) else {}
+        for pid, pstate in state.items():
+            if not isinstance(pstate, dict):
+                continue
+            for key, val in pstate.items():
+                if not isinstance(val, torch.Tensor):
+                    continue
+                if not val.dtype.is_floating_point:
+                    continue
+                if not torch.isfinite(val).all():
+                    nan_n = int(torch.isnan(val).sum().item())
+                    inf_n = int(torch.isinf(val).sum().item())
+                    bad.append((f"{label}.state[{pid}].{key}", f"nan={nan_n} inf={inf_n}"))
+                if key == "exp_avg_sq" and (val < 0).any().item():
+                    neg_n = int((val < 0).sum().item())
+                    bad.append((f"{label}.state[{pid}].{key}", f"negative={neg_n} (math-impossible)"))
+        return bad
+
     def _save_model(self) -> None:
         VISUAL_V3_MODEL_PATH.mkdir(parents=True, exist_ok=True)
         backbone_sd = self.backbone.state_dict()
         qnet_sd     = self.q_network.state_dict()
         qtarget_sd  = self.q_target.state_dict()
+        opt_sd      = self.optimizer.state_dict()
+
+        # Save-time NaN/Inf probe(Q1=b + Q2=b)
+        # ─ 防止 atexit 在 NaN crash 後 trigger _save_model 把磁碟上的好 checkpoint
+        #   蓋成壞的。任一個 state_dict 含 NaN/Inf → 不寫 canonical *.pth,改寫
+        #   *.crash_stepN.pth 留證據後 raise。下次啟動 try_load_model 仍可從未被
+        #   汙染的 canonical 還原。也掃 optimizer state ─ Adam 的 v 為負會在下次
+        #   load 後立刻引爆 NaN weight。
+        bad = []
+        bad.extend(self._scan_state_dict_finite("backbone", backbone_sd))
+        bad.extend(self._scan_state_dict_finite("q_network", qnet_sd))
+        bad.extend(self._scan_state_dict_finite("q_target", qtarget_sd))
+        bad.extend(self._scan_optimizer_state("optimizer", opt_sd))
+
+        if bad:
+            suffix = f".crash_step{self.total_it}.pth"
+            print(f"[NaN-probe] _save_model: REFUSING to overwrite canonical checkpoints at step {self.total_it}")
+            print(f"[NaN-probe] non-finite tensors detected:")
+            for key, msg in bad:
+                print(f"[NaN-probe]   {key}: {msg}")
+            torch.save(backbone_sd, VISUAL_V3_MODEL_PATH / f"backbone{suffix}")
+            torch.save(qnet_sd,     VISUAL_V3_MODEL_PATH / f"fqf_network{suffix}")
+            torch.save(qtarget_sd,  VISUAL_V3_MODEL_PATH / f"fqf_target{suffix}")
+            torch.save({"optimizer": opt_sd},
+                       VISUAL_V3_MODEL_PATH / f"optimizer_state{suffix}")
+            print(f"[NaN-probe] wrote *{suffix} files for offline analysis;"
+                  f" canonical *.pth left untouched (last good state preserved)")
+            # Raise 中止訓練 — atexit 會再 trigger 一次 _save_model,probe 會再次
+            # raise(canonical 永遠不會被蓋掉)。
+            raise RuntimeError(
+                f"[NaN-probe] _save_model: non-finite tensors at step {self.total_it}; "
+                f"canonical checkpoints preserved, see *{suffix} for forensics"
+            )
+
         torch.save(backbone_sd, VISUAL_V3_MODEL_PATH / "backbone.pth")
         torch.save(qnet_sd,     VISUAL_V3_MODEL_PATH / "fqf_network.pth")
         torch.save(qtarget_sd,  VISUAL_V3_MODEL_PATH / "fqf_target.pth")
@@ -1607,7 +1526,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         ]
 
     def _on_archive_rollover(self, new_dir: Path) -> None:
-        """SessionArchiveManager rollover callback:翻頁時 swap io_log + dbg logger。"""
+        """SessionArchiveManager rollover callback:翻頁時 swap io_log。"""
         now = datetime.datetime.now()
         try:
             self._io_log.write(f"\n--- hour rollover at {now.isoformat()} ---\n")
@@ -1615,9 +1534,6 @@ class VisualAgentV3(VisualAgentCommonMixin):
         except Exception:
             pass
         self._io_log.swap_to(new_dir / "train_io_log.txt")
-        dbg_path = new_dir / "cuda_debug.log"
-        swap_logger_file_handler(_dbg_logger, dbg_path)
-        _crb_module.DEBUG_CUDA_SAMPLE_LOG_PATH = dbg_path
 
     # ──────────────────────────── cleanup ──────────────────────────────
 
