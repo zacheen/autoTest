@@ -65,6 +65,7 @@ from model_structure.yolo_encoder_base import (
 from model_structure.optimizer_factory import build_fqf_optimizer, FQFOptimizerConfig
 from model_structure.hyperparameter_dump import dump_hyperparameters
 from model_structure.rng_utils import seed_everything
+from model_structure.sdp_backend import set_sdp_all
 from model_structure.archive_manager import (
     SessionArchiveManager,
     RolloverTextLog,
@@ -77,19 +78,31 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CHECKPOINT_RED = "\033[91;1m"
 CHECKPOINT_RESET = "\033[0m"
 
-if device.type == "cuda":
-    # PyTorch 2.1 may route Transformer attention through fast SDP kernels.
-    # On some CUDA 11.8 / GPU combinations those kernels can raise
-    # "illegal instruction"; the math backend is slower but more stable.
-    try:
-        if hasattr(torch.backends.cuda, "enable_flash_sdp"):
-            torch.backends.cuda.enable_flash_sdp(False)
-        if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
-            torch.backends.cuda.enable_mem_efficient_sdp(False)
-        if hasattr(torch.backends.cuda, "enable_math_sdp"):
-            torch.backends.cuda.enable_math_sdp(True)
-    except Exception as exc:
-        print(f"[V3] Failed to configure CUDA SDP backends: {exc}")
+# ── CUDA SDP backend toggles ─────────────────────────────────────────
+# Encoder self-attention at seq_len=1600 materializes a full (B, H, 1600, 1600)
+# attention matrix under the math backend — huge memory hit. flash / mem_efficient
+# compute attention tile-by-tile and never materialize the full matrix, cutting
+# memory by an order of magnitude.
+# Earlier NaN / "illegal instruction" with the fast SDP kernels was confirmed to
+# be a GPU hardware issue, not the kernel itself; enable all three and let the
+# PyTorch dispatcher pick.
+#
+# Two-layer constants:
+#   _REQ_*    — what we'd like enabled. Flip these to disable. Underscore prefix
+#               keeps them out of hyperparameter_dump.
+#   USE_*_SDP — = _REQ_* AND device supports CUDA AND the PyTorch API exists.
+#               ALL_CAPS so hyperparameter_dump picks them up — what gets logged
+#               matches PyTorch's actual "permitted" state. Still does NOT mean
+#               the kernel will run at forward time — the dispatcher may skip
+#               flash for fp32 inputs, etc.
+_REQ_FLASH:         bool = True
+_REQ_MEM_EFFICIENT: bool = True
+_REQ_MATH:          bool = True
+
+USE_FLASH_SDP, USE_MEM_EFFICIENT_SDP, USE_MATH_SDP = set_sdp_all(
+    flash=_REQ_FLASH, mem_efficient=_REQ_MEM_EFFICIENT, math=_REQ_MATH,
+    device=device, log_prefix="[V3]",
+)
 
 # ── reproducibility ──────────────────────────────────────────────────
 # 模組 import 時生一個 32-bit seed 並 apply 到 random / numpy / torch / cuda。

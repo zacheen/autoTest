@@ -19,6 +19,7 @@ from model_structure.adaptive_epsilon import AdaptiveEpsilonController
 from model_structure.history import TrainingHistory
 from model_structure.hyperparameter_dump import dump_hyperparameters
 from model_structure.rng_utils import seed_everything
+from model_structure.sdp_backend import set_sdp_all
 from model_structure.archive_manager import (
     SessionArchiveManager,
     RolloverTextLog,
@@ -75,15 +76,29 @@ TRANSFORMER_NUM_LAYERS = 4
 TRANSFORMER_FF_DIM = 256
 TRANSFORMER_DROPOUT = 0.1
 
-# ── CUDA SDP backend ──────────────────────────────────────────────────
-# mem-efficient SDP kernel 在某些 CUDA / GPU 組合上會丟 "illegal instruction"。
-# flash / math 用 PyTorch 預設（皆 enabled）。
-if device.type == "cuda":
-    try:
-        if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
-            torch.backends.cuda.enable_mem_efficient_sdp(False)
-    except Exception:
-        pass
+# ── CUDA SDP backend toggles ─────────────────────────────────────────
+# Enable all three backends and let the PyTorch dispatcher pick (Stage 1's
+# seq_len=36 usually ends up on math; flash/mem_efficient have limited impact
+# at this size). Keeping the same shape as v3 for maintainability.
+# Earlier "illegal instruction" with the mem-efficient kernel was confirmed to
+# be a GPU hardware issue, not the kernel itself.
+#
+# Two-layer constants:
+#   _REQ_*    — what we'd like enabled. Flip these to disable. Underscore prefix
+#               keeps them out of hyperparameter_dump.
+#   USE_*_SDP — = _REQ_* AND device supports CUDA AND the PyTorch API exists.
+#               ALL_CAPS so hyperparameter_dump picks them up — what gets logged
+#               matches PyTorch's actual "permitted" state (but does NOT guarantee
+#               the kernel runs at forward time — the dispatcher may still skip
+#               based on dtype).
+_REQ_FLASH:         bool = True
+_REQ_MEM_EFFICIENT: bool = True
+_REQ_MATH:          bool = True
+
+USE_FLASH_SDP, USE_MEM_EFFICIENT_SDP, USE_MATH_SDP = set_sdp_all(
+    flash=_REQ_FLASH, mem_efficient=_REQ_MEM_EFFICIENT, math=_REQ_MATH,
+    device=device, log_prefix="[Stage1]",
+)
 
 # ── NaN/Inf 偵測 ─────────────────────────────────────────────────────
 # Stage1 用 self._assert_finite(stage, name, tensor)(method,見類別內定義),
