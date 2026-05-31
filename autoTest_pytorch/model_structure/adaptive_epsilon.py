@@ -1,14 +1,14 @@
-"""adaptive_epsilon.py — 共用的 adaptive epsilon controller。
+"""Shared adaptive epsilon controller.
 
-只負責「依 caller 傳進來的 win rate 算 epsilon」。Episode 結果累積/查詢已搬到
-History / TrainingHistory (model_structure/history.py),呼叫端要先 record 進
-history,再把 win_rate 餵進來。
+Only computes epsilon from the caller-provided win rate. Episode result storage
+and queries live in History / TrainingHistory (model_structure/history.py);
+callers should record into history first, then pass in win_rate.
 
-策略：
-    - win rate 在 [wr_min, wr_max] 之間時,以對數內插把 epsilon 從 eps_max
-      平滑壓到 eps_min;win rate < wr_min 時固定 eps_max;> wr_max 時固定 eps_min
-    - state_dict 只剩 epsilon 一個值 (與 optimizer state 一起存)。history
-      由 TrainingHistory 寫到獨立 .pth 檔。
+Policy:
+    - Log-interpolate epsilon from eps_max to eps_min while win rate is in
+      [wr_min, wr_max]; clamp to eps_max below wr_min and eps_min above wr_max.
+    - state_dict stores only epsilon with optimizer state. TrainingHistory writes
+      history to its own .pth file.
 """
 
 from __future__ import annotations
@@ -17,14 +17,14 @@ import math
 
 
 class AdaptiveEpsilonController:
-    """Win-rate-based adaptive epsilon scheduler。
+    """Win-rate-based adaptive epsilon scheduler.
 
-    用法：
+    Usage:
         controller = AdaptiveEpsilonController()
         ...
         history.record(win=True)
         wr = history.win_rate(window=100)
-        eps = controller.update(wr)     # 更新 self.epsilon + return
+        eps = controller.update(wr)     # update and return self.epsilon
     """
 
     def __init__(
@@ -40,15 +40,15 @@ class AdaptiveEpsilonController:
         self.eps_max = eps_max
         self.epsilon: float = eps_max
 
-    # ──────────────────────────── update ────────────────────────────
+    # update
 
     def update(self, win_rate: float) -> float:
-        """以 caller 算好的 win rate 推導 next epsilon,更新 self.epsilon 並回傳。"""
+        """Compute next epsilon from caller-provided win rate, update, and return it."""
         self.epsilon = self.compute_epsilon(win_rate)
         return self.epsilon
 
     def compute_epsilon(self, win_rate: float) -> float:
-        """Log-interpolate epsilon from a given win rate (pure, no side effect)。"""
+        """Log-interpolate epsilon from a given win rate (pure, no side effect)."""
         wr = max(self.wr_min, min(self.wr_max, float(win_rate)))
         t = (wr - self.wr_min) / (self.wr_max - self.wr_min)
         return math.exp(
@@ -56,7 +56,7 @@ class AdaptiveEpsilonController:
             + (math.log(self.eps_min) - math.log(self.eps_max)) * t
         )
 
-    # ──────────────────────────── checkpoint ────────────────────────
+    # checkpoint
 
     def state_dict(self) -> dict:
         return {"epsilon": self.epsilon}

@@ -52,8 +52,8 @@ import unittest
 from xml.sax import saxutils
 
 output_html_in = None
-# 這個function 會被 ToolMain 呼叫
-# 印出來的東西會印在 HTML report 裡面
+# Called by ToolMain.
+# Printed content is shown in the HTML report.
 def p_to_html(stri_in) :
     global output_html_in
     if output_html_in == None:
@@ -161,7 +161,7 @@ class Template_mixin(object):
 <script language="javascript" type="text/javascript">
 output_list = Array();
 
-/*level 调整增加只显示通过用例的分类 --Findyou
+/* Level filter for passed cases --Findyou
 0:Summary //all hiddenRow
 1:Failed  //pt hiddenRow, ft none
 2:Pass    //pt none, ft hiddenRow
@@ -190,7 +190,7 @@ function showCase(level) {
         }
     }
 
-    //加入【详细】切换文字变化 --Findyou
+    // Toggle detail text --Findyou
     detail_class=document.getElementsByClassName('detail');
 	//console.log(detail_class.length)
 	if (level == 3) {
@@ -209,7 +209,7 @@ function showClassDetail(cid, count) {
     var id_list = Array(count);
     var toHide = 1;
     for (var i = 0; i < count; i++) {
-        //ID修改 点 为 下划线 -Findyou
+        // Replace dots in IDs with underscores -Findyou
         tid0 = 't' + cid.substr(1) + '_' + (i+1);
         tid = 'f' + tid0;
         tr = document.getElementById(tid);
@@ -224,7 +224,7 @@ function showClassDetail(cid, count) {
     }
     for (var i = 0; i < count; i++) {
         tid = id_list[i];
-        //修改点击无法收起的BUG，加入【详细】切换文字变化 --Findyou
+        // Fix collapse toggle and update detail text --Findyou
         if (toHide) {
             document.getElementById(tid).className = 'hiddenRow';
             document.getElementById(cid).innerText = "详细"
@@ -305,7 +305,7 @@ table       { font-size: 100%; }
     # ------------------------------------------------------------------------
     # Report
     #
-    # 汉化,加美化效果 --Findyou
+    # Localized and styled by Findyou.
     REPORT_TMPL = """
 <p id='show_detail_line'>
 <a class="btn btn-primary" href='javascript:showCase(0)'>概要{ %(passrate)s }</a>
@@ -356,16 +356,16 @@ table       { font-size: 100%; }
 </tr>
 """ # variables: (style, desc, count, Pass, fail, error, cid)
 
-    #失败 的样式，去掉原来JS效果，美化展示效果  -Findyou
+    # Failure style; replaces the original JS effect - Findyou.
     REPORT_TEST_WITH_OUTPUT_TMPL = r"""
 <tr id='%(tid)s' class='%(Class)s'>
     <td class='%(style)s'><div class='testcase'>%(desc)s</div></td>
     <td colspan='5' align='center'>
-    <!--默认收起错误信息 -Findyou
+    <!-- Collapse error details by default -Findyou
     <button id='btn_%(tid)s' type="button"  class="btn btn-danger btn-xs collapsed" data-toggle="collapse" data-target='#div_%(tid)s'>%(status)s</button>
     <div id='div_%(tid)s' class="collapse">  -->
 
-    <!-- 默认展开错误信息 -Findyou -->
+    <!-- Expand error details by default -Findyou -->
     <button id='btn_%(tid)s' type="button"  class="btn btn-danger btn-xs" data-toggle="collapse" data-target='#div_%(tid)s'>%(status)s</button>
     <div id='div_%(tid)s' class="collapse in">
     <pre>
@@ -378,7 +378,7 @@ table       { font-size: 100%; }
 </tr>
 """ # variables: (tid, Class, style, desc, status)
 
-    # 通过 的样式，加标签效果  -Findyou
+    # Pass style with label effect - Findyou.
     REPORT_TEST_NO_OUTPUT_TMPL = r"""
 <tr id='%(tid)s' class='%(Class)s'>
     <td class='%(style)s'><div class='testcase'>%(desc)s</div></td>
@@ -395,7 +395,7 @@ table       { font-size: 100%; }
     # ------------------------------------------------------------------------
     # ENDING
     #
-    # 增加返回顶部按钮  --Findyou
+    # Add a back-to-top button --Findyou.
     ENDING_TMPL = """<div id='ending'>&nbsp;</div>
     <div style=" position:fixed;right:50px; bottom:30px; width:20px; height:20px;cursor:pointer">
     <a href="#"><span class="glyphicon glyphicon-eject" style = "font-size:30px;" aria-hidden="true">
@@ -426,7 +426,7 @@ class _TestResult(TestResult):
         #   stack trace,
         # )
         self.result = []
-        #增加一个测试通过率 --Findyou
+        # Add pass-rate tracking --Findyou.
         self.passrate=float(0)
 
 
@@ -485,7 +485,7 @@ class _TestResult(TestResult):
         TestResult.addError(self, test, err)
         _, _exc_str = self.errors[-1]
         output = self.complete_output()
-        # 再輸出error訊息到cmd (以免testreport還沒跑完 因此沒有結果)
+        # Also print errors to cmd in case the HTML report is incomplete.
         print("unittest 輸出的 error : \n"+str(_exc_str))
         self.result.append((2, test, output, _exc_str))
         if self.verbosity > 1:
@@ -536,8 +536,8 @@ class HTMLTestRunner(Template_mixin):
         "Run the given test case or test suite."
         result = _TestResult(self.verbosity)
         
-        # 這是初始化嗎??
-        test(result)   # 使用 testunit(已加入 testcase 的 unittest)  
+        # Initialize and run the unittest suite.
+        test(result)   # Run the test unit with added test cases.
         self.stopTime = datetime.datetime.now()
         self.generateReport(test, result)
         print('\nTime Elapsed: %s' % (self.stopTime-self.startTime), file=sys.stderr)
@@ -557,7 +557,7 @@ class HTMLTestRunner(Template_mixin):
         r = [(cls, rmap[cls]) for cls in classes]
         return r
 
-    #替换测试结果status为通过率 --Findyou
+    # Replace result status with pass rate --Findyou.
     def getReportAttributes(self, result):
         """
         Return report attributes as a list of (name, value).
@@ -604,7 +604,7 @@ class HTMLTestRunner(Template_mixin):
     def _generate_stylesheet(self):
         return self.STYLESHEET_TMPL
 
-    #增加Tester显示 -Findyou
+    # Add tester display -Findyou.
     def _generate_heading(self, report_attrs):
         a_lines = []
         for name, value in report_attrs:
@@ -621,7 +621,7 @@ class HTMLTestRunner(Template_mixin):
         )
         return heading
 
-    #生成报告  --Findyou添加注释
+    # Generate report --Findyou.
     def _generate_report(self, result):
         rows = []
         sortedResult = self.sortResult(result.result)
@@ -669,13 +669,13 @@ class HTMLTestRunner(Template_mixin):
     def _generate_report_test(self, rows, cid, tid, n, t, o, e):
         # e.g. 'pt1.1', 'ft1.1', etc
         has_output = bool(o or e)
-        # ID修改点为下划线,支持Bootstrap折叠展开特效 - Findyou
+        # Replace dots in IDs with underscores for Bootstrap collapse.
         tid = (n == 0 and 'p' or 'f') + 't%s_%s' % (cid+1,tid+1)
         name = t.id().split('.')[-1]
         desc = name
         tmpl = has_output and self.REPORT_TEST_WITH_OUTPUT_TMPL or self.REPORT_TEST_NO_OUTPUT_TMPL
 
-        # utf-8 支持中文 - Findyou
+        # UTF-8 supports Chinese - Findyou.
          # o and e should be byte string because they are collected from stdout and stderr?
         if isinstance(o, str):
             # TODO: some problem with 'string_escape': it escape \n and mess up formating

@@ -558,7 +558,7 @@ class VisualDiscreteAgent:
             + list(self.backbone.core.decoder.parameters())
             + list(self.q_network.parameters())
         )
-        # clip 前先量各模組的真實梯度大小，用來診斷哪個模組在爆炸
+        # Measure true per-module grad norms before clipping to find explosions.
         grad_norm_yolo_pre    = self._module_grad_norm(self.backbone.feature_extractor)
         grad_norm_decoder_pre = self._module_grad_norm(self.backbone.core.decoder)
         grad_norm_policy_pre  = (
@@ -572,7 +572,7 @@ class VisualDiscreteAgent:
             params_to_clip,
             max_norm=VISUAL_GRAD_CLIP_NORM,
         )
-        # clip 後的個別 norm（原本的量測，保留做對照）
+        # Per-module norms after clipping, kept for comparison.
         grad_norm_yolo = self._module_grad_norm(self.backbone.feature_extractor)
         grad_norm_backbone = self._module_grad_norm(self.backbone.core)
         grad_norm_policy = (
@@ -645,7 +645,7 @@ class VisualDiscreteAgent:
         self.tb_writer.add_scalar("grad/backbone_norm", grad_norm_backbone, self.total_it)
         self.tb_writer.add_scalar("grad/policy_norm", grad_norm_policy, self.total_it)
         self.tb_writer.add_scalar("grad/head_norm", grad_norm_head, self.total_it)
-        # clip 前的真實梯度大小，用來確認哪個模組造成 total_norm 上升
+        # True grad norms before clipping to identify what raises total_norm.
         self.tb_writer.add_scalar("grad_pre/yolo",    grad_norm_yolo_pre,    self.total_it)
         self.tb_writer.add_scalar("grad_pre/decoder", grad_norm_decoder_pre, self.total_it)
         self.tb_writer.add_scalar("grad_pre/policy",  grad_norm_policy_pre,  self.total_it)
@@ -1037,15 +1037,15 @@ class VisualDiscreteAgent:
                 self.tb_writer.add_histogram(tag, torch.cat(values), global_step)
 
     def _log_batchnorm_stats(self, global_step):
-        """把 YOLO backbone 所有 BatchNorm 層的 running_mean / running_var 印到 TensorBoard。
+        """Log YOLO backbone BatchNorm running_mean / running_var to TensorBoard.
 
-        觀察目的：確認掃雷截圖的 batch stats 是否穩定。
-          - bn/running_mean_avg : 所有 BN 層的 running_mean 的全體平均值
-          - bn/running_mean_std : 各 BN 層 running_mean 的標準差（層間差異）
-          - bn/running_var_avg  : 所有 BN 層的 running_var 的全體平均值
-          - bn/running_var_std  : 各 BN 層 running_var 的標準差
-        如果這些數值在訓練過程中幾乎不動 → train() 模式穩定，不需要特別處理。
-        如果這些數值一直大幅跳動 → 考慮改回 eval() 模式凍結 BatchNorm。
+        Goal: check whether Minesweeper screenshot batch stats are stable.
+          - bn/running_mean_avg : mean across all BN running_mean values
+          - bn/running_mean_std : std across BN layer running_mean values
+          - bn/running_var_avg  : mean across all BN running_var values
+          - bn/running_var_std  : std across BN layer running_var values
+        If these barely move during training, train() mode is stable.
+        If they swing heavily, consider switching back to eval() to freeze BatchNorm.
         """
         all_means = []
         all_vars = []

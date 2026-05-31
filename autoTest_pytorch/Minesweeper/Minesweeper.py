@@ -4,7 +4,7 @@ import time
 
 from MinesweeperLogic import MinesweeperLogic, get_board_config
 
-# 給玩家看的難度按鈕(順序 = 顯示順序)。"training" 那個 RL preset 不放這裡。
+# Difficulty buttons shown to players, in display order. Omit the RL training preset.
 _GUI_DIFFICULTIES = ("Beginner", "Intermediate", "Expert")
 
 
@@ -30,7 +30,7 @@ class Minesweeper:
     def check_stop(self):
         if self.stop_event and self.stop_event.is_set():
             self.root.withdraw()
-            self.root.quit()  # 只 quit，讓 mainloop 結束
+            self.root.quit()  # Only quit so mainloop can exit.
         else:
             self.root.after(100, self.check_stop)
 
@@ -45,7 +45,7 @@ class Minesweeper:
         self.cols = params.cols
         self.mines_count = params.mines
 
-        # 建立遊戲邏輯層
+        # Create game logic layer.
         self.logic = MinesweeperLogic(self.rows, self.cols, self.mines_count)
         self.start_time = None
 
@@ -232,7 +232,7 @@ class Minesweeper:
         if self.logic.game_over or self.logic.is_win:
             return
 
-        # 記錄開始時間（第一次點擊時）
+        # Record start time on the first click.
         if self.logic.first_click:
             self.start_time = time.time()
 
@@ -241,7 +241,7 @@ class Minesweeper:
         if not result.changed:
             return
 
-        # 更新翻開的格子 UI
+        # Update UI for revealed cells.
         colors = {
             1: '#0000ff', 2: '#008000', 3: '#ff0000', 4: '#000080',
             5: '#800000', 6: '#008080', 7: '#000000', 8: '#808080'
@@ -249,7 +249,7 @@ class Minesweeper:
         for r, c, num in result.revealed_cells:
             btn = self.buttons[r][c]
             if num == -1:
-                # 地雷 — game_lost 會處理顯示
+                # Mine display is handled by game_lost.
                 pass
             elif num > 0:
                 btn.config(relief=tk.SUNKEN, bg='#ffffff',
@@ -276,23 +276,23 @@ class Minesweeper:
 
         self.mine_label.config(text=str(max(0, self.logic.remaining_mines)))
 
-        # 插旗後也可能觸發勝利（所有非雷格都翻開了）
+        # Flagging can also trigger win if all non-mine cells are revealed.
         if self.logic.is_win:
             self._show_game_won()
 
     def _show_game_lost(self, hit_mine):
-        """顯示遊戲失敗的 UI。"""
-        # 顯示所有地雷
+        """Show game-lost UI."""
+        # Show all mines.
         for row, col in self.logic.mines:
             btn = self.buttons[row][col]
             if (row, col) == hit_mine:
                 btn.config(text='💣', bg='#ff0000', fg='black')
             elif (row, col) in self.logic.flags:
-                btn.config(text='🚩', bg='#90EE90')  # 正確標旗
+                btn.config(text='🚩', bg='#90EE90')  # Correct flag.
             else:
                 btn.config(text='💣', bg='#ffcccc', fg='black')
 
-        # 顯示錯誤標旗
+        # Show wrong flags.
         for row, col in self.logic.flags:
             if (row, col) not in self.logic.mines:
                 self.buttons[row][col].config(text='❌', bg='#ffff99')
@@ -300,10 +300,10 @@ class Minesweeper:
         messagebox.showinfo("Game Over", "You hit a mine! 你踩到地雷了！")
 
     def _show_game_won(self):
-        """顯示遊戲勝利的 UI。"""
+        """Show game-won UI."""
         elapsed_time = int(time.time() - self.start_time) if self.start_time else 0
 
-        # 標記所有地雷
+        # Mark all mines.
         for row, col in self.logic.mines:
             self.buttons[row][col].config(text='🚩', bg='#90EE90', fg='red')
 

@@ -73,18 +73,21 @@ class CategorizedReplayBuffer:
             age_decay: Decay factor removing priority based on how many inserts occurred since entry.
             max_age: Hard age limit in insert steps. Entries older than this get zero effective priority.
             enable_sample_decay: master switch for the Method-B sample-count decay (default False).
-                **僅控制是否在 ``_effective_priority`` 套用 decay**;``sample_count`` 不論這個
-                開關都會在 ``_sample_from_bucket`` 結尾無條件 +1(因為 ``mean_sample_count``
-                這類觀測 metric 需要永遠有效的 counter)。當這個開關 False 時,buffer 行為
-                等同 plain PER,sample_count 只是觀測值不影響抽樣。
+                Only controls whether ``_effective_priority`` applies decay.
+                ``sample_count`` always increments at the end of ``_sample_from_bucket``
+                because monitoring metrics such as ``mean_sample_count`` need a
+                valid counter. When this is False, the buffer behaves like plain
+                PER and sample_count is only observational.
             sample_decay: Method B — divide effective priority by (1 + sample_decay × sample_count).
-                Only takes effect when ``enable_sample_decay=True``. ``sample_count`` 累計
-                **所有抽樣路徑**(uniform / PER / safety padding 都算),不只 PER 半邊 — 任何
-                被過度採樣的 entry 都該降溫,不分原因。Learned 過的 entry 自然受保護:
-                low priority → low pick rate → sample_count 增長慢。
-                ⚠️ 註:原始設計只計 PER 半邊(避免懲罰 uniform exploration);改為涵蓋全部
-                路徑是為了統一 metric 語義。若日後啟用 Method B 發現 uniform 被誤殺,可考慮
-                還原為 PER-only 計數,但需另開欄位避免破壞 metric。
+                Only takes effect when ``enable_sample_decay=True``. ``sample_count``
+                counts all sampling paths (uniform / PER / safety padding), not only
+                PER, so over-sampled entries cool down regardless of cause. Learned
+                entries are naturally protected: low priority means low pick rate and
+                slower sample_count growth.
+                Note: the original design counted only the PER half to avoid
+                penalizing uniform exploration. Counting all paths makes metric
+                meaning consistent. If Method B later hurts uniform exploration,
+                consider adding a separate PER-only counter.
             enable_spread_decay: master switch for the FQF quantile-spread decay (default False).
                 Designed to be latched ON by the agent when win_rate crosses some threshold
                 (e.g. > 40%), once the model has matured enough that "wide quantile spread" mostly
@@ -108,13 +111,14 @@ class CategorizedReplayBuffer:
                 and you don't want pruning equilibrium to artificially delay training.
                 Must be a member of ``REWARD_TYPES`` or None.
             beta_start: Initial Importance Sampling weight factor.
-            balanced_ratio: 0.0~1.0,``sample()`` 裡 Phase 1 (stratified balanced)
-                占 batch 的比例。剩下的給 Phase 2(cross-class pure-PER)當 fallback。
-                - 1.0(default):每類各取 ``batch_size // 4`` 筆,PER 只在某類 entry
-                  數不足時補位。完全避免 cross-class PER 偏向高 abs(reward) 的類。
-                - 0.5:原始設計 50/50,Phase 1 取 ``batch_size // 8`` 每類,Phase 2
-                  在 leftover pool 用 PER 全域競爭 50% 名額。
-                - 0.0:完全沒 stratification,純 PER 全域抽。會被高 priority 類別主宰。
+            balanced_ratio: 0.0~1.0 ratio of Phase 1 stratified-balanced samples
+                inside ``sample()``. The rest is Phase 2 cross-class pure-PER fallback.
+                - 1.0 (default): each class takes ``batch_size // 4`` samples; PER
+                  only fills shortages. Avoids cross-class PER bias toward high
+                  abs(reward) classes.
+                - 0.5: original 50/50 design; Phase 1 takes ``batch_size // 8`` per
+                  class and Phase 2 globally competes for the remaining 50%.
+                - 0.0: no stratification, pure global PER dominated by high priority classes.
         """
         self.max_size = max_size
         self.storage_mode = storage_mode.lower()
@@ -254,50 +258,47 @@ class CategorizedReplayBuffer:
         return priority
 
     def _selection_priorities(self, entries):
-        """向量化計算多筆 entry 的 PER「選擇權重」(α-powered + priority_min floor)。
+        """Vectorized PER selection weights for entries.
 
-        這是「選擇分數」的**單一數學定義** — 單筆版 ``_selection_priority`` 只是
-        薄包裝。要改公式只動這裡一處。
+        This is the single mathematical definition of selection score. The scalar
+        ``_selection_priority`` is only a thin wrapper.
 
-        ``P(select) ∝ _selection_priorities(entries)[i]`` — 抽樣時用這個算機率,
-        IS weight ``w_i = (N · P_i)^(-β)`` 也用同一個值,確保「抽樣分佈」與
-        「IS 修正」對得起來,不會出現抽到死條目卻 IS weight 爆炸的情況。
+        ``P(select) ∝ _selection_priorities(entries)[i]``. Sampling probabilities
+        and IS weights ``w_i = (N · P_i)^(-β)`` use this same value, keeping the
+        sampling distribution and IS correction aligned.
 
-        與 ``_effective_priority`` 的差別:
-        - 套 α 次方(``self.alpha``)讓分佈變平緩(標準 PER 公式)。
-        - 對 ``priority_min`` 取 ``np.maximum``。死條目(``age > max_age``)的 eff
-          是 0,沒這個 floor 它的 ``(N·P + ε)^(-β)`` 會炸到 ~10^4,跑 weights.max
-          normalize 後把其他活條目的 IS weight 壓到接近 0。
+        Differences from ``_effective_priority``:
+        - Apply α power (``self.alpha``) to soften the distribution.
+        - Floor by ``priority_min``. Dead entries have effective priority 0; without
+          a floor, their IS weights can explode and suppress live entries after
+          max-normalization.
         """
         eff = np.array([self._effective_priority(e) for e in entries], dtype=np.float64)
         return np.power(np.maximum(eff, self.priority_min), self.alpha)
 
     def _selection_priority(self, entry):
-        """單筆 entry 的 PER 選擇權重,薄包裝呼叫 ``_selection_priorities``。
-
-        數學定義全部在 ``_selection_priorities`` 裡(單一來源,避免兩處 drift)。
-        這個 scalar helper 給單點查詢 / 外部 audit 用,生產 hot path 都直接走
-        陣列版以享受 numpy 向量化。
+        """
+        Scalar PER selection weight wrapper around ``_selection_priorities``.
         """
         return float(self._selection_priorities([entry])[0])
 
     def top_k_balanced(self, k):
-        """Select up to ``k`` entries via stratified balanced + cross-class PER。
-        比例由 ``self.balanced_ratio`` 控制(跟 ``sample()`` 用同一個參數)。
+        """Select up to ``k`` entries via stratified balanced + cross-class PER.
 
-        Phase 1 — Balanced(占 ``k × balanced_ratio``):
-            每類保留 ``per_class_quota = balanced_share // len(REWARD_TYPES)`` 筆,
-            按 ``_effective_priority`` 排序由高到低取。某類 entry 數 < quota 時
-            slack 留給 Phase 2。
+        Ratio is controlled by ``self.balanced_ratio``, shared with ``sample()``.
 
-        Phase 2 — PER fallback / 剩餘名額(占 ``k × (1 - balanced_ratio)`` + Phase-1 slack):
-            Phase 1 未選到的 entries 跨類比 ``_effective_priority`` 全域排序,
-            取 top 補滿剩餘名額。高 priority「model 還沒學會」的 entry 在這裡跨類競爭。
+        Phase 1 — Balanced (``k × balanced_ratio``):
+            Keep ``per_class_quota = balanced_share // len(REWARD_TYPES)`` per class,
+            sorted by ``_effective_priority`` descending. Shortage slack goes to Phase 2.
 
-        典型設定:
-            - ``balanced_ratio = 1.0``:每類保 ``k/4``(8 類 → 12.5%),PER 只在某類
-              不足時補位。pruning 不會被高 abs(reward) 類別系統性壓擠其他類。
-            - ``balanced_ratio = 0.5``:原始設計,每類保 ``k/8``,剩 50% 給 PER 跨類競爭。
+        Phase 2 — PER fallback / remaining slots:
+            Globally rank unselected entries by ``_effective_priority`` and take top
+            entries to fill the rest.
+
+        Typical settings:
+            - ``balanced_ratio = 1.0``: keep ``k/4`` per class; PER only fills shortages.
+            - ``balanced_ratio = 0.5``: original design; keep ``k/8`` per class and
+              leave 50% for cross-class PER.
 
         Pure function: does NOT mutate ``self.index`` or touch disk files.
         Returns a list of entry-dict references (aliases into ``self.index``).
@@ -308,8 +309,8 @@ class CategorizedReplayBuffer:
         if k >= self.size_count:
             return list(self.index)
 
-        # balanced_share ≥ 0 必然成立,整數除法保持非負;quota=0 時 entries[:0] 自然
-        # 是空 list,Phase 1 等同跳過 → 不用額外 if/else。
+        # balanced_share is non-negative; integer division keeps quota non-negative.
+        # When quota=0, entries[:0] is empty, so Phase 1 skips without extra branching.
         balanced_share = int(k * self.balanced_ratio)
         per_class_quota = balanced_share // len(self.REWARD_TYPES)
 
@@ -475,17 +476,14 @@ class CategorizedReplayBuffer:
                 priority_pick = [available[int(idx)] for idx in np.atleast_1d(indices)]
             chosen.extend(priority_pick)
 
-        # Safety padding — uniform-random fallback when bucket 太小不夠抽。
+        # Safety padding: uniform-random fallback when the bucket is too small.
         while len(chosen) < count:
             chosen.append(random.choice(entries))
 
         result = chosen[:count]
-        # sample_count 無條件 +1:每次 entry 進 batch 都算一次(不分 uniform / PER /
-        # padding)。提供「資料被抽到次數」的觀測值。Method B(enable_sample_decay=True)
-        # 的 decay 公式 1/(1 + sample_decay × sample_count) 用同一個 counter,所以
-        # 啟用 Method B 時,decay 會對「任何被過度採樣的 entry」一律降溫(原始設計
-        # 只懲罰 PER 半邊,改成不分路徑 — 過度採樣本身就是要避免的訊號)。
-        # 同一筆 entry 在 batch 內出現多次(replace=True 時)會每出現一次 +1。
+        # Always increment sample_count once per entry appearance in a batch,
+        # across uniform / PER / padding. Method B decay uses the same counter,
+        # so any over-sampled entry cools down. Duplicate appearances each count.
         for entry in result:
             entry["sample_count"] = int(entry.get("sample_count", 0)) + 1
         return result
@@ -525,7 +523,7 @@ class CategorizedReplayBuffer:
             "reward_type": self._reward_type(bucket_reward, done),
             "priority": float(np.clip(abs(float(reward)) + 1.0, self.priority_min, self.priority_max)),
             "insert_order": self.insert_counter,
-            "sample_count": 0,  # 每次進 batch 都 +1(uniform/PER/padding 都算);Method B decay 也用這個
+            "sample_count": 0,  # incremented on every batch entry; Method B decay uses it
             "quantile_spread": 0.0,  # FQF quantile std — updated by update_priorities when sampled
         }
 
@@ -546,8 +544,9 @@ class CategorizedReplayBuffer:
                 regardless of the switch state — so flipping the switch later
                 doesn't reset spread history.
 
-        Note: ``sample_count`` 在 ``_sample_from_bucket`` 結尾無條件 +1,不在這裡動 —
-        本 function 只刷新 ``priority`` 和 ``quantile_spread``。
+        Note: ``sample_count`` increments at the end of ``_sample_from_bucket`` and
+        is not touched here. This function only refreshes ``priority`` and
+        ``quantile_spread``.
         """
         if sample_indices is None or td_errors is None:
             return
@@ -571,39 +570,36 @@ class CategorizedReplayBuffer:
                 entry["quantile_spread"] = float(spread)
 
     def sample(self, batch_size, beta=None, device="cpu", include_extra=False):
-        """Sample a batch via stratified balanced + PER fallback。比例由
-        ``self.balanced_ratio``(constructor 參數)控制。
+        """Sample a batch via stratified balanced + PER fallback.
 
-        Phase 1 — Balanced(占 ``batch_size × balanced_ratio`` 個名額):
-            每類各取 ``per_class_count = balanced_total // len(REWARD_TYPES)`` 筆。
-            類內仍走 ``_sample_from_bucket(use_uniform=True)``,所以類內仍有
-            uniform_mix + alpha-weighted PER(focus on hard sample),只是**不跨類**。
+        Ratio is controlled by constructor ``self.balanced_ratio``.
 
-        Phase 2 — PER fallback(占 ``batch_size × (1 - balanced_ratio)`` 個名額,
-        加上 Phase 1 某類不足時的剩餘 slack):
-            從所有未被 Phase 1 選到的 entries 用 pure-priority PER 全域抽。
-            這裡是 cross-class 競爭,容易被高 abs(reward) → 高 TD-error 的類別
-            (Minesweeper 的 win/lose)系統性主宰 → 想避免就把 balanced_ratio 拉高。
+        Phase 1 — Balanced (``batch_size × balanced_ratio`` slots):
+            Take ``per_class_count = balanced_total // len(REWARD_TYPES)`` per class.
+            Within each class, ``_sample_from_bucket(use_uniform=True)`` still uses
+            uniform_mix + alpha-weighted PER, but does not cross class boundaries.
 
-        典型設定:
-            - ``balanced_ratio = 1.0``(default):每類 ``batch_size // 4`` 筆,
-              PER 只在某類 entry 數不足時補位。最乾淨的 stratification。
-            - ``balanced_ratio = 0.5``:原始 50/50 設計,Phase 1 每類 ``batch_size // 8``,
-              Phase 2 用 PER 全域競爭 50% 名額。
-            - ``balanced_ratio = 0.0``:純 PER 全域抽,沒 stratification。
+        Phase 2 — PER fallback:
+            Remaining slots plus Phase-1 slack are filled by global pure-priority
+            PER from unselected entries. Raise balanced_ratio to reduce dominance
+            by high abs(reward) / high TD-error classes.
 
-        IS weight 由 caller 自行決定要不要乘進 loss;v3 / stage1 兩邊的 train_step
-        都採 ``loss = (is_weights * per_sample_loss).mean()``,所以 ``beta`` 的
-        annealing 是 caller 的責任(buffer 端只在沒帶 ``beta`` 參數時 fallback 到
-        ``self.beta`` = ctor 的 ``beta_start``,不會自動 anneal)。
+        Typical settings:
+            - ``balanced_ratio = 1.0``: cleanest stratification; PER only fills shortages.
+            - ``balanced_ratio = 0.5``: original 50/50 design.
+            - ``balanced_ratio = 0.0``: pure global PER, no stratification.
+
+        Callers decide whether to multiply IS weights into loss. v3 and stage1 use
+        ``loss = (is_weights * per_sample_loss).mean()``. Beta annealing is caller
+        responsibility; buffer only falls back to ctor ``beta_start`` when beta is omitted.
         """
         if self.size_count <= 0:
             raise RuntimeError("CategorizedReplayBuffer is empty")
 
         use_beta = beta if beta is not None else self.beta
 
-        # === Phase 1: Balanced(占 self.balanced_ratio × batch_size) ===
-        # per_class_count=0 時 take=0,Phase 1 自然空跑(無需 if/else)。
+        # === Phase 1: Balanced (self.balanced_ratio x batch_size) ===
+        # When per_class_count=0, take=0 and Phase 1 naturally no-ops.
         balanced_total = int(batch_size * self.balanced_ratio)
         per_class_count = balanced_total // len(self.REWARD_TYPES)
 
@@ -633,8 +629,8 @@ class CategorizedReplayBuffer:
                     selected_indices.append(id_to_idx[sid])
                     selected_storage_ids.add(sid)
 
-        # === Phase 2: PER fallback — 只在 Phase 1 沒填滿時觸發(某類 entry 數 < per_class_count) ===
-        # 用剩餘 entries 跨類 pure-priority 補滿 batch。steady state 下通常是空跑。
+        # === Phase 2: PER fallback, only when Phase 1 did not fill the batch ===
+        # Fill from remaining entries with cross-class pure priority. Usually no-op at steady state.
         per_remaining = batch_size - len(selected_indices)
         if per_remaining > 0:
             leftover_indices = [
@@ -656,10 +652,9 @@ class CategorizedReplayBuffer:
 
         selected_indices = selected_indices[:batch_size]
 
-        # 一次取出所有選中的 entry,接著向量化算 selection priorities(給下面 IS 用)。
-        # 其他 per-entry 欄位(state/action/reward/...) 還是必須 loop 拆出來。
-        # 注意:sample_count 不在這裡 bump,已經在 `_sample_from_bucket` 結尾統一 bump
-        # 過了(uniform / PER / padding 三條路徑都在那裡覆蓋到)。
+        # Pull selected entries once, then vectorize selection priorities for IS.
+        # Other per-entry fields still need loop unpacking. sample_count is already
+        # bumped at the end of `_sample_from_bucket` for uniform / PER / padding.
         selected_entries = [self.index[idx] for idx in selected_indices]
         priorities_arr = self._selection_priorities(selected_entries)
 
@@ -682,16 +677,14 @@ class CategorizedReplayBuffer:
             discounts.append(float(entry.get("discount", 1.0)))
             n_steps.append(int(entry.get("n_steps", 1)))
 
-        # Important Sampling — priorities_arr 在 selected_entries 上面已經用
-        # _selection_priorities 一次算完,跟 _sample_from_bucket 的選擇分佈對齊
-        # (都套 α 次方 + priority_min floor)。
+        # Importance Sampling: priorities_arr was computed once for selected_entries
+        # with _selection_priorities, matching _sample_from_bucket distribution
+        # (alpha power + priority_min floor).
         #
-        # 簡化:標準 PER 公式 prob_sum = Σ_k p_k^α over 整個 buffer(O(N_buffer)),
-        # 但下面 `weights = weights / weights.max()` 會把這個 batch 共用的常數
-        # `(N / prob_sum)^(-β)` 整個吸收掉,逐元素歸一後結果只依賴 batch 內
-        # priorities_arr 的比例。所以這裡只 sum batch 即可(O(batch_size))。
-        # ⚠️ 此簡化依賴下方的 max-normalize;若把歸一化方式換成 mean、或乾脆
-        # 拿掉,必須改回 `self._selection_priorities(self.index).sum()`。
+        # Simplification: standard PER sums p_k^alpha over the whole buffer, but
+        # max-normalization below absorbs the batch-shared constant. After element
+        # normalization, only ratios inside priorities_arr matter, so summing the
+        # batch is enough. If normalization changes, restore full-buffer sum.
         N = self.size_count
         prob_sum = priorities_arr.sum()
         probabilities = priorities_arr / (prob_sum + 1e-10)
@@ -746,18 +739,16 @@ class CategorizedReplayBuffer:
         return counts
 
     def mean_sample_count(self) -> float:
-        """整個 buffer 中,每筆 entry 平均被 sample 到幾次。
+        """Average sample_count per entry across the whole buffer.
 
-        定義:``sum(sample_count) / size_count``。``sample_count`` 在
-        ``_sample_from_bucket`` 結尾無條件 +1,涵蓋 uniform / PER / safety padding
-        三條路徑。Method B(``enable_sample_decay=True``)的 decay 公式也用同一個
-        counter。
+        Defined as ``sum(sample_count) / size_count``. ``sample_count`` increments
+        at the end of ``_sample_from_bucket`` for uniform / PER / safety padding.
+        Method B decay uses the same counter.
 
-        判讀:
-        - 數值單調隨訓練步數成長(只增不減,除非該筆 entry 被 prune)。
-        - 高 mean = 平均每筆被反覆抽到,代表 PER 集中度高
-        - 低 mean = 抽樣分佈分散,buffer 內樣本被均勻利用
-        - 對齊看:同 env_step 下,mean_sample_count 越低代表 batch 多樣性越好
+        Read:
+        - Monotonically grows with training steps unless entries are pruned.
+        - High mean means repeated picks and concentrated PER.
+        - Low mean means broader sampling and better buffer diversity.
         """
         if not self.index:
             return 0.0
@@ -765,12 +756,11 @@ class CategorizedReplayBuffer:
 
     @property
     def class_quota(self) -> int:
-        """Per-class soft-floor quota used by ``top_k_balanced``、``sample()`` 及
-        ``is_class_quota_filled`` training gate。
+        """Per-class soft-floor quota for top_k_balanced, sample, and gate checks.
 
-        定義:``(max_size × balanced_ratio) // len(REWARD_TYPES)``,至少 1。
-        - ``balanced_ratio = 1.0``:``max_size / 4``(每類 25%)
-        - ``balanced_ratio = 0.5``:``max_size / 8``(每類 12.5%,原始設計)
+        Defined as ``(max_size × balanced_ratio) // len(REWARD_TYPES)``, at least 1.
+        - ``balanced_ratio = 1.0``: ``max_size / 4`` (25% per class)
+        - ``balanced_ratio = 0.5``: ``max_size / 8`` (12.5% per class, original design)
         """
         balanced_share = int(self.max_size * self.balanced_ratio)
         return max(1, balanced_share // len(self.REWARD_TYPES))
@@ -799,7 +789,7 @@ class CategorizedReplayBuffer:
         return self.index
 
     def load_from_entries(self, entries):
-        """Load from a persistent index map structure in RAM。
+        """Load from a persistent index map structure in RAM.
 
         Backward compatibility:
             - Legacy entries without ``sample_count`` get default 0 (so they start fresh

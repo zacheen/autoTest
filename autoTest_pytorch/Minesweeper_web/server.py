@@ -22,13 +22,13 @@ app = Flask(__name__, static_folder=str(CURRENT_DIR / "static"), static_url_path
 session_lock = Lock()
 
 
-# 對外(前端、API)的顯示標籤 ↔ 內部 DIFFICULTIES key。
-# 只有 RL training preset 兩邊不同(對外 "Training 6x6"、對內 "training");
-# 其餘 Beginner / Intermediate / Expert 兩邊一致。要加新 alias 只動 _INTERNAL_TO_EXTERNAL。
+# External frontend/API labels mapped to internal DIFFICULTIES keys.
+# Only the RL training preset differs ("Training 6x6" outside, "training" inside).
+# Beginner / Intermediate / Expert are identical. Add aliases only here.
 _INTERNAL_TO_EXTERNAL: Dict[str, str] = {
     "training": "Training 6x6",
 }
-# 從 shared DIFFICULTIES 推 external 名單,沒列在上面 alias 表的維持 identity。
+# Build external names from shared DIFFICULTIES; aliases not listed stay identical.
 _EXTERNAL_TO_INTERNAL: Dict[str, str] = {
     _INTERNAL_TO_EXTERNAL.get(internal_key, internal_key): internal_key
     for internal_key in DIFFICULTIES
@@ -37,12 +37,12 @@ _DEFAULT_EXTERNAL_DIFFICULTY = _INTERNAL_TO_EXTERNAL.get("training", "training")
 
 
 def _to_internal(display_name: str) -> Optional[str]:
-    """API 收到的顯示名稱 → shared DIFFICULTIES 的 key。未知/內部 key 都回 None。"""
+    """Map API display name to shared DIFFICULTIES key; unknown/internal names return None."""
     return _EXTERNAL_TO_INTERNAL.get(display_name)
 
 
 def _to_external(internal_name: str) -> str:
-    """內部 key → API 顯示名稱。"""
+    """Map internal key to API display name."""
     return _INTERNAL_TO_EXTERNAL.get(internal_name, internal_name)
 
 
@@ -61,11 +61,11 @@ games: Dict[str, GameSession] = {}
 
 
 def _build_game(internal_difficulty: str) -> GameSession:
-    """internal_difficulty 必須是 DIFFICULTIES 裡的 key(已透過 _to_internal 換好)。"""
+    """internal_difficulty must already be a DIFFICULTIES key from _to_internal."""
     params = get_board_config(internal_difficulty)
     return GameSession(
         game_id=str(uuid.uuid4()),
-        difficulty=internal_difficulty,  # 內部 key,輸出時 _serialize_game 會轉成 display
+        difficulty=internal_difficulty,  # Internal key; _serialize_game converts to display.
         logic=MinesweeperLogic(params.rows, params.cols, params.mines),
         created_at=time.time(),
     )
@@ -159,7 +159,7 @@ def index():
 
 @app.get("/api/difficulties")
 def get_difficulties():
-    # 對外 key 用 display label,value 用舊版 dict shape 讓前端不必改。
+    # Use display labels as external keys; keep the old value shape for the frontend.
     payload = {
         _to_external(internal_key): asdict(config)
         for internal_key, config in DIFFICULTIES.items()

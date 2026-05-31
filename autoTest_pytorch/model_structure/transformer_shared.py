@@ -29,12 +29,12 @@ class TwoDimensionalPositionEmbedding(nn.Module):
 
 
 class FixedSinusoidalPositionEmbedding(nn.Module):
-    """Fixed 2D sinusoidal positional encoding，無可學習參數。
+    """Fixed 2D sinusoidal positional encoding with no trainable parameters.
 
-    輸出 shape：(H*W, d_model)，可直接加到 token sequence 上。
-    結果依 (height, width, device, dtype) 自動 cache，不重複計算。
+    Output shape is (H*W, d_model), ready to add to a token sequence.
+    Results are cached by (height, width, device, dtype).
 
-    d_model 必須能被 4 整除（拆成 4 等份：sin/cos × row/col）。
+    d_model must be divisible by 4: sin/cos times row/col.
     """
 
     def __init__(self, d_model: int):
@@ -48,12 +48,13 @@ class FixedSinusoidalPositionEmbedding(nn.Module):
         self.register_buffer("_device_tracker", torch.zeros(1), persistent=False)
 
     def forward(self, height: int, width: int) -> torch.Tensor:
-        """回傳 (H*W, d_model) 的 positional encoding tensor。
+        """Return a (H*W, d_model) positional encoding tensor.
 
-        第一次呼叫時計算並 cache；後續相同 (height, width, device, dtype) 直接回傳。
-        Device / dtype 與 module 的第一個 buffer 對齊；若無 buffer 則用 CPU float32。
+        First call computes and caches it; later calls with the same
+        (height, width, device, dtype) return the cached tensor.
+        Device / dtype follows the module's first buffer, or CPU float32 if none.
         """
-        # 找出目前 module 所在的 device/dtype（透過 dummy buffer 或預設值）
+        # Find the module's current device/dtype via a dummy buffer or defaults.
         try:
             ref = next(self.buffers())
             device, dtype = ref.device, ref.dtype

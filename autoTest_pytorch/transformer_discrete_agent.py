@@ -29,14 +29,13 @@ from model_structure.training_logger import TrainingLogger
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ── reproducibility ──────────────────────────────────────────────────
-# 模組 import 時生一個 32-bit seed,並 apply 到 random / numpy / torch / cuda。
-# 實際使用的 SEED 會被 hyperparameter_dump 自動寫進 hyperparameters.txt
-# (因為是 module-level ALL_CAPS int,符合 _dump_module 的篩選條件),
-# agent.__init__ 也會印到 console,方便事後對照。
-# 想重現特定 run:把下面這行改成 `SEED: int = seed_everything(<數字>)`,
-# 並從零開始訓練 — _save_model 會把 RNG state 存進 optimizer_state.pth,
-# resume 後 RNG trajectory 從 checkpoint 還原,SEED 只決定首次啟動的初始狀態。
+# reproducibility
+# Create a 32-bit seed at import time and apply it to random / numpy / torch / cuda.
+# The actual SEED is written to hyperparameters.txt by hyperparameter_dump because
+# it is a module-level ALL_CAPS int. agent.__init__ also prints it for comparison.
+# To reproduce a run, set `SEED: int = seed_everything(<number>)` and train from
+# zero. _save_model stores RNG state in optimizer_state.pth, so resume restores
+# RNG trajectory; SEED only controls first startup.
 SEED: int = seed_everything()
 
 BATCH_SIZE = 128
@@ -49,8 +48,8 @@ MINIMUM_DATA_SIZE = min(BUFFER_CAPACITY, SAVE_CAPACITY*4)-1  # below this amount
 PER_ALPHA = 0.6
 PER_BETA_START = 0.4
 PER_BETA_END = 1.0
-# Phase 1 (stratified balanced) 占 batch 的比例。1.0 = 全部 batch 走 per-class
-# stratified,PER 只在某類不足時補位。0.5 = 原始 50/50。0.0 = 純 PER 全域抽。
+# Phase 1 stratified-balanced ratio inside each batch. 1.0 = all per-class
+# stratified, with PER only filling shortages. 0.5 = original 50/50. 0.0 = pure global PER.
 PER_BALANCED_RATIO = 1.0
 TARGET_UPDATE_FREQ = 50
 N_STEP = 1
@@ -63,12 +62,12 @@ HISTOGRAM_EVERY = 200          # per-layer weight/grad norms
 WEIGHT_DISTANCE_LOG_EVERY = 100  # full-model weight snapshot distance
 DIAGNOSTIC_LOG_EVERY = 10      # io_log / TB scalars / no_grad diagnostic block
 
-# ── learning rate warmup ─────────────────────────────────────────────
-# Linear LR warmup over the first N optimizer steps (transformer 早期穩定)
-# 從 base_lr * LR_WARMUP_START_FACTOR 線性增加到 base_lr
-LR_WARMUP_STEPS         = 2000   # 第一次從頭訓練的 warmup 長度
+# learning rate warmup
+# Linear LR warmup over the first N optimizer steps for early transformer stability.
+# Increase from base_lr * LR_WARMUP_START_FACTOR to base_lr.
+LR_WARMUP_STEPS         = 2000  # Initial from-scratch warmup length.
 LR_WARMUP_START_FACTOR  = 0.0
-LR_RESUME_WARMUP_STEPS  = 2000   # 每次重啟（包含第一次）的額外 warmup 長度
+LR_RESUME_WARMUP_STEPS  = 2000  # Extra warmup on every restart, including first run.
 
 TRANSFORMER_MODEL_PATH = Path("./models/stage1_transformer")
 TRANSFORMER_D_MODEL = 64
@@ -101,13 +100,12 @@ USE_FLASH_SDP, USE_MEM_EFFICIENT_SDP, USE_MATH_SDP = set_sdp_all(
     device=device, log_prefix="[Stage1]",
 )
 
-# ── NaN/Inf 偵測 ─────────────────────────────────────────────────────
-# Stage1 用 self._assert_finite(stage, name, tensor)(method,見類別內定義),
-# 各 stage 邊界呼叫一次抓 NaN/Inf。__main__ 跑 train_step 時 stage 0~7
-# 形成完整的 trace,出包能直接定位是哪一層先壞。
+# NaN/Inf checks
+# Stage 1 calls self._assert_finite(stage, name, tensor) at stage boundaries.
+# Stages 0-7 form a trace so failures point to the first bad layer.
 #
-# 之前那一套 cuda_debug.log + cuda.synchronize 全部移除 — CUDA error 屬於硬體問題,
-# 換 GPU(GCP / 新機)後不會再出現;NaN 才是 code 能修的問題,所以留 _assert_finite。
+# The old forced-sync debug path was removed; CUDA errors were treated as
+# hardware or environment issues. Keep _assert_finite for code-level NaN checks.
 
 
 class TransformerActorNetwork(nn.Module):
@@ -224,9 +222,9 @@ class TransformerDiscreteAgent:
         self.grid_h = grid_h
         self.grid_w = grid_w
         self.num_actions = grid_h * grid_w
-        # csv_fields 預設值對到 train_stage1_simple.py 主迴圈會寫入的欄位。Train
-        # script 想加 / 改欄位就 caller 傳進來。Agent 自己只負責建 TrainingLogger,
-        # 不對 schema 細節下決策(field 是「給 AI 看什麼資料」的訓練設定)。
+        # Default csv_fields match train_stage1_simple.py main-loop columns.
+        # Training scripts can pass custom fields. Agent only builds TrainingLogger
+        # and does not decide schema details.
         self._csv_fields = list(csv_fields) if csv_fields else list(_DEFAULT_CSV_FIELDS)
 
         self.backbone = TransformerActorNetwork(grid_h=grid_h, grid_w=grid_w).to(device)
@@ -248,7 +246,7 @@ class TransformerDiscreteAgent:
         from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 
         self.optimizer = build_fqf_optimizer(self.backbone, self.q_network)
-        # 紀錄每個 param group 的 base lr，warmup 期間根據 total_it / steps_since_resume 動態縮放
+        # Record each param group's base LR; warmup scales by total_it / steps_since_resume.
         self._base_lrs = [group["lr"] for group in self.optimizer.param_groups]
 
         self.replay_buffer = CategorizedReplayBuffer(
@@ -266,24 +264,22 @@ class TransformerDiscreteAgent:
             spread_decay=2.0,
         )
         self.total_it = 0
-        self.steps_since_resume = 0  # 每次啟動重置；用於 resume LR warmup（不存檔）
-        # episode_count 改成 @property delegate 到 training_history.total_episodes,
-        # 單一 source of truth — 不再維護獨立 counter。
+        self.steps_since_resume = 0  # reset each startup; used for resume LR warmup, not saved
+        # episode_count delegates to training_history.total_episodes as single source of truth.
         self.n_step = N_STEP
         self.n_step_gamma = MINESWEEPER_REWARD_CONFIG.gamma
         self.n_step_buffer = deque()
-        # raw reward rolling mean 搬到 TrainingHistory._step_rewards;store_transition
-        # 內 call self.training_history.record_step_reward(reward),train_step 結尾
-        # 用 self.training_history.avg_step_reward() 拿 mean。跟 v2 / v3 共用同一個
-        # method,避免兩邊各自貼一份相同的 sum()/len() 公式。
+        # raw reward rolling mean moved to TrainingHistory._step_rewards.
+        # store_transition records reward; train_step reads avg_step_reward().
+        # Shared with v2 / v3 to avoid duplicate sum()/len() formulas.
 
-        # ── adaptive epsilon ──
-        # 跟 v3 共用同一個 controller class,並用相同 wr / eps 範圍。Stage1 與
-        # stage2 對 minesweeper 6x6 的 reward signal 相同,所以套用一致的設定。
-        # Episode 結果累積/查詢交給 TrainingHistory,controller 只吃 win_rate。
+        # adaptive epsilon
+        # Shared controller class and wr/eps ranges with V3. Stage1 and Stage2 use
+        # the same 6x6 Minesweeper reward signal, so they use consistent settings.
+        # Episode results live in TrainingHistory; controller only consumes win_rate.
         self.epsilon_controller = AdaptiveEpsilonController()
         self.training_history = TrainingHistory()
-        self.deque_cls = deque  # 給 training_history.load_state_dict() 用
+        self.deque_cls = deque  # used by training_history.load_state_dict()
 
         # Lazy-captured at first train_step: if the loaded TrainingHistory shows last
         # win_rate(window=100) > 0.5, we additionally gate training on the replay buffer
@@ -293,22 +289,21 @@ class TransformerDiscreteAgent:
         # crosses 50% mid-training.
         self._class_quota_gate_enabled: bool | None = None
 
-        # episode-scoped blocked actions (v3 風格)：點過的格子在本 episode 內 mask 掉
+        # Episode-scoped blocked actions: clicked cells are masked within this episode.
         self.blocked_actions: set[int] = set()
 
         TRANSFORMER_MODEL_PATH.mkdir(parents=True, exist_ok=True)
 
-        # Session / hour archive 目錄 ── 每次啟動一個 training_<ts>,每滿 1 hour 一個 hour_NN_<ts>。
-        # canonical *.pth 仍寫在 TRANSFORMER_MODEL_PATH 頂層(try_load_model 直接讀),
-        # 同時把同一份快照寫到 current_archive_dir,把當下時段的 logs 也都導到那邊去。
-        # 目錄管理本身搬到 model_structure.archive_manager.SessionArchiveManager;
-        # 這裡只是組裝。
+        # Session / hour archive directories. Each startup creates training_<ts>;
+        # each hour rolls to hour_NN_<ts>. Canonical *.pth files still live at
+        # TRANSFORMER_MODEL_PATH root for try_load_model, while snapshots and logs
+        # also go to current_archive_dir. SessionArchiveManager handles the details.
         self.archive = SessionArchiveManager(
             model_path=TRANSFORMER_MODEL_PATH,
             log_prefix="[FQF]",
         )
-        # SEED 是 module-level constant(由 seed_everything 產生);印出來方便事後
-        # 對照 hyperparameters.txt 與 console 訊息。
+        # SEED is a module-level constant from seed_everything; print it for later
+        # comparison with hyperparameters.txt and console logs.
         print(f"[FQF] SEED = {SEED}")
 
         try:
@@ -324,34 +319,31 @@ class TransformerDiscreteAgent:
                     "optimizer (AdamW)": self.optimizer,
                 },
                 models={
-                    # backbone:freeze status + torchinfo layer summary。
-                    # input_size 用 grid state tensor 的真實 shape。
+                    # backbone: freeze status + torchinfo layer summary.
+                    # input_size uses the real grid state tensor shape.
                     "model.backbone": (
                         self.backbone,
                         (1, GRID_STATE_CHANNELS, self.grid_h, self.grid_w),
                     ),
-                    # q_network 不傳 input_size — 它吃的是 backbone 的 cell features
-                    # (B, num_tokens, d_model)且 forward 回 dict,torchinfo 上面
-                    # 處理意義不大。只看 freeze status / param count。
+                    # Do not pass input_size for q_network. It consumes backbone
+                    # cell features and returns dicts, so torchinfo adds little.
                     "model.q_network": (self.q_network, None),
                 },
             )
         except Exception as exc:
             print(f"[FQF] hyperparameters dump failed: {exc}")
 
-        # io_log:plain-text append + 每小時 swap 到新 hour 資料夾。Banner 由
-        # _build_io_log_banner 產生(寫 session/hour 起始時間 + 檔案路徑)。
+        # io_log: plain-text append file swapped to each new hour directory.
+        # Banner comes from _build_io_log_banner.
         self._io_log = RolloverTextLog(banner_factory=self._build_io_log_banner)
         self._io_log.swap_to(self.archive.current_archive_dir / "train_io_log.txt")
 
-        # 註冊 hour rollover callback:io_log 跟著翻檔。本身的 console print 由
-        # SessionArchiveManager 在翻頁時印。
+        # Register hour rollover callback: swap io_log. SessionArchiveManager
+        # prints rollover console messages.
         self.archive.register_on_rollover(self._on_archive_rollover)
 
-        # TensorBoard log_dir keyed by session timestamp。SummaryWriter 變成
-        # TrainingLogger 的內部 detail,agent 不再對外暴露 self.tb_writer ──
-        # 所有 TB 寫入(包含 per-step diagnostics)都從 self.training_logger.log
-        # /log_text / flush 走。
+        # TensorBoard log_dir is keyed by session timestamp. SummaryWriter is now
+        # internal to TrainingLogger; all TB writes go through training_logger.
         tb_root = TRANSFORMER_MODEL_PATH / "tensorboard"
         tb_root.mkdir(parents=True, exist_ok=True)
         tb_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -359,8 +351,8 @@ class TransformerDiscreteAgent:
         print(f"[FQF] TensorBoard: tensorboard --logdir {tb_root}")
         print(f"[FQF] Current run: {self.tensorboard_log_dir}")
 
-        # TrainingLogger — episode summary 兩邊一起寫 + 接管所有 train_step
-        # per-step TB scalar。CSV 寫到當下 hour 資料夾,翻頁時跟著 swap。
+        # TrainingLogger writes episode summaries to CSV + TB and owns train_step
+        # per-step TB scalars. CSV writes to current hour dir and swaps on rollover.
         csv_path = self.archive.current_archive_dir / "training_log.csv"
         self.training_logger = TrainingLogger(
             csv_path=csv_path,
@@ -391,8 +383,8 @@ class TransformerDiscreteAgent:
         atexit.register(self.save_persistent)
         atexit.register(self._save_model)
 
-    # epsilon 統一由 controller 管理；保留 self.epsilon 介面以相容
-    # select_action、TB log、save/load 等舊呼叫點。
+    # Epsilon is owned by the controller; keep self.epsilon for legacy callers
+    # such as select_action, TB logging, and save/load paths.
     @property
     def epsilon(self) -> float:
         return self.epsilon_controller.epsilon
@@ -401,9 +393,9 @@ class TransformerDiscreteAgent:
     def epsilon(self, value: float) -> None:
         self.epsilon_controller.epsilon = float(value)
 
-    # episode_count delegate 到 training_history.total_episodes — 後者在
-    # log_episode_metrics() 內 history.record() 時自動 += 1,on_episode_end
-    # 不再需要獨立 increment。Read-only,setter 會 raise(資料源應該是 history)。
+    # episode_count delegates to training_history.total_episodes. history.record()
+    # increments it inside log_episode_metrics(), so on_episode_end no longer
+    # increments it separately. Read-only; history is the source of truth.
     @property
     def episode_count(self) -> int:
         return self.training_history.total_episodes
@@ -444,8 +436,8 @@ class TransformerDiscreteAgent:
         return (action_id // self.grid_w, action_id % self.grid_w)
 
     def store_transition(self, state, action, next_state, reward, done):
-        # 餵 train/real_reward_mean — raw reward(reward_squash 之前)的 rolling mean
-        # 走 TrainingHistory._step_rewards,跟 v2 / v3 共用同一個 record_step_reward。
+        # Feed train/real_reward_mean with the raw reward rolling mean before
+        # reward_squash. Uses the same record_step_reward path as v2 / v3.
         self.training_history.record_step_reward(float(reward))
         transition = {
             "state": state.detach().cpu(),
@@ -530,8 +522,8 @@ class TransformerDiscreteAgent:
         self.total_it += 1
         self.steps_since_resume += 1
         self._apply_lr_warmup()
-        # Wall-clock 滿 1 小時翻頁;io_log / vclamp / save 都會自動跟著新的 archive dir
-        # (註冊在 SessionArchiveManager 的 on_rollover callback 處理)
+        # Roll over each wall-clock hour; io_log / vclamp / save follow the new
+        # archive dir through SessionArchiveManager on_rollover callbacks.
         self.archive.maybe_rollover()
 
         state, action, next_state, reward, done, per_indices, is_weights, discounts, n_steps = self.replay_buffer.sample(
@@ -541,7 +533,8 @@ class TransformerDiscreteAgent:
             include_extra=True,
         )
 
-        # Stage 0: buffer sample — 命中代表 replay buffer 內容已壞(load 或 store 路徑)
+            # Stage 0: buffer sample. A hit means replay data is corrupt
+            # in the load or store path.
         self._assert_finite("stage0_sample", "state", state)
         self._assert_finite("stage0_sample", "next_state", next_state)
         self._assert_finite("stage0_sample", "reward", reward)
@@ -561,8 +554,9 @@ class TransformerDiscreteAgent:
         with torch.no_grad():
             next_proc = preprocessor(next_state) if preprocessor is not None else next_state
             next_features = self.backbone.get_features(next_proc)
-            # Stage 1a: backbone forward on next_state — 命中代表 backbone weights 或
-            #           next_state 已壞;這條也是訓練中最早能偵測到 backbone 損毀的點
+                # Stage 1a: backbone forward on next_state. A hit means either
+                # backbone weights or next_state are corrupt. This is the
+                # earliest training-time check that can catch backbone damage.
             self._assert_finite("stage1a_target_backbone", "next_features", next_features)
 
             next_online = self.q_network(next_features)
@@ -573,20 +567,20 @@ class TransformerDiscreteAgent:
             best_cols = best_flat % self.grid_w
 
             next_target = self.q_target(next_features)
-            # Stage 1b: q_target forward — 命中代表 q_target weights 已壞
+                # Stage 1b: q_target forward. A hit means q_target weights are corrupt.
             self._assert_finite("stage1b_q_target", "next_target.quantiles", next_target["quantiles"])
 
             next_target_quantiles = next_target["quantiles"][
                 torch.arange(batch_size, device=device), best_flat
             ]
             target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
-            # Stage 1c: target_quantiles 算完 — 命中代表 reward / discounts / done 異常
-            #           (如果 next_target_quantiles 在 stage1b 是 finite 的話)
+                # Stage 1c: target_quantiles finished. A hit means reward /
+                # discounts / done are invalid if next_target_quantiles was finite.
             self._assert_finite("stage1c_target_combine", "target_quantiles", target_quantiles)
 
         features = self.backbone.get_features(state)
-        # Stage 2: current backbone forward — 命中代表 backbone weights 或 state 已壞
-        #          (跟 stage1a 互相對照,可以判斷壞的是 backbone 還是 state)
+            # Stage 2: current backbone forward. Compare with stage1a to tell
+            # whether the backbone or the state tensor is corrupt.
         self._assert_finite("stage2_current_backbone", "features", features)
 
         q_output = self.q_network(features)
@@ -594,11 +588,11 @@ class TransformerDiscreteAgent:
         q_quantiles = q_output["quantiles"]
         tau_hats = q_output["tau_hats"]
         fraction_probs = q_output["fraction_probs"]
-        # Stage 3: q_network forward (FQF head 四個輸出分別檢)
-        #   - fraction_probs 壞 → fraction_proposal / softmax 入口問題
-        #   - tau_hats 壞     → cumsum / mean(基本上 follow fraction_probs)
-        #   - quantiles 壞    → cosine_embedding 或 value_head 問題
-        #   - q_values 壞     → 上面任一條
+            # Stage 3: q_network forward, checking each FQF head output:
+            #   - bad fraction_probs -> fraction_proposal / softmax input issue
+            #   - bad tau_hats       -> cumsum / mean, usually follows fraction_probs
+            #   - bad quantiles      -> cosine_embedding or value_head issue
+            #   - bad q_values       -> any of the above
         self._assert_finite("stage3_q_network", "fraction_probs", fraction_probs)
         self._assert_finite("stage3_q_network", "tau_hats", tau_hats)
         self._assert_finite("stage3_q_network", "quantiles", q_quantiles)
@@ -625,13 +619,15 @@ class TransformerDiscreteAgent:
             tau_hats=tau_hats.detach(),
             return_stats=True,
         )
-        # Stage 4a: quantile huber loss — 命中通常代表 chosen_quantiles 或 target_quantiles
-        #            其中一個極端(如 td² overflow),內部 torch.where 雖能選 finite 分支,
-        #            但 backward 經 0×inf 仍會在 stage5 噴 NaN 到 grad
+            # Stage 4a: quantile huber loss. A hit usually means chosen_quantiles
+            # or target_quantiles is extreme, such as td^2 overflow. torch.where
+            # may choose a finite branch, but backward can still produce NaN grads
+            # through 0 * inf, which stage5 catches.
         self._assert_finite("stage4a_quantile_loss", "per_sample_quantile_loss", per_sample_quantile_loss)
 
         entropy = -(fraction_probs * torch.log(fraction_probs + 1e-8)).sum(dim=1, keepdim=True)
-        # Stage 4b: entropy — 命中代表 fraction_probs 含 NaN(stage3 應該先抓到)
+            # Stage 4b: entropy. A hit means fraction_probs has NaN, which stage3
+            # should normally catch first.
         self._assert_finite("stage4b_entropy", "entropy", entropy)
 
         per_sample_loss = per_sample_quantile_loss - FQF_ENTROPY_COEF * entropy
@@ -639,12 +635,11 @@ class TransformerDiscreteAgent:
 
         # FQF distribution-health diagnostics (cheap, computed inside no_grad).
         with torch.no_grad():
-            # 留作 tensor,實際 .item() 在後面 diagnostic 階段跟其他 stats 一起 batch。
+                # Keep these as tensors; diagnostic batching calls .item() later.
             fpn_norm_entropy_t = entropy.mean() / math.log(NUM_FQF_FRACTIONS)
             fpn_tau_std_t = tau_hats.std(dim=1).mean()
 
-        # Stage 4c: 最終 loss — per-step NaN check(Q1=b:每個 train_step 都查 loss
-        # 是否 NaN,出現就立刻 raise,不等到下一次 save)。
+            # Stage 4c: final loss. Keep the old NaN check with stage-tagged output.
         if not torch.isfinite(loss):
             raise RuntimeError(
                 f"[NaN-probe] non-finite at stage='stage4c_final_loss' tensor='loss' "
@@ -658,8 +653,8 @@ class TransformerDiscreteAgent:
         all_params = list(self.backbone.parameters()) + list(self.q_network.parameters())
         if extra_params_to_clip is not None:
             all_params += list(extra_params_to_clip)
-        # Stage 5: backward 之後 — 命中代表 backward 路徑產生 NaN/Inf 梯度
-        #          常見原因:torch.where(td²) 在 td 過大時 backward 經 0×inf
+            # Stage 5: after backward. A hit means backward produced NaN/Inf grads.
+            # Common cause: torch.where(td^2) with huge td backprops through 0 * inf.
         for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
             if param.grad is not None and not torch.isfinite(param.grad).all():
                 nan_n = int(torch.isnan(param.grad).sum().item())
@@ -685,7 +680,10 @@ class TransformerDiscreteAgent:
                     continue
                 extras_pre_sq += float(param.grad.detach().float().pow(2).sum().item())
         extras_pre = extras_pre_sq ** 0.5
-        # Capture per-layer norm snapshots BEFORE clip(in-place 縮過就看不出爆點)。
+            # Capture per-layer norm snapshots BEFORE clip — but DON'T write
+            # to TB yet; writes belong in the post-try success path so a CUDA
+            # crash on clip / step doesn't leave orphan per-layer rows in TB
+            # without the matching global rows.
         backbone_norm_snapshots = None
         if self.total_it % HISTOGRAM_EVERY == 0:
             backbone_norm_snapshots = self._collect_backbone_weight_norm_snapshots()
@@ -698,8 +696,8 @@ class TransformerDiscreteAgent:
         grad_clip_excess_norm = max(0.0, grad_norm_total_value - grad_clip_threshold)
         grad_clip_excess_ratio = grad_clip_excess_norm / (grad_clip_threshold + 1e-12)
 
-        # Stage 6: clip 之後再掃一次 grad — 抓 clip 內部 0×inf
-        #          (理論上 stage5 已先攔 inf,但 clip 自己 in-place 寫的也要驗一次)
+            # Stage 6: scan grads again after clipping to catch 0 * inf inside clip.
+            # Stage5 should catch inf first, but clip also writes in-place.
         for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
             if param.grad is not None and not torch.isfinite(param.grad).all():
                 nan_n = int(torch.isnan(param.grad).sum().item())
@@ -721,17 +719,22 @@ class TransformerDiscreteAgent:
         extras_post = extras_post_sq ** 0.5
         grad_post_total = (backbone_post ** 2 + head_post ** 2 + extras_post_sq) ** 0.5
 
-        # Pre-step v-clamp:HW bit flip 把 v 翻成負 → sqrt(neg)=NaN → 下一步 weight=NaN。
-        # 在 optimizer.step() 之前 clamp,讓 Adam 永遠看到 v >= 0 的 invariant。
-        # 命中時詳細寫到 stdout / io_log / vclamp_events.log / TB,事後 grep 統計頻率。
+            # Pre-step v-clamp: a hardware bit flip can make v negative, then
+            # sqrt(neg)=NaN and the next weight update becomes NaN. Clamp before
+            # optimizer.step() so Adam always sees v >= 0. Hits are logged to
+            # stdout / io_log / vclamp_events.log / TB for later frequency checks.
         self._clamp_optimizer_v_and_log()
         self.optimizer.step()
 
-        # Stage 7: optimizer.step 之後掃 weight — ★ 本次失敗最可能的源頭 ★
-        #          finite grad 進 AdamW 卻產生 NaN weight,常見原因:
-        #          (a) v 接近 denormal underflow → sqrt(v)+eps 異常小 → 巨大 update
-        #          (b) fused/non-fused kernel 罕見數值 edge case
-        #          (c) 硬體 transient bit flip(機率極低)
+            # Stage 7: scan weights after optimizer.step. This is the most likely
+            # source for the observed failure: finite grads enter AdamW but produce
+            # NaN weights. Common causes:
+            #   (a) v near denormal underflow -> sqrt(v)+eps is tiny -> huge update
+            #   (b) rare fused/non-fused kernel numerical edge case
+            #   (c) transient hardware bit flip
+            # On hit, the weight is already corrupt, but grad / m / v for this step
+            # remain in optimizer state for offline analysis. atexit writes the
+            # optimizer state to a .crash file after the crash.
         for name, param in list(self.backbone.named_parameters()) + list(self.q_network.named_parameters()):
             if not torch.isfinite(param.data).all():
                 nan_n = int(torch.isnan(param.data).sum().item())
@@ -756,10 +759,9 @@ class TransformerDiscreteAgent:
         if self.total_it % TARGET_UPDATE_FREQ == 0:
             self.q_target.load_state_dict(self.q_network.state_dict())
 
-        # ── Weight-drift snapshot — independent gating ──
-        # 跟 DIAGNOSTIC_LOG_EVERY 解耦,可以設成任何值(不需要是 10 的倍數)。
-        # init_distance / rolling_distance 是 Python float(_snapshot_distance 內部已 .item()),
-        # 直接 add_scalar 不需要再 sync。
+        # Weight-drift snapshot: independent of DIAGNOSTIC_LOG_EVERY. This can
+        # be any value and does not need to be a multiple of 10. init_distance /
+        # rolling_distance are Python floats, so add_scalar needs no extra sync.
         if self.total_it % WEIGHT_DISTANCE_LOG_EVERY == 0:
             current_snapshot = self._capture_trainable_weight_snapshot()
             init_distance = self._snapshot_distance(current_snapshot, self._init_weight_reference)
@@ -769,15 +771,15 @@ class TransformerDiscreteAgent:
             self.training_logger.log("weights/delta_from_init", init_distance, step=self.total_it, csv=False)
             self.training_logger.log("weights/delta_from_prev_window", rolling_distance, step=self.total_it, csv=False)
 
-        # ── Diagnostic / logging — only every DIAGNOSTIC_LOG_EVERY steps ──
-        # 把 io_log / TB / no_grad stats 區塊降頻;其他 step 直接 return None,
-        # 省下 ~40 個隱式 GPU→CPU sync。
+        # Diagnostic / logging: only every DIAGNOSTIC_LOG_EVERY steps. Lower the
+        # frequency for io_log / TB / no_grad stats; other steps return None and
+        # avoid about 40 implicit GPU-to-CPU syncs.
         if self.total_it % DIAGNOSTIC_LOG_EVERY != 0:
             return None
 
         with torch.no_grad():
-            # 把所有要拉的 scalar 合成一個 tensor、一次 .cpu() 搬回。
-            # 從 16 個 .item() (= 16 個 GPU→CPU sync) 變成 1 個 sync。
+            # Pack all scalar reads into one tensor and move it to CPU once:
+            # 16 .item() calls become one sync.
             q0_flat = q_2d[0].view(-1)
             _zero = torch.zeros((), device=loss.device, dtype=loss.dtype)
             _stats = torch.stack([
@@ -807,7 +809,7 @@ class TransformerDiscreteAgent:
                 fpn_norm_entropy, fpn_tau_std,
             ) = _stats
 
-            # 以下 .item() / .tolist() 留著 — 只在 diagnostic 步驟跑,成本可接受。
+            # Keep these .item() / .tolist() calls; they only run on diagnostic steps.
             reward_counts = defaultdict(int)
             for value in reward.squeeze(-1).tolist():
                 reward_counts[value] += 1
@@ -854,8 +856,8 @@ class TransformerDiscreteAgent:
         )
         self._io_log.flush()
 
-        # raw reward rolling mean(來源:training_history._step_rewards,由
-        # store_transition 維護;跟 v2 / v3 共用同一個 method)。
+        # Raw reward rolling mean from training_history._step_rewards. It is
+        # maintained by store_transition and shared with v2 / v3.
         real_reward_mean = self.training_history.avg_step_reward()
 
         # ── TensorBoard scalars ──
@@ -885,13 +887,14 @@ class TransformerDiscreteAgent:
         self.training_logger.log("grad_post/head", head_post, step=step, csv=False)
         self.training_logger.log("grad_pre/extras", extras_pre, step=step, csv=False)
         self.training_logger.log("grad_post/extras", extras_post, step=step, csv=False)
-        # check/ namespace — 驗證用,不是核心訓練指標。
+        # check/ namespace: validation-only, not core training metrics.
         self.training_logger.log("check/is_weight_mean", is_weight_mean, step=step, csv=False)
         self.training_logger.log("check/is_weight_min", is_weight_min, step=step, csv=False)
-        # IS weight 是 max-normalized 所以 max 恆為 1.0,ratio = 1/min。
-        # 健康範圍 < 10;若 > 100 代表 IS 公式可能又 broken(死條目 weight 爆炸之類)。
+        # IS weights are max-normalized, so max is always 1.0 and ratio = 1/min.
+        # Healthy is < 10; > 100 suggests the IS formula may be broken again.
         self.training_logger.log("check/is_weight_ratio", 1.0 / max(is_weight_min, step=1e-12, csv=False), step)
-        # 每筆 entry 平均被抽到幾次。數值單調隨訓練步數成長;高 mean 代表 PER 集中度高,batch 多樣性低。
+        # Average sample count per entry. This grows monotonically with training
+        # steps; high mean implies concentrated PER and low batch diversity.
         self.training_logger.log("check/mean_sample_count", self.replay_buffer.mean_sample_count(), step=step, csv=False)
 
         # Per-layer weight/grad norms — collected pre-clip inside the try
@@ -917,7 +920,7 @@ class TransformerDiscreteAgent:
     # ──────────────────────────── diagnostics helpers ──────────────────────
 
     def _write_metric_docs(self):
-        """把 metric 解讀表寫到 TensorBoard 的 TEXT 分頁,只寫一次。"""
+        """Write metric interpretation notes to TensorBoard TEXT once."""
         is_weight_mean_doc = (
             "**`check/is_weight_mean`** — PER importance-sampling weight 平均值 "
             "(已 normalize by max,所以 max 恆為 1.0,只看 mean)。\n\n"
@@ -952,10 +955,11 @@ class TransformerDiscreteAgent:
         self.training_logger.log_text("docs/is_weight_ratio", is_weight_ratio_doc, step=0)
 
     def _assert_finite(self, stage, name, tensor):
-        """訓練流程的 NaN/Inf probe:命中就 raise,訊息含 stage / tensor / step。
+        """NaN/Inf probe for training; raises with stage / tensor / step on hit.
 
-        只檢 floating-point tensor — int/bool 用 isfinite 無意義。
-        每個 stage boundary 呼叫一次,GPU sync 開銷 ~50μs,可常駐。
+        Only checks floating-point tensors; isfinite is not meaningful for int/bool.
+        Called at each stage boundary. GPU sync cost is about 50 us, acceptable
+        for always-on diagnostics.
         """
         if tensor is None:
             return
@@ -977,9 +981,10 @@ class TransformerDiscreteAgent:
         )
 
     def _scan_state_dict_finite(self, sd_label, state_dict):
-        """掃 state_dict 內所有 floating-point tensor,回傳 [(label, msg)] 列表。
+        """Scan all floating-point tensors in state_dict and return [(label, msg)].
 
-        不 raise — caller 自己決定要 raise(load 路徑)還是改寫 .crash 檔(save 路徑)。
+        Does not raise; callers decide whether to raise on load or write .crash
+        files on save.
         """
         bad = []
         for key, tensor in state_dict.items():
@@ -995,14 +1000,15 @@ class TransformerDiscreteAgent:
         return bad
 
     def _scan_optimizer_state(self, label, opt_state_dict):
-        """掃 optimizer state_dict (nested: state[pid][key])。
+        """Scan optimizer state_dict, nested as state[pid][key].
 
-        檢查兩種異常:
-        (a) 任何 tensor 含 NaN/Inf
-        (b) exp_avg_sq < 0 — Adam 的 second moment 數學上不可能為負,出現必為
-            bit-level corruption(sign-bit flip 等),會讓 sqrt(v) 噴 NaN
+        Checks two invalid states:
+        (a) any tensor containing NaN/Inf
+        (b) exp_avg_sq < 0. Adam's second moment is mathematically non-negative;
+            negatives imply bit-level corruption such as a sign-bit flip and can
+            make sqrt(v) produce NaN.
 
-        回傳 [(label, message)] 列表。
+        Returns a [(label, message)] list.
         """
         bad = []
         state = opt_state_dict.get("state", {}) if isinstance(opt_state_dict, dict) else {}
@@ -1024,26 +1030,28 @@ class TransformerDiscreteAgent:
         return bad
 
     def _clamp_optimizer_v_and_log(self):
-        """Pre-step belt-and-suspenders:Adam 的 exp_avg_sq(v)若有負值就 in-place clamp。
+        """Pre-step guard: clamp negative Adam exp_avg_sq(v) values in-place.
 
-        動機:v 數學上恆 >= 0(β2·v_old + (1-β2)·grad²,兩項都非負)。若觀察到負值,
-              壓倒性是 consumer GPU 沒 ECC 的 VRAM transient bit flip(本案就是 sign-bit
-              翻轉:-5.66e-7 vs |v|.max()=9.03e-7 同數量級)。若不清掉,AdamW 下一步
-              算 sqrt(negative)=NaN,接著把 weight 寫成 NaN,就是 stage 7 攔到的爆點。
+        Motivation: v is mathematically always >= 0 (beta2 * v_old +
+        (1 - beta2) * grad^2, both non-negative). If a negative value appears,
+        the likely cause is a transient VRAM bit flip on consumer GPUs without
+        ECC. If left uncleared, AdamW computes sqrt(negative)=NaN and writes a
+        NaN weight, which is what stage7 catches.
 
-        Self-healing(不 raise) — 把 HW transient 變成可繼續訓練的小事件;但每次命中
-        詳細寫四個地方,長期 grep 可以建出頻率/位置分布:
-          - stdout (訓練 console 立刻可見)
-          - self._io_log (跟其他 step 的 diagnostic 混在一起,容易對時間軸)
-          - models/stage1_transformer/vclamp_events.log (專屬 event log,好 grep)
+        Self-healing, without raising: turn a hardware transient into a small
+        recoverable event, but log every hit in four places so long-term grep can
+        build frequency and location distributions:
+          - stdout (visible in the training console immediately)
+          - self._io_log (aligned with other step diagnostics)
+          - models/stage1_transformer/vclamp_events.log (dedicated event log)
           - TensorBoard (vclamp/elements_this_step / elements_total / params_this_step)
 
-        命中位置會同步把 paired exp_avg(m)歸零,避免被汙染的 momentum 殘留繼續
-        把剛 reset 的 weight element 推向奇怪方向。
+        Also zero the paired exp_avg(m) at hit positions so contaminated momentum
+        does not keep pushing the reset weight element in a bad direction.
         """
         detections = []
-        # 用 named_parameters 是為了拿 human-readable 名稱寫 log
-        # (optimizer.state 的 key 是 param 物件本身,沒名字)
+        # Use named_parameters for human-readable log names. optimizer.state uses
+        # parameter objects as keys, without names.
         for source_name, module in (("backbone", self.backbone), ("q_network", self.q_network)):
             for pname, p in module.named_parameters():
                 st = self.optimizer.state.get(p)
@@ -1056,14 +1064,14 @@ class TransformerDiscreteAgent:
                 if not bool(neg_mask.any().item()):
                     continue
                 neg_n = int(neg_mask.sum().item())
-                # 最多取 5 個位置 + 數值寫 log,避免大規模 corruption 時 log 爆炸
+                # Log at most 5 positions and values to avoid huge corruption logs.
                 sample_pos = neg_mask.nonzero(as_tuple=False)[:5].tolist()
                 sample_vals = v[neg_mask][:5].tolist()
                 full_name = f"{source_name}.{pname}"
                 detections.append((full_name, tuple(v.shape), neg_n, sample_pos, sample_vals))
                 # In-place clamp v >= 0
                 v.clamp_(min=0)
-                # 同位置清 m
+                # Clear m at the same positions.
                 m = st.get("exp_avg")
                 if isinstance(m, torch.Tensor) and m.shape == v.shape:
                     m[neg_mask] = 0.0
@@ -1085,22 +1093,22 @@ class TransformerDiscreteAgent:
                 f"[vclamp]   {full_name} shape={shape} neg_count={neg_n} sample=[{sample}]"
             )
 
-        # 1) stdout — 訓練 console 立刻看到
+        # 1) stdout: immediately visible in the training console.
         for line in lines:
             print(line)
-        # 2) io_log — 跟訓練的 step diagnostic 混在一起對時間軸
+        # 2) io_log: align with training step diagnostics.
         try:
             self._io_log.write("\n".join(lines) + "\n")
             self._io_log.flush()
         except Exception:
             pass
-        # 3) 專屬 event log — 寫到當下 hour 資料夾(跟 io_log 同位置,方便對時)
+        # 3) Dedicated event log in the current hour dir, aligned with io_log.
         try:
             with (self.current_archive_dir / "vclamp_events.log").open("a", encoding="utf-8") as f:
                 f.write("\n".join(lines) + "\n")
         except Exception:
             pass
-        # 4) TensorBoard — 視覺化命中時間軸
+        # 4) TensorBoard: visualize the hit timeline.
         if not hasattr(self, "_vclamp_total"):
             self._vclamp_total = 0
         self._vclamp_total += total
@@ -1112,19 +1120,20 @@ class TransformerDiscreteAgent:
             pass
 
     # ──────────────────────────── archive directory / hour rollover ──────
-    # 目錄管理本體(session_dir / hour_index / current_archive_dir + 翻頁)在
-    # model_structure.archive_manager.SessionArchiveManager。這裡只剩 agent 自己
-    # 的耦合點:io_log banner 內容、翻頁時要 swap 哪些檔。
+    # Directory ownership (session_dir / hour_index / current_archive_dir and
+    # rollover) lives in model_structure.archive_manager.SessionArchiveManager.
+    # This class only keeps agent-specific hooks: io_log banner content and which
+    # files are swapped on rollover.
     #
-    # current_archive_dir 對外是 read-only @property delegate,讓既有的呼叫端
-    # (例如 train_stage1_simple.py 的 `agent.current_archive_dir`)不用改。
+    # current_archive_dir is exposed as a read-only property delegate so existing
+    # callers such as train_stage1_simple.py do not need changes.
 
     @property
     def current_archive_dir(self) -> Path:
         return self.archive.current_archive_dir
 
     def _build_io_log_banner(self, path: Path) -> list[str]:
-        """RolloverTextLog banner:寫 session/hour 起始時間 + 檔案路徑。"""
+        """Build the RolloverTextLog banner with session/hour starts and path."""
         return [
             f"Session started: {self.archive.session_start.isoformat()}",
             f"Hour {self.archive.hour_index:02d} started: {datetime.datetime.now().isoformat()}",
@@ -1132,14 +1141,14 @@ class TransformerDiscreteAgent:
         ]
 
     def _on_archive_rollover(self, new_dir: Path) -> None:
-        """SessionArchiveManager rollover callback:翻頁時 swap io_log。
+        """SessionArchiveManager rollover callback: swap io_log.
 
-        - io_log 先 inline 寫一行 rollover footer 再 swap;這樣舊檔尾巴有 marker,
-          新檔開頭有 RolloverTextLog 自己寫的 banner。
-        - vclamp_events.log / training_log.csv 是 lazy-open(每次寫才開),
-          會自動跟著 self.archive.current_archive_dir,不用在這裡顯式處理。
-        - canonical *.pth 不動;_save_model 下次被叫到時自然把 archive snapshot
-          寫到新的 hour 資料夾。
+        - io_log writes one inline rollover footer before swap, so the old file
+          has a tail marker and the new file starts with RolloverTextLog's banner.
+        - vclamp_events.log / training_log.csv are lazy-opened on write, so they
+          follow self.archive.current_archive_dir without explicit handling here.
+        - canonical *.pth files are unchanged. The next _save_model call writes
+          the archive snapshot into the new hour directory.
         """
         now = datetime.datetime.now()
         try:
@@ -1279,10 +1288,11 @@ class TransformerDiscreteAgent:
                 self.training_logger.log(f"grad_norm/{tag_prefix}", grad_norm, step=global_step, csv=False)
 
     def _close_training_logger(self):
-        """Atexit hook:同時關 CSV file handle 與 SummaryWriter。
+        """Atexit hook: close both the CSV file handle and SummaryWriter.
 
-        SummaryWriter 自 __init__ 起只活在 self.training_logger 內,沒有外部
-        引用;這裡一次 call .close() 把兩邊關掉,取代原本分開的 _close_tb_writer。
+        SummaryWriter only lives inside self.training_logger after __init__, with
+        no external references. A single close() replaces the old separate
+        _close_tb_writer path.
         """
         logger = getattr(self, "training_logger", None)
         if logger is not None and not logger.closed:
@@ -1294,9 +1304,9 @@ class TransformerDiscreteAgent:
 
     def on_episode_end(self):
         self._flush_n_step_buffer()
-        # episode_count 已在 log_episode_metrics() 內 history.record() 時自動
-        # 從 training_history 推導出來,這裡不再 += 1(它是 @property delegate)。
-        # epsilon 也已在 log_episode_metrics() 透過 controller.update 更新好。
+        # episode_count is derived from training_history via history.record() in
+        # log_episode_metrics(), so do not increment here. epsilon is also updated
+        # there through controller.update().
         self.training_logger.log("episode/epsilon", self.epsilon, step=self.episode_count, csv=False)
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
             print(
@@ -1315,15 +1325,18 @@ class TransformerDiscreteAgent:
         total_reward: float = 0.0,
         steps: int = 0,
     ) -> None:
-        """記錄一場 episode 結果,並依 rolling win rate 更新 epsilon。
+        """Record one episode result and update epsilon from rolling win rate.
 
-        與 v3 / v2 介面一致:訓練腳本應在 `on_episode_end()` 之前呼叫一次。
-        流程:1) 結果 (含 total_reward / steps) 記到 TrainingHistory,
-        2) 從 history 取 rolling win rate,
-        3) 把 win rate 餵給 controller 算 next epsilon。
+        Matches the v3 / v2 interface: training scripts should call this once
+        before `on_episode_end()`.
+        Flow:
+        1) Store result, total_reward, and steps in TrainingHistory.
+        2) Read rolling win rate from history.
+        3) Feed win rate to the controller for next epsilon.
 
-        total_reward / steps 是 keyword-only。舊呼叫端不傳的話,history 內的
-        reward/steps 統計就會是 0 (對 win_rate / ε 衰減無影響)。
+        total_reward / steps are keyword-only. Legacy callers that omit them
+        record 0 in history reward/steps stats, with no effect on win_rate or
+        epsilon decay.
         """
         self.training_history.record(
             win=win,
@@ -1341,11 +1354,15 @@ class TransformerDiscreteAgent:
     # ──────────────────────────── lr warmup ────────────────────────────
 
     def _apply_lr_warmup(self) -> None:
-        """Linear LR warmup，兩個 warmup 取較嚴格者：
-        - init warmup：以 total_it 為進度，第一次從頭訓練時生效
-        - resume warmup：以 steps_since_resume 為進度，每次啟動（含重啟）都會生效
-        最終 factor = min(init_factor, resume_factor)，所以重啟後雖然 total_it 已大，
-        resume warmup 仍會把 LR 從 LR_WARMUP_START_FACTOR×base_lr 線性拉回 base_lr。"""
+        """Linear LR warmup using the stricter of two warmups.
+
+        - init warmup uses total_it and applies when training from scratch.
+        - resume warmup uses steps_since_resume and applies on every start,
+          including restarts.
+        Final factor = min(init_factor, resume_factor), so after a restart,
+        resume warmup still ramps LR from LR_WARMUP_START_FACTOR * base_lr back
+        to base_lr even when total_it is already large.
+        """
 
         def _factor_from(step: int, total: int) -> float:
             if total <= 0:
@@ -1369,9 +1386,9 @@ class TransformerDiscreteAgent:
         qnet_sd = self.q_network.state_dict()
         qtarget_sd = self.q_target.state_dict()
 
-        # optimizer state 只含 optimizer / total_it / episode_count / algorithm / epsilon。
-        # Episode 結果累積/查詢搬到 TrainingHistory,寫到獨立檔 training_history.pth
-        # (見下方 torch.save)。
+        # Optimizer state only contains optimizer / total_it / episode_count /
+        # algorithm / epsilon. Episode result accumulation and queries live in
+        # TrainingHistory and are saved to training_history.pth below.
         payload = {
             "optimizer": self.optimizer.state_dict(),
             "total_it": self.total_it,
@@ -1381,13 +1398,12 @@ class TransformerDiscreteAgent:
         payload.update(self.epsilon_controller.state_dict())
         training_history_sd = self.training_history.state_dict()
 
-        # ── RNG state snapshot ─────────────────────────────────────────
-        # Save 全部 4 個 RNG source 的 state,給 restart 後完整還原。
-        # 不存的話,restart 會用全新的 seed,讓 Minesweeper 板生成、ε-random
-        # action、replay buffer 取樣等等都跟 save 那刻不同 → trajectory 跟
-        # buffer 內舊 transition 屬於不同分布 → 立即訓練時 bootstrap 矛盾
-        # 造成 win rate drop。實驗(seed 42 跑兩次得到 bit-identical 結果)
-        # 確認 RNG 控制可達成完整 determinism。
+        # RNG state snapshot: save all four RNG sources so restarts can resume
+        # exactly. Without this, restarts use fresh seeds, so Minesweeper board
+        # generation, epsilon-random actions, replay sampling, and similar paths
+        # diverge from the save point. That makes new trajectories differ from
+        # old transitions in the buffer and can cause bootstrap mismatch and win
+        # rate drops. Seed-42 duplicate runs confirmed bit-identical results.
         payload["rng_state"] = {
             "python_random": random.getstate(),
             "numpy":         np.random.get_state(),
@@ -1395,10 +1411,11 @@ class TransformerDiscreteAgent:
             "cuda":          torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
         }
 
-        # Save-time NaN probe:掃所有 state_dict,任一壞就拒絕 overwrite canonical 檔。
-        # 動機:atexit 在 NaN crash 後也會被 trigger,沒這層保護就會把磁碟上的好 checkpoint
-        #      蓋成壞的(就是失敗 run 把 1 個 NaN 寫進 backbone.pth 的那條路徑)。
-        # 也掃 optimizer state — Adam 的 v 為負會在下次 load 後立刻引爆 NaN weight。
+        # Save-time NaN probe: scan all state_dicts and refuse to overwrite
+        # canonical checkpoints if any are corrupt. atexit also runs after NaN
+        # crashes, so this prevents replacing the last good disk checkpoint with
+        # a bad one. Also scan optimizer state; negative Adam v can immediately
+        # create NaN weights after the next load.
         bad = []
         bad.extend(self._scan_state_dict_finite("backbone", backbone_sd))
         bad.extend(self._scan_state_dict_finite("q_network", qnet_sd))
@@ -1417,8 +1434,8 @@ class TransformerDiscreteAgent:
             torch.save(payload,      TRANSFORMER_MODEL_PATH / f"optimizer_state{suffix}")
             print(f"[NaN-probe] wrote *{suffix} files for offline analysis;"
                   f" canonical *.pth left untouched (last good state preserved)")
-            # Raise 中止訓練 — atexit 會再 trigger 一次 _save_model,probe 會再次
-            # raise(canonical 不會被蓋掉)。
+            # Stop training. The atexit hook will call _save_model again, and
+            # the probe raises again before the canonical checkpoint is overwritten.
             raise RuntimeError(
                 f"[NaN-probe] _save_model: non-finite tensors at step {self.total_it}; "
                 f"canonical checkpoints preserved, see *{suffix} for forensics"
@@ -1430,8 +1447,9 @@ class TransformerDiscreteAgent:
         torch.save(payload,            TRANSFORMER_MODEL_PATH / "optimizer_state.pth")
         torch.save(training_history_sd, TRANSFORMER_MODEL_PATH / "training_history.pth")
 
-        # 同一份也寫到當下 hour 資料夾,做歷史快照(同一小時內多次 save 會 overwrite,
-        # 留下「該小時最後一次 save」的狀態 — 滿足「保留每次的訓練結果」)
+        # Also write the same payload into the current hour directory as a
+        # history snapshot. Multiple saves in one hour overwrite that hour's
+        # snapshot, leaving the last save for that hour.
         try:
             archive = self.current_archive_dir
             archive.mkdir(parents=True, exist_ok=True)
@@ -1441,7 +1459,7 @@ class TransformerDiscreteAgent:
             torch.save(payload,             archive / "optimizer_state.pth")
             torch.save(training_history_sd, archive / "training_history.pth")
         except Exception as exc:
-            # archive 失敗不擋 canonical save 的成功
+            # Archive failure must not block a successful canonical save.
             print(f"[FQF] WARN: archive snapshot write failed: {exc}")
 
     def save_persistent(self):
@@ -1474,13 +1492,14 @@ class TransformerDiscreteAgent:
         print("--- save end ---------------")
 
     def _resolve_load_path(self, canonical_path):
-        """Load path 決策:canonical 存在就用它;不存在就 fallback 到最新 archive。
+        """Choose load path: canonical first, otherwise latest archive.
 
-        Corrupt(NaN/Inf)的 canonical 不算「不存在」,會在 _raise_if_corrupt 那層攔下,
-        不會 silent 走 archive — 因為 corrupt 通常代表你需要主動處理(sanitize / rollback)。
+        A corrupt canonical checkpoint is not treated as missing. _raise_if_corrupt
+        catches it instead of silently falling back to archive, because corruption
+        usually needs explicit handling such as sanitize or rollback.
 
-        Archive 掃描邏輯在 SessionArchiveManager.find_latest_archive;這裡只負責
-        canonical 與 archive 之間的優先序與 console message。
+        Archive scanning lives in SessionArchiveManager.find_latest_archive; this
+        method only owns canonical/archive priority and the console message.
         """
         if canonical_path.exists():
             return canonical_path
@@ -1494,11 +1513,11 @@ class TransformerDiscreteAgent:
         return None
 
     def _load_training_history(self, legacy_state: dict | None = None) -> None:
-        """Load TrainingHistory:獨立檔 training_history.pth 優先,
-        舊扁平 optimizer state 是 fallback (一次性 migration)。
+        """Load TrainingHistory, preferring training_history.pth.
 
-        Canonical 不存在會自動 fallback 到最新 archive (走 _resolve_load_path),
-        跟其他 checkpoint 的 load 路徑一致。
+        Legacy flattened optimizer state is the fallback for one-time migration.
+        Missing canonical files automatically fall back to the latest archive via
+        _resolve_load_path, matching other checkpoint load paths.
         """
         history_path = self._resolve_load_path(
             TRANSFORMER_MODEL_PATH / "training_history.pth"
@@ -1514,7 +1533,7 @@ class TransformerDiscreteAgent:
                 return
             except Exception as exc:
                 print(f"[FQF] Failed to load training_history.pth: {exc}")
-                # 落到下面 legacy fallback
+                # Fall through to the legacy fallback below.
         if legacy_state and any(
             k in legacy_state for k in ("result_window", "total_episodes", "total_wins")
         ):
@@ -1527,10 +1546,10 @@ class TransformerDiscreteAgent:
             print("[FQF] Migrated legacy training history from optimizer state")
 
     def _raise_if_corrupt(self, label, path, state_dict):
-        """Load-time NaN probe — checkpoint 含 NaN/Inf 就 raise,阻止 silent resume。
+        """Load-time NaN probe: raise if checkpoint contains NaN/Inf.
 
-        將 raise 抽出來放到 try/except 之外,避免被原本「捕例外印 message 就吞掉」的
-        錯誤處理蓋掉。
+        This prevents silent resume. Keep the raise outside the caller's broad
+        try/except path so it cannot be swallowed by message-only error handling.
         """
         bad = self._scan_state_dict_finite(label, state_dict)
         if not bad:
@@ -1604,9 +1623,9 @@ class TransformerDiscreteAgent:
             except Exception as exc:
                 print(f"[FQF] Failed to read optimizer state: {exc}")
             if opt_payload is not None:
-                # Load-time probe for optimizer state — 掃 NaN/Inf 跟 exp_avg_sq < 0
-                # (本案就是後者:Adam 的 v 不能為負,出現必為 bit-level corruption,
-                #  會讓 AdamW 算 sqrt(negative)=NaN 後把 weight 寫壞)
+                # Load-time optimizer probe: scan for NaN/Inf and exp_avg_sq < 0.
+                # Adam v cannot be negative; if it is, bit-level corruption can
+                # make AdamW compute sqrt(negative)=NaN and corrupt weights.
                 bad = self._scan_optimizer_state("optimizer(disk)", opt_payload.get("optimizer", {}))
                 if bad:
                     lines = "\n".join(f"  {k}: {msg}" for k, msg in bad)
@@ -1618,12 +1637,11 @@ class TransformerDiscreteAgent:
                 try:
                     self.optimizer.load_state_dict(opt_payload["optimizer"])
                     self.total_it = opt_payload["total_it"]
-                    # episode_count 不再直接 set — 它是 @property delegate 到
-                    # training_history.total_episodes,後者由獨立 .pth 檔還原。
-                    # 舊 opt_payload 裡的 "episode_count" 直接忽略 (跟 history
-                    # 的 total_episodes 重複了)。
-                    # Controller 只剩 epsilon 一個 key;TrainingHistory 走獨立檔,
-                    # 舊 checkpoint 把 history 攤平存在 opt_payload 的情況用 fallback。
+                    # Do not set episode_count directly. It delegates to
+                    # training_history.total_episodes, restored from its own .pth.
+                    # Ignore legacy opt_payload["episode_count"] because it
+                    # duplicates history.total_episodes. The controller only needs
+                    # epsilon; flattened legacy history uses the fallback loader.
                     self.epsilon_controller.load_state_dict(opt_payload)
                     self._load_training_history(legacy_state=opt_payload)
                     print(
@@ -1631,14 +1649,13 @@ class TransformerDiscreteAgent:
                         f" episode={self.episode_count}, epsilon={self.epsilon:.4f},"
                         f" total_episodes={self.training_history.total_episodes}"
                     )
-                    # ── RNG state restore ──────────────────────────────
-                    # 還原 save 那刻的 random / numpy / torch / cuda RNG state,
-                    # 讓 restart 後 trajectory 跟 save 那刻完整延續(避免 buffer
-                    # 內舊 transition 跟新 trajectory 分布不一致導致 bootstrap 矛盾)。
-                    # 舊 checkpoint 沒 rng_state 欄位時 silent skip,保持向下相容。
-                    # 注意:torch.load(map_location=device) 會把整個 payload 的
-                    # tensor 都搬到 device。torch.set_rng_state() 一定要 CPU
-                    # ByteTensor,所以要 .cpu() 後再傳。
+                    # RNG state restore: resume random / numpy / torch / cuda RNG
+                    # from the save point so trajectories continue from the saved
+                    # distribution and do not conflict with old buffer transitions.
+                    # Legacy checkpoints without rng_state are skipped for backward
+                    # compatibility. torch.load(map_location=device) can move
+                    # payload tensors to device, while torch.set_rng_state() needs a
+                    # CPU ByteTensor, so move it to CPU before passing.
                     rng_state = opt_payload.get("rng_state")
                     if rng_state:
                         restored = []
@@ -1663,8 +1680,8 @@ class TransformerDiscreteAgent:
                         cuda_state = rng_state.get("cuda")
                         if cuda_state is not None and torch.cuda.is_available():
                             try:
-                                # cuda RNG state 是 list[Tensor],每張 GPU 一個。
-                                # 強制每個 element 都搬到 CPU。
+                                # CUDA RNG state is list[Tensor], one per GPU.
+                                # Force each element back to CPU.
                                 cuda_state_cpu = [
                                     s.cpu() if torch.is_tensor(s) else s
                                     for s in cuda_state
@@ -1683,8 +1700,9 @@ class TransformerDiscreteAgent:
                 except Exception as exc:
                     print(f"[FQF] Failed to apply optimizer state: {exc}")
 
-        # 新檔名 replay_buffer.pth;若不存在但有舊檔 training_state.pth(rename 前的版本),
-        # 仍從舊檔載入(下次 save 會寫到新檔名,舊檔可以手動刪)
+        # New name is replay_buffer.pth. If it is missing but legacy
+        # training_state.pth exists, load the legacy file. The next save writes the
+        # new name, and the old file can be deleted manually.
         replay_buffer_path = TRANSFORMER_MODEL_PATH / "replay_buffer.pth"
         legacy_path = TRANSFORMER_MODEL_PATH / "training_state.pth"
         if not replay_buffer_path.exists() and legacy_path.exists():

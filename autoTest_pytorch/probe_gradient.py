@@ -1,7 +1,7 @@
 """
-Gradient Norm Probe — 檢查 DDQN 各層是否有 vanishing/exploding gradient。
+Gradient Norm Probe: check each DDQN layer for vanishing/exploding gradients.
 
-執行方式:
+Usage:
   cd autoTest_clau (repo root)
   python autoTest_pytorch/probe_gradient.py
 """
@@ -19,7 +19,7 @@ REPORT_PATH = TRANSFORMER_MODEL_PATH / 'gradient_report.txt'
 
 
 def collect_gradient_norms(agent):
-    """跑一個 training step，收集 gradient norm。"""
+    """Run one training step and collect gradient norms."""
     if agent.replay_buffer.size() < BATCH_SIZE:
         return None, None
 
@@ -59,7 +59,7 @@ def collect_gradient_norms(agent):
 
 
 def format_grads(grads, f):
-    """按 layer 分組顯示 gradient norms。"""
+    """Group gradient norms by layer for display."""
     groups = defaultdict(dict)
     for name, norm in sorted(grads.items()):
         if 'transformer' in name and 'layers' in name:

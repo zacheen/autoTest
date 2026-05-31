@@ -1,16 +1,18 @@
 """Write training settings to a .txt file at session start.
 
 Three categories of settings are handled in one shot:
-  - 模組層級常數 (BATCH_SIZE 之類)：從傳入的 module 撈,只取 ALL_CAPS 命名 +
-    型別屬於 int/float/bool/str/Path/list/tuple 的成員。
-  - dataclass 實例 (e.g. MINESWEEPER_REWARD_CONFIG)：用 dataclasses.asdict 展平。
-  - 物件實例屬性 (e.g. AdaptiveEpsilonController, optimizer)：預設取 vars()
-    內非底線開頭的型別匹配成員;可選擇 (obj, [fields]) tuple 傳允許欄位白名單;
-    若物件有 param_groups 屬性,自動走 optimizer 特例(印每個 group lr +
-    optimizer.defaults 內非 lr 的純量設定)。
+  - Module-level constants such as BATCH_SIZE: read from passed modules, keeping
+    ALL_CAPS names whose values are int/float/bool/str/Path/list/tuple.
+  - Dataclass instances such as MINESWEEPER_REWARD_CONFIG: flattened with
+    dataclasses.asdict.
+  - Object instance attrs such as AdaptiveEpsilonController or optimizer: by
+    default, use public attrs with allowed types from vars(). Optionally pass an
+    (obj, [fields]) tuple as an allowlist. Objects with param_groups use the
+    optimizer special case: print each group LR plus non-LR scalar defaults.
 
-Header 含 session 名 / timestamp / git commit hash + dirty flag。Git 不可用
-時跳過該行。寫一次性,執行階段不更新。
+Header includes session name / timestamp / git commit hash + dirty flag. If Git
+is unavailable, that line is skipped. Written once at startup, not updated while
+running.
 """
 
 from __future__ import annotations
@@ -61,7 +63,7 @@ def _dump_optimizer(section_name: str, optimizer: Any) -> list[str]:
     lines = [f"[{section_name}]"]
     defaults = getattr(optimizer, "defaults", {})
     for name in sorted(defaults.keys()):
-        # 各 param_group 可能蓋掉 lr,獨立印
+        # Each param_group may override lr, so print it separately.
         if name == "lr":
             continue
         value = defaults[name]
@@ -79,15 +81,16 @@ def _dump_model_summary(
     model: Any,
     input_size: tuple[int, ...] | None = None,
 ) -> list[str]:
-    """Dump 一個 nn.Module 的兩段資料:
+    """Dump two sections for one nn.Module:
 
-    1) Freeze status —— per top-level submodule(讀 `param.requires_grad` 算出來,
-       不依賴 hardcoded flag。確實反映 build 後 freeze 設定)。
-    2) torchinfo summary —— 帶 input_size 才寫,因為 torchinfo 要 dummy forward。
-       輸出包含 layer-by-layer 的 output shape + param count + estimated MB。
+    1) Freeze status per top-level submodule, derived from `param.requires_grad`
+       rather than hardcoded flags, so it reflects the built model.
+    2) torchinfo summary, only when input_size is provided because torchinfo needs
+       a dummy forward. Output includes layer output shape, param count, and
+       estimated MB.
 
-    requirements.txt 已包含 torchinfo;這裡直接 import,不做 graceful fallback ──
-    若環境有問題就讓 ImportError 噴出來,不要 silent 跳過。
+    requirements.txt includes torchinfo, so import directly. If the environment
+    is wrong, let ImportError surface instead of silently skipping.
     """
     lines = [f"[{section_name}]"]
 
@@ -117,12 +120,12 @@ def _dump_model_summary(
         f"(trainable={trainable_total:,}, frozen={total_params - trainable_total:,})"
     )
 
-    # 2. torchinfo summary(需要 input_size)
+    # 2. torchinfo summary (requires input_size)
     if input_size is not None:
-        from torchinfo import summary  # 必須裝(requirements.txt + colab ipynb 已加)
+        from torchinfo import summary  # required by requirements.txt and the Colab notebook
         lines.append("")
         lines.append(f"# torchinfo summary (input_size={tuple(input_size)})")
-        # device=str(model device) 讓 dummy input 落在跟 model 同個 device。
+        # device=str(model device) puts dummy input on the same device as the model.
         device = next(model.parameters()).device
         stats = summary(
             model,
@@ -137,7 +140,7 @@ def _dump_model_summary(
 
 
 def _dump_object_attrs(section_name: str, target: Any) -> list[str]:
-    """target 可以是物件,或 (物件, [field 名單]) tuple 指定白名單。"""
+    """target can be an object or an (object, [field names]) allowlist tuple."""
     if (
         isinstance(target, tuple)
         and len(target) == 2
@@ -187,19 +190,19 @@ def dump_hyperparameters(
     instance_attrs: dict[str, Any] | None = None,
     models: dict[str, tuple[Any, tuple[int, ...] | None]] | None = None,
 ) -> None:
-    """One-shot dump of training settings to out_path。
+    """One-shot dump of training settings to out_path.
 
     Args:
-        out_path: output file path(寫文字檔,utf-8)。
-        modules: 取裡面 module 的 ALL_CAPS module-level 常數。
-        dataclass_instances: dict[section_name → dataclass instance]。
-        instance_attrs: dict[section_name → object 或 (object, [field_whitelist])]。
-            若 object 有 `param_groups` 屬性,走 optimizer 特例。
-        models: dict[section_name → (nn.Module, input_size | None)]。
-            每個 model 印兩段:
-              (a) freeze status per top-level submodule(讀 requires_grad)
-              (b) torchinfo summary(input_size 是 None 就跳過 (b))
-            input_size 應該是 `(batch, *input_shape)`,例如 `(1, 3, 640, 640)`。
+        out_path: Output text file path, written as UTF-8.
+        modules: Dump ALL_CAPS module-level constants from these modules.
+        dataclass_instances: dict[section_name -> dataclass instance].
+        instance_attrs: dict[section_name -> object or (object, [field_whitelist])].
+            Objects with `param_groups` use the optimizer special case.
+        models: dict[section_name -> (nn.Module, input_size | None)].
+            Each model prints:
+              (a) freeze status per top-level submodule from requires_grad
+              (b) torchinfo summary, skipped when input_size is None
+            input_size should be `(batch, *input_shape)`, e.g. `(1, 3, 640, 640)`.
     """
     lines: list[str] = [
         "# Hyperparameters dump",

@@ -17,15 +17,16 @@ import torch.nn as nn
 
 @dataclass
 class FQFOptimizerConfig:
-    """FQF agent 共用的 optimizer 預設值。
+    """Shared optimizer defaults for FQF agents.
 
-    需要單獨調整時，建構時覆蓋對應欄位即可。
+    Override fields at construction when an agent needs custom values.
 
     lr_backbone_pretrained:
-        若指定（非 None）且 build_fqf_optimizer 收到非空 pretrained_prefixes,
-        backbone 內 name 以那些 prefix 開頭的 param 會被獨立成一個 group 用此 LR。
-        用途:v3 的 encoder + token_adapter 從 YOLOGridStatePredictor checkpoint 載入,
-        用較小 LR 防 catastrophic forgetting。None → 退回單一 backbone LR。
+        If set and build_fqf_optimizer receives non-empty pretrained_prefixes,
+        backbone params whose names start with those prefixes get a separate
+        group using this LR. V3 uses this when encoder + token_adapter are loaded
+        from YOLOGridStatePredictor checkpoint, reducing LR to avoid catastrophic
+        forgetting. None falls back to the single backbone LR.
     """
     lr_backbone: float = 5e-5
     lr_backbone_pretrained: Optional[float] = None
@@ -41,25 +42,25 @@ def build_fqf_optimizer(
     config: Optional[FQFOptimizerConfig] = None,
     pretrained_prefixes: tuple[str, ...] = (),
 ) -> torch.optim.Optimizer:
-    """為 FQF agent 建構 AdamW(2 或 3 個 param group)。
+    """Build AdamW for an FQF agent with 2 or 3 param groups.
 
-    只收 requires_grad=True 的參數(自動跳過凍結模組如 v3 的 YOLO11n)。
+    Only includes requires_grad=True params, so frozen modules such as V3 YOLO11n
+    are skipped automatically.
 
-    param group 配置:
-      • pretrained_prefixes 為空(stage 1):
-          [backbone_all, head] — 維持原本 2-group 行為,backward compatible
-      • pretrained_prefixes 非空(v3):
-          backbone 內 named_parameters() name 以這些 prefix 開頭的 → pretrained group
-          其餘 backbone 可訓練 param → fresh group
-          結果為 [backbone_fresh, backbone_pretrained, head]
-          其中 backbone_pretrained 使用 config.lr_backbone_pretrained
-          (若 None 則退回 config.lr_backbone)。
+    Param group layout:
+      - Empty pretrained_prefixes (stage 1):
+          [backbone_all, head], preserving the original 2-group behavior.
+      - Non-empty pretrained_prefixes (V3):
+          backbone named_parameters() matching a prefix -> pretrained group;
+          other trainable backbone params -> fresh group. Result:
+          [backbone_fresh, backbone_pretrained, head]. The pretrained group uses
+          config.lr_backbone_pretrained, or config.lr_backbone if None.
 
-    用途說明(v3):
-        encoder + token_adapter 是 YOLOGridStatePredictor 預訓練好的,RL gradient
-        稀疏雜訊大,單一大 LR 會在前幾百步把預訓練特徵洗掉(catastrophic forgetting)。
-        把這兩個模組獨立成一個小 LR group(通常 0.1× base LR),decoder + queries
-        繼續用 base LR 學新的 cross-attn pattern。
+    V3 rationale:
+        encoder + token_adapter are pretrained by YOLOGridStatePredictor. Sparse,
+        noisy RL gradients can erase pretrained features early. A small LR group
+        (usually 0.1x base LR) protects them while decoder + queries use base LR
+        to learn new cross-attention patterns.
     """
     if config is None:
         config = FQFOptimizerConfig()
@@ -67,9 +68,9 @@ def build_fqf_optimizer(
     head_trainable = [p for p in head_module.parameters() if p.requires_grad]
 
     if not pretrained_prefixes:
-        # Stage 1 路徑:單一 backbone group,保持原行為。
-        # "name" 是 caller(例如 v3 的 train_step)用來在 TB 標 lr/<name> 的 tag,
-        # AdamW 本身不會讀這個 key,只是被 param_groups 透傳保留下來。
+        # Stage 1 path: one backbone group, preserving original behavior.
+        # "name" lets callers label lr/<name> in TB. AdamW ignores it; param_groups
+        # just carry it through.
         backbone_trainable = [p for p in backbone_module.parameters() if p.requires_grad]
         return torch.optim.AdamW(
             [
@@ -81,7 +82,7 @@ def build_fqf_optimizer(
             fused=config.fused,
         )
 
-    # V3 路徑:依 name prefix 把 backbone 拆成 pretrained / fresh 兩組。
+    # V3 path: split backbone into pretrained / fresh groups by name prefix.
     pretrained_params: list[nn.Parameter] = []
     fresh_params: list[nn.Parameter] = []
     pretrained_names: list[str] = []
@@ -103,9 +104,9 @@ def build_fqf_optimizer(
     )
 
     param_groups: list[dict] = []
-    # 順序固定 [fresh, pretrained, head]:_base_lrs / _apply_lr_warmup 是按
-    # index 對應 param_group,改順序會讓 v3 內部的 LR warmup index 對不上。
-    # "name" 給 caller 在 TB 上標 lr/<name> 用,AdamW 本身不會讀這個 key。
+    # Fixed order [fresh, pretrained, head]: _base_lrs / _apply_lr_warmup map
+    # by param_group index, so reordering would break V3 LR warmup indexing.
+    # "name" is for caller TB tags; AdamW itself ignores it.
     if fresh_params:
         param_groups.append({
             "params": fresh_params, "lr": config.lr_backbone, "name": "backbone_fresh",
@@ -116,7 +117,7 @@ def build_fqf_optimizer(
         })
     param_groups.append({"params": head_trainable, "lr": config.lr_head, "name": "head"})
 
-    # 印一行 split summary,讓 caller 在 log 內肉眼確認 prefix 抓對。
+    # Print a split summary so callers can verify prefix matching in logs.
     print(
         f"[build_fqf_optimizer] split by prefix {pretrained_prefixes}: "
         f"fresh={len(fresh_params)} params, "

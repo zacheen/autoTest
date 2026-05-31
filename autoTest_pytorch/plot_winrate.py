@@ -1,7 +1,7 @@
 """
-畫 validation win rate 折線圖。
+Plot validation win-rate line chart.
 
-執行方式:
+Usage:
   cd autoTest_clau (repo root)
   python autoTest_pytorch/plot_winrate.py
 """
@@ -26,7 +26,7 @@ def main():
         reader = csv.DictReader(f)
         for row in reader:
             wr = row.get('eval_win_rate', '')
-            if wr:  # 只取有 eval 的 row
+            if wr:  # Only keep rows with eval data.
                 episodes.append(int(row['episode']))
                 win_rates.append(float(wr))
 
@@ -42,7 +42,7 @@ def main():
     plt.grid(True, alpha=0.3)
     plt.ylim(bottom=0)
 
-    # 標注最高點
+    # Annotate the best point.
     max_wr = max(win_rates)
     max_ep = episodes[win_rates.index(max_wr)]
     plt.annotate(f'Best: {max_wr:.1f}% @ ep{max_ep}',

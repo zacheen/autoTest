@@ -108,7 +108,7 @@ def KPSZNN_do_compare(server_data, pass_in_round_count_for_pipe):
     print_to_output("KPSZNN_do_compare client data: " + str(glo_var.state.client_data[slot]))
     Logger.pipe_write("Pipeline round " + str(pass_in_round_count_for_pipe) + "\n")
 
-        # 這裡放的是 只有這個 Main 會用到的全域變數
+# Globals used only by this main script.
 class Game_only_var() :
     def __init__(self) :
         pass
@@ -116,9 +116,8 @@ class Game_only_var() :
 class Game_test_case(unittest.TestCase) :
     @classmethod
     def setUpClass(self):
-        # 這邊放每一場都要 初始化 的 參數
-        # 這裡的值每回合遊戲都會重置一次(資料會不見)
-        # 開始時執行
+        # Per-game init values.
+        # Values here reset every round.
         pass
 
     def test_choose_room(self):
