@@ -1,6 +1,6 @@
 """
-踩地雷遊戲邏輯層 — 純邏輯，無 UI 依賴。
-供 GUI (Minesweeper.py) 和 Stage 1 預訓練 (train_stage1.py) 共用。
+Pure Minesweeper game logic with no UI dependency.
+Shared by the GUI (Minesweeper.py) and Stage 1 pretraining (train_stage1.py).
 """
 
 import random
@@ -10,14 +10,14 @@ from typing import List, Tuple, Optional
 import numpy as np
 
 
-# Grid state 常數 (給 get_grid_state 用)
+# Grid state constants for get_grid_state.
 CELL_UNREVEALED = -1
 CELL_FLAGGED = -2
 
-# One-hot channel 索引 (給 get_grid_state_array 用)
+# One-hot channel indices for get_grid_state_array.
 CH_UNREVEALED = 0
 CH_FLAGGED = 1
-CH_NUM_0 = 2     # 已翻開空白 (數字 0)
+CH_NUM_0 = 2     # Revealed blank cell, number 0.
 CH_NUM_1 = 3
 CH_NUM_8 = 10
 CH_MINE = 11
@@ -27,16 +27,16 @@ NUM_CHANNELS = 12
 # ---------- Board difficulty presets ----------
 @dataclass(frozen=True)
 class BoardConfig:
-    """棋盤難度設定(rows × cols + mine 數)。"""
+    """Board difficulty settings: rows x cols plus mine count."""
     rows: int
     cols: int
     mines: int
 
 
 DIFFICULTIES: dict[str, BoardConfig] = {
-    # RL 訓練用的小盤,經驗上 6×6/4 可以快速收斂用來驗 pipeline。
+    # Small RL training board; 6x6/4 converges quickly enough to validate the pipeline.
     "training":     BoardConfig(rows=6,  cols=6,  mines=4),
-    # 標準 Minesweeper 三難度
+    # Standard Minesweeper difficulties.
     "Beginner":     BoardConfig(rows=9,  cols=9,  mines=10),
     "Intermediate": BoardConfig(rows=16, cols=16, mines=40),
     "Expert":       BoardConfig(rows=16, cols=30, mines=99),
@@ -44,7 +44,7 @@ DIFFICULTIES: dict[str, BoardConfig] = {
 
 
 def get_board_config(name: str) -> BoardConfig:
-    """根據難度名稱回傳對應 BoardConfig。未知名稱 raise KeyError 並列出可用 preset。"""
+    """Return BoardConfig by difficulty name; unknown names raise with available presets."""
     if name not in DIFFICULTIES:
         raise KeyError(
             f"Unknown difficulty {name!r}. Available: {sorted(DIFFICULTIES.keys())}"
@@ -54,30 +54,30 @@ def get_board_config(name: str) -> BoardConfig:
 
 @dataclass
 class ClickResult:
-    """左鍵點擊的回傳結果。"""
-    changed: bool = False                       # 畫面是否有變化
-    game_over: bool = False                     # 是否踩雷
-    win: bool = False                           # 是否贏了
-    revealed_cells: List[Tuple[int, int, int]] = field(default_factory=list)  # 新翻開的 [(r, c, number), ...]
-    hit_mine: Optional[Tuple[int, int]] = None  # 踩到哪顆雷
+    """Left-click result."""
+    changed: bool = False                       # Whether the board changed.
+    game_over: bool = False                     # Whether a mine was hit.
+    win: bool = False                           # Whether the game was won.
+    revealed_cells: List[Tuple[int, int, int]] = field(default_factory=list)  # Newly revealed [(r, c, number), ...].
+    hit_mine: Optional[Tuple[int, int]] = None  # Mine that was hit.
 
 
 @dataclass
 class FlagResult:
-    """右鍵插旗的回傳結果。"""
-    toggled: bool = False       # 是否有切換
-    is_flagged: bool = False    # 切換後是否有旗子
+    """Right-click flag result."""
+    toggled: bool = False       # Whether flag state changed.
+    is_flagged: bool = False    # Whether the cell is flagged after toggling.
 
 
 class MinesweeperLogic:
-    """踩地雷純遊戲邏輯，不依賴任何 UI。"""
+    """Pure Minesweeper logic with no UI dependency."""
 
     def __init__(self, rows: int = 10, cols: int = 10, mines_count: int = 10):
         self.rows = rows
         self.cols = cols
         self.mines_count = mines_count
 
-        # 遊戲狀態
+        # Game state.
         self.mines = set()
         self.revealed = set()
         self.flags = set()
@@ -87,7 +87,7 @@ class MinesweeperLogic:
         self.remaining_mines = mines_count
 
     def reset(self):
-        """重置遊戲到初始狀態。"""
+        """Reset the game to its initial state."""
         self.mines = set()
         self.revealed = set()
         self.flags = set()
@@ -97,17 +97,17 @@ class MinesweeperLogic:
         self.remaining_mines = self.mines_count
 
     def click(self, row: int, col: int) -> ClickResult:
-        """左鍵點擊某格。
+        """Left-click one cell.
 
         Args:
-            row: 列 (0-indexed)
-            col: 行 (0-indexed)
+            row: Row (0-indexed)
+            col: Column (0-indexed)
         Returns:
             ClickResult
         """
         result = ClickResult()
 
-        # 超出範圍、已結束、已標旗、已翻開 → 無效點擊
+        # Out of bounds, ended, flagged, or revealed means invalid click.
         if not (0 <= row < self.rows and 0 <= col < self.cols):
             return result
         if self.game_over or self.is_win:
@@ -117,12 +117,12 @@ class MinesweeperLogic:
         if (row, col) in self.revealed:
             return result
 
-        # 第一次點擊：放地雷（保證第一下安全）
+        # First click: place mines while keeping the first click safe.
         if self.first_click:
             self.first_click = False
             self._place_mines(row, col)
 
-        # 翻開格子
+        # Reveal cells.
         newly_revealed = []
         self._reveal_cell(row, col, newly_revealed)
 
@@ -132,14 +132,14 @@ class MinesweeperLogic:
         result.changed = True
         result.revealed_cells = newly_revealed
 
-        # 檢查是否踩雷
+        # Check for mine hit.
         if (row, col) in self.mines:
             self.game_over = True
             result.game_over = True
             result.hit_mine = (row, col)
             return result
 
-        # 檢查是否贏了
+        # Check for win.
         if self._check_win():
             self.is_win = True
             result.win = True
@@ -147,11 +147,11 @@ class MinesweeperLogic:
         return result
 
     def flag(self, row: int, col: int) -> FlagResult:
-        """右鍵切換旗子。
+        """Right-click to toggle a flag.
 
         Args:
-            row: 列 (0-indexed)
-            col: 行 (0-indexed)
+            row: Row (0-indexed)
+            col: Column (0-indexed)
         Returns:
             FlagResult
         """
@@ -178,13 +178,13 @@ class MinesweeperLogic:
         return result
 
     def get_grid_state(self):
-        """取得目前 grid 狀態 (2D list)。
+        """Return current grid state as a 2D list.
 
         Returns:
-            list[list[int]]: 每格的值
-                -1 = 未翻開
-                -2 = 已標旗
-                0-8 = 已翻開的數字
+            list[list[int]]: Per-cell value:
+                -1 = unrevealed
+                -2 = flagged
+                0-8 = revealed number
         """
         grid = []
         for r in range(self.rows):
@@ -200,16 +200,16 @@ class MinesweeperLogic:
         return grid
 
     def get_grid_state_array(self):
-        """取得 one-hot 編碼的 grid state array。
+        """Return one-hot encoded grid state array.
 
         Returns:
             np.ndarray: shape (NUM_CHANNELS, rows, cols), float32
-                channel 0: 未翻開
-                channel 1: 已標旗
-                channel 2-10: 數字 0-8
-                channel 11: 地雷 (只有 game_over 時才可見)
+                channel 0: unrevealed
+                channel 1: flagged
+                channel 2-10: numbers 0-8
+                channel 11: mine, visible only after game_over
 
-        若呼叫端需要 torch tensor，請在外部用 ``torch.from_numpy(...)`` 轉換。
+        Callers that need a torch tensor should convert with ``torch.from_numpy(...)``.
         """
         arr = np.zeros((NUM_CHANNELS, self.rows, self.cols), dtype=np.float32)
 
@@ -219,7 +219,7 @@ class MinesweeperLogic:
                     arr[CH_FLAGGED, r, c] = 1.0
                 elif (r, c) in self.revealed:
                     if (r, c) in self.mines:
-                        # 踩雷後才看得到地雷
+                        # Mines are visible only after being hit.
                         arr[CH_MINE, r, c] = 1.0
                     else:
                         num = self._count_adjacent_mines(r, c)
@@ -230,7 +230,7 @@ class MinesweeperLogic:
         return arr
 
     def _get_neighbors(self, row: int, col: int):
-        """取得 (row, col) 的合法 8 鄰居座標。"""
+        """Return valid 8-neighbor coordinates for (row, col)."""
         neighbors = []
         for dr in [-1, 0, 1]:
             for dc in [-1, 0, 1]:
@@ -242,16 +242,16 @@ class MinesweeperLogic:
         return neighbors
 
     def get_logically_safe_cells(self):
-        """用約束傳播推導邏輯上安全的格子。
+        """Infer logically safe cells using constraint propagation.
 
-        只用可見資訊（翻開的數字 + 已知推導）做推理，
-        不直接用 self.mines 作弊。
+        Uses only visible information, revealed numbers plus inferred facts, and
+        does not read self.mines directly.
 
-        算法：反覆掃描所有翻開的數字格，做兩種推導：
-          1. 若某數字格周圍的未知地雷數 = 0 → 所有未知鄰居都安全
-          2. 若某數字格周圍的未知鄰居數 = 未知地雷數 → 所有未知鄰居都是雷
+        Algorithm: repeatedly scan all revealed numbered cells and infer:
+          1. If unknown mines around a number = 0, all unknown neighbors are safe.
+          2. If unknown neighbors = unknown mines, all unknown neighbors are mines.
 
-        重複直到沒有新推導。
+        Repeat until no new inference is possible.
 
         Returns:
             (safe_cells: set, inferred_mines: set)
@@ -269,7 +269,7 @@ class MinesweeperLogic:
                 k = self._count_adjacent_mines(nr, nc)
                 neighbors = self._get_neighbors(nr, nc)
 
-                # 分類鄰居
+                # Classify neighbors.
                 mine_count = 0
                 unknown = []
                 for (r, c) in neighbors:
@@ -283,20 +283,20 @@ class MinesweeperLogic:
                 remaining_mines = k - mine_count
 
                 if remaining_mines == 0 and unknown:
-                    # 所有未知鄰居都安全
+                    # All unknown neighbors are safe.
                     inferred_safe.update(unknown)
                     changed = True
                 elif remaining_mines > 0 and remaining_mines == len(unknown) and unknown:
-                    # 所有未知鄰居都是雷
+                    # All unknown neighbors are mines.
                     inferred_mines.update(unknown)
                     changed = True
 
         return inferred_safe, inferred_mines
 
-    # ---------- 內部方法 ----------
+    # ---------- Internal methods ----------
 
     def _place_mines(self, exclude_row: int, exclude_col: int):
-        """放地雷，排除第一次點擊的周圍 3x3。"""
+        """Place mines, excluding the first click's surrounding 3x3 area."""
         exclude = set()
         for dr in [-1, 0, 1]:
             for dc in [-1, 0, 1]:
@@ -310,7 +310,7 @@ class MinesweeperLogic:
         self.mines = set(random.sample(available, min(self.mines_count, len(available))))
 
     def _count_adjacent_mines(self, row: int, col: int) -> int:
-        """計算某格周圍的地雷數量。"""
+        """Count mines around one cell."""
         count = 0
         for dr in [-1, 0, 1]:
             for dc in [-1, 0, 1]:
@@ -322,21 +322,21 @@ class MinesweeperLogic:
         return count
 
     def _reveal_cell(self, row: int, col: int, newly_revealed: list):
-        """翻開一格（遞迴展開空白區域）。"""
+        """Reveal one cell, recursively expanding blank regions."""
         if (row, col) in self.revealed or (row, col) in self.flags:
             return
 
         self.revealed.add((row, col))
 
-        # 踩雷
+        # Hit mine.
         if (row, col) in self.mines:
-            newly_revealed.append((row, col, -1))  # -1 表示地雷
+            newly_revealed.append((row, col, -1))  # -1 means mine.
             return
 
         num = self._count_adjacent_mines(row, col)
         newly_revealed.append((row, col, num))
 
-        # 如果是空白格 (數字 0)，遞迴翻開周圍
+        # Blank cell, number 0: recursively reveal neighbors.
         if num == 0:
             for dr in [-1, 0, 1]:
                 for dc in [-1, 0, 1]:
@@ -347,7 +347,7 @@ class MinesweeperLogic:
                         self._reveal_cell(r, c, newly_revealed)
 
     def _check_win(self) -> bool:
-        """檢查是否贏了（所有非地雷格都翻開了）。"""
+        """Check whether all non-mine cells are revealed."""
         for r in range(self.rows):
             for c in range(self.cols):
                 if (r, c) not in self.mines and (r, c) not in self.revealed:

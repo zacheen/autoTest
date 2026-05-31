@@ -1,21 +1,23 @@
-"""history.py — Per-episode outcome tracker。
+"""Per-episode outcome tracker.
 
-從 AdaptiveEpsilonController 拆出來,符合 SRP:
-    - History 只負責「累積/查詢 episode 結果」
-    - AdaptiveEpsilonController 只負責「依 win rate 算 epsilon」(吃 win_rate 為參數)
+Split out from AdaptiveEpsilonController to keep responsibilities separate:
+    - History stores and queries episode results.
+    - AdaptiveEpsilonController computes epsilon from a supplied win rate.
 
-Class 結構:
-    - History          : base class,提供 record / win_rate / state_dict 等通用 API
-    - TrainingHistory  : training loop 用的 subclass(目前無額外行為,留作 namespace)
-    - eval 端目前直接 init 一個 ephemeral `History(max_capacity=num_episodes)`,
-      用 `window=None` 取整個 session 的 mean (見 run_fixed_policy_evaluation)。
-      之後若要做「跨 eval session 的時間序」再加 EvalHistory subclass。
+Class layout:
+    - History          : base class with record / win_rate / state_dict APIs.
+    - TrainingHistory  : training-loop subclass; currently namespace only.
+    - Eval currently creates ephemeral `History(max_capacity=num_episodes)` and
+      uses `window=None` for the whole-session mean (see run_fixed_policy_evaluation).
+      Add EvalHistory later if cross-session eval time series are needed.
 
-設計重點:
-    - max_capacity 預設 100,當 caller 要求更大的 window 時自動擴張
-      (rebuild deque + 把現有資料 copy 進去)
-    - Sample 不足時用「現有資料」直接算 — 跟 controller 舊行為一致,呼叫端不變
-    - state_dict() 自成一格,checkpoint 走獨立 .pth 檔(不再跟 optimizer state 混在一起)
+Key points:
+    - max_capacity defaults to 100 and grows automatically when callers request a
+      larger window.
+    - If samples are insufficient, compute from existing samples, matching old
+      controller behavior.
+    - state_dict() is separate; checkpoints use an independent .pth file instead
+      of mixing with optimizer state.
 """
 
 from __future__ import annotations
@@ -24,12 +26,12 @@ from collections import deque
 
 
 class History:
-    """Per-episode outcome tracker base class。
+    """Per-episode outcome tracker base class.
 
-    用法：
+    Usage:
         history = History()                      # max_capacity=100
-        history.record(win=True)                 # 每場 episode 結束呼叫一次
-        wr = history.win_rate(window=100)        # 取最後 100 場 win rate
+        history.record(win=True)                 # call once per episode end
+        wr = history.win_rate(window=100)        # last 100 episode win rate
     """
 
     def __init__(self, max_capacity: int = 100, step_reward_capacity: int = 100):
@@ -39,14 +41,12 @@ class History:
         self._steps: deque[int] = deque(maxlen=self._max_capacity)
         self._invalid_rates: deque[float] = deque(maxlen=self._max_capacity)
         self.total_episodes: int = 0
-        # Cumulative counter, NOT bounded by deque maxlen — 用來看「整段訓練
-        # 累積贏了幾場」。deque 內的 _results 只保留最後 N 場,sum(_results)
-        # 是 rolling 不是 cumulative,所以另存一個 int 才能正確反映歷史總數。
+        # Cumulative counter, NOT bounded by deque maxlen. _results only stores
+        # the last N episodes, so sum(_results) is rolling, not cumulative.
         self.total_wins: int = 0
-        # Per-transition raw reward(維度:每一筆 store_transition 都 append 一次)。
-        # 跟 episode-level _rewards 分開存:per-step 的 maxlen 跟 episode-level
-        # _max_capacity 解耦,避免 caller 要求大 window 時連帶把 step deque 撐大,
-        # 也避免 step rewards 被 episode 統計覆蓋。
+        # Per-transition raw reward, appended once per store_transition.
+        # Stored separately from episode-level _rewards so step maxlen is
+        # decoupled from episode _max_capacity and not overwritten by episode stats.
         self._step_max_capacity = int(max(1, step_reward_capacity))
         self._step_rewards: deque[float] = deque(maxlen=self._step_max_capacity)
 
@@ -54,7 +54,7 @@ class History:
     def max_capacity(self) -> int:
         return self._max_capacity
 
-    # ──────────────────────────── update ────────────────────────────
+    # update
 
     def record(
         self,
@@ -64,10 +64,11 @@ class History:
         steps: int = 0,
         invalid_rate: float = 0.0,
     ) -> None:
-        """Append a single episode outcome 與 reward / steps / invalid_rate。
+        """Append one episode outcome with reward / steps / invalid_rate.
 
-        total_reward / steps / invalid_rate 是 keyword-only 且有預設值,
-        讓舊呼叫端 `record(win=...)` 仍可運作 — 只是這場不會貢獻對應統計。
+        total_reward / steps / invalid_rate are keyword-only with defaults, so
+        old callers using `record(win=...)` still work; they just contribute 0 to
+        those stats.
         """
         win_int = int(bool(win))
         self._results.append(win_int)
@@ -77,20 +78,18 @@ class History:
         self.total_episodes += 1
         self.total_wins += win_int
 
-    # ──────────────────────────── query ─────────────────────────────
+    # query
 
     def _rolling_mean(self, source: deque, window: int | None) -> float:
-        """純 rolling mean —— 無 side effect,不擴 source、不動其他 deque。
+        """Pure rolling mean with no side effects or capacity growth.
 
-        - source 空    : 回 0.0
-        - window=None  : 用全部現有資料(eval session 慣用法,取整個 session mean)
-        - window <= len: 用最後 window 筆
-        - window > len : 用全部現有資料(sample 不足時直接拿手上有的,跟舊
-                         AdaptiveEpsilonController 的 rolling_win_rate 行為一致)
+        - empty source : return 0.0
+        - window=None  : use all existing samples (eval session mean)
+        - window <= len: use last window samples
+        - window > len : use all existing samples, matching old rolling_win_rate
 
-        想要「擴張 deque 等未來累積到 window 長度」的 caller 走
-        `_episode_rolling_mean(...)`(grow + mean 一體);step-level deque
-        (_step_rewards)直接 call 這個純版本,不會誤觸 episode-level capacity。
+        Call `_episode_rolling_mean(...)` when episode deques should grow for
+        future accumulation. Step-level deques call this pure version directly.
         """
         if not source:
             return 0.0
@@ -105,103 +104,93 @@ class History:
         return sum(samples) / len(samples)
 
     def _maybe_grow_episode_capacity(self, window: int | None) -> None:
-        """Episode-level helper:若 window > _max_capacity 就 grow,讓未來累積到
-        window 長度。Step-level deque(_step_rewards)不在此影響範圍內。
+        """Grow episode capacity when window exceeds _max_capacity.
 
-        抽出來給 episode-level mean 方法 + reward_per_step 重用,避免每個 caller
-        各貼一份 `if window > self._max_capacity: self._grow_capacity(window)`。
+        Step-level deque (_step_rewards) is outside this scope. Shared by
+        episode-level means and reward_per_step.
         """
         if window is not None and int(window) > self._max_capacity:
             self._grow_capacity(int(window))
 
     def _episode_rolling_mean(self, source: deque, window: int | None) -> float:
-        """Episode-level 專用入口:grow + mean。
+        """Episode-level entry point: grow then mean.
 
-        為什麼不直接把 grow 塞進 _rolling_mean:_rolling_mean 也給 step-level
-        (_step_rewards)用,而 step-level 的 maxlen 跟 episode-level 解耦,
-        不能誤觸 _grow_capacity。所以分成「純 _rolling_mean」與「會 grow 的
-        _episode_rolling_mean」兩個入口,各自有對應的 caller。
+        _rolling_mean is also used by step-level _step_rewards, whose maxlen is
+        decoupled from episode capacity, so growth is kept in this wrapper.
 
-        新增 episode-level metric 走這個入口;新增 step-level metric 直接
-        走純 _rolling_mean。
+        New episode-level metrics should use this entry; new step-level metrics
+        should call _rolling_mean directly.
         """
         self._maybe_grow_episode_capacity(window)
         return self._rolling_mean(source, window)
 
     def win_rate(self, window: int | None = 100) -> float:
-        """Rolling win rate over the last `window` episodes。
+        """Rolling win rate over the last `window` episodes.
 
-        window=None 表示「用全部現有資料」(eval session 慣用法)。
+        window=None means use all existing samples, typical for eval sessions.
 
-        若 window > 目前 max_capacity,先擴張 max_capacity (rebuild deque +
-        copy 現有資料);擴張後尚未累積到 window 場時,用「現有資料」直接算 —
-        跟舊 AdaptiveEpsilonController 的 rolling_win_rate() 行為一致。
+        If window exceeds max_capacity, grow first. Until enough samples are
+        accumulated, compute from existing samples, matching old behavior.
 
-        呼叫端拿到的數字會隨 sample 數逐步穩定;若對 sample 不足敏感,
-        可同時 query `len(history)` 或 `total_episodes` 自行判斷。
+        The value stabilizes as sample count grows. Callers sensitive to low
+        sample count can also check `len(history)` or `total_episodes`.
         """
         return self._episode_rolling_mean(self._results, window)
 
     def avg_reward(self, window: int | None = 100) -> float:
-        """Rolling 平均整場 reward (跨 window 場,每場一個值)。
+        """Rolling average total episode reward over the window.
 
-        window=None 表示「用全部現有資料」(eval session 慣用法)。
+        window=None uses all existing samples.
 
-        注意:這裡記的是「整場 total reward」,不是 per-step mean。
-        per-step mean 由 caller 自行從 (total_reward, steps) 算出。
+        This stores total episode reward, not per-step mean.
         """
         return self._episode_rolling_mean(self._rewards, window)
 
     def avg_steps(self, window: int | None = 100) -> float:
-        """Rolling 平均每場 step 數。window=None 用全部現有資料。"""
+        """Rolling average steps per episode. window=None uses all samples."""
         return self._episode_rolling_mean(self._steps, window)
 
     def avg_invalid_rate(self, window: int | None = 100) -> float:
-        """Rolling 平均每場 invalid click rate。window=None 用全部現有資料。
+        """Rolling average invalid-click rate per episode.
 
-        Caller 在 `record(invalid_rate=...)` 時要傳這場的 invalid rate
-        (0.0~1.0)。沒傳就視為 0.0,於是這場對 mean 的貢獻是 0。
+        Pass each episode's invalid rate (0.0 to 1.0) via record(). Missing
+        values default to 0.0.
         """
         return self._episode_rolling_mean(self._invalid_rates, window)
 
-    # ──────────────────────────── per-step reward ──────────────────
-    # 跟 per-episode 統計分開的 transition-level rolling reward,給 train_step
-    # 內的 `train/real_reward_mean` TB scalar 用。維護點:agent 的 store_transition
-    # 內每筆都 record_step_reward(reward)。讀取點:train_step 結尾的
-    # avg_step_reward()(window=None 用全部現有資料,等同 mean of deque)。
+    # per-step reward
+    # Transition-level rolling reward, separate from per-episode stats, for the
+    # `train/real_reward_mean` TB scalar in train_step. Agents call
+    # record_step_reward(reward) from store_transition; train_step reads
+    # avg_step_reward().
     #
-    # 未來若有其他 per-step 統計(例如 avg_step_loss),加一條 _step_xxx deque
-    # + record/query 兩個 method,query 內直接 call self._rolling_mean(self._step_xxx,
-    # window) 即可 —— 不要走 _episode_rolling_mean,step-level capacity 跟
-    # episode-level 解耦,不該誤觸 episode 端的 grow。
+    # Future per-step stats should add a _step_xxx deque plus record/query methods
+    # and call _rolling_mean directly, not _episode_rolling_mean.
 
     def record_step_reward(self, reward: float) -> None:
-        """Append 一筆 per-transition raw reward。"""
+        """Append one per-transition raw reward."""
         self._step_rewards.append(float(reward))
 
     def avg_step_reward(self, window: int | None = None) -> float:
-        """Rolling 平均 per-step raw reward(window=None 用全部現有資料)。
+        """Rolling average per-step raw reward; window=None uses all samples.
 
-        跟 episode-level avg_reward 分開:這條是「過去 N 筆 transition 的平均
-        reward」,episode-level 那條是「過去 N 場 episode 的 total reward 平均」。
-        deque maxlen 由 ctor 的 step_reward_capacity 控制(預設 100),不會被
-        episode-level _max_capacity 擴張連動 —— 所以走純 _rolling_mean,不走
-        _episode_rolling_mean(後者會 grow episode-level deque)。
+        Separate from episode-level avg_reward: this averages the last N
+        transitions, while avg_reward averages total reward over episodes.
+        Maxlen is controlled by step_reward_capacity and is not tied to episode
+        capacity, so use pure _rolling_mean.
         """
         return self._rolling_mean(self._step_rewards, window)
 
     def reward_per_step(self, window: int | None = 100) -> float:
-        """Rolling 平均「每場 per-step reward」(即 mean of (total_reward / steps))。
+        """Rolling mean of per-episode per-step reward.
 
-        語意:每場先算 reward_per_step = total_reward / max(steps, 1),再對
-        window 場取 mean — 每場「等權重」貢獻,跟 caller 原本傳的
-        episode-level `reward_mean` (TB scalar) 的滾動平均一致。
+        For each episode, compute total_reward / max(steps, 1), then average
+        over episodes. Each episode contributes equal weight.
 
-        替代語意 sum(rewards) / sum(steps) (steps 多的場貢獻較大) 不採用 —
-        前者對「這個 policy 平均每步賺多少」比較有直覺,後者偏向「資料密度」。
+        We do not use sum(rewards) / sum(steps), which weights longer episodes
+        more heavily and reflects data density instead of policy average.
 
-        window=None 用全部現有資料;沒有資料 → 0.0;steps=0 的單場視為 0。
-        Caller 沒傳 total_reward / steps 給 record(),這場貢獻 0/1=0。
+        window=None uses all samples. No data returns 0.0. steps=0 contributes 0.
         """
         if not self._rewards:
             return 0.0
@@ -218,12 +207,13 @@ class History:
     def __len__(self) -> int:
         return len(self._results)
 
-    # ──────────────────────────── internal ──────────────────────────
+    # internal
 
     def _grow_capacity(self, new_capacity: int) -> None:
-        """擴張所有 deque 的 maxlen。既有資料保留;sample 滿到新長度之前,
-        win_rate / avg_reward / avg_steps / avg_invalid_rate 會用「現有資料」算
-        (sample 不足的可接受 trade-off)。
+        """Grow all episode deque maxlen values while preserving existing data.
+
+        Until enough samples fill the new length, rolling metrics use existing
+        samples.
         """
         new_capacity = int(new_capacity)
         if new_capacity <= self._max_capacity:
@@ -234,7 +224,7 @@ class History:
         self._steps = deque(self._steps, maxlen=self._max_capacity)
         self._invalid_rates = deque(self._invalid_rates, maxlen=self._max_capacity)
 
-    # ──────────────────────────── checkpoint ────────────────────────
+    # checkpoint
 
     def state_dict(self) -> dict:
         return {
@@ -250,21 +240,17 @@ class History:
         }
 
     def load_state_dict(self, state: dict, *, deque_cls=deque) -> None:
-        """從 checkpoint dict 還原。
+        """Restore from checkpoint dict.
 
-        deque_cls 沿用舊 AdaptiveEpsilonController 的擴充點,允許 agent
-        注入自己的 deque 子類別(目前各 agent 都直接傳 collections.deque)。
+        deque_cls keeps the old AdaptiveEpsilonController extension point so
+        agents can inject a deque subclass. Current agents pass collections.deque.
 
-        相容性:
-            - 新格式 key 是 "results";舊扁平 checkpoint 用的是 "result_window",
-              這裡兩個都吃,讓 mixin 在 migration 階段可以直接餵舊 dict。
-            - "rewards" / "steps" / "invalid_rates" 是新加的 key;舊 checkpoint
-              沒有 → 用空 deque 讓新指標從 resume 之後重新累積
-              (avg_reward / avg_steps / avg_invalid_rate 初期會返回 0.0)。
-            - "total_wins" 在更舊扁平 checkpoint 裡有 (AdaptiveEpsilonController
-              曾經存過);中間版本拿掉了所以可能缺;這裡兩種情況都吃,缺
-              的時候用 sum(_results) 當下限近似 (至少反映 deque 內的 wins,
-              比 0 更接近真相)。
+        Compatibility:
+            - New key is "results"; old flat checkpoints used "result_window".
+            - Missing rewards / steps / invalid_rates use empty deques and
+              re-accumulate after resume.
+            - Missing total_wins falls back to sum(_results), a closer lower
+              bound than 0.
         """
         if not state:
             return
@@ -282,11 +268,10 @@ class History:
         if "total_wins" in state:
             self.total_wins = int(state["total_wins"])
         else:
-            # 缺 key 時用 sum(_results) 作下限近似 — 比預設 0 更接近真實值。
+            # Use sum(_results) as a lower-bound approximation if key is missing.
             self.total_wins = int(sum(self._results))
-        # step_rewards 在 v3 / stage1 把 recent_real_rewards 搬進來之後才加進
-        # state_dict;舊 checkpoint 缺 key 時用空 deque,real_reward_mean 在
-        # resume 後重新累積到 maxlen 之前會偏向初期樣本(可接受)。
+        # step_rewards was added after recent_real_rewards moved here from v3 /
+        # stage1. Old checkpoints use an empty deque and re-accumulate after resume.
         step_cap = int(state.get("step_reward_capacity", self._step_max_capacity))
         self._step_max_capacity = max(1, step_cap)
         step_rewards = state.get("step_rewards", [])
@@ -296,9 +281,9 @@ class History:
 
 
 class TrainingHistory(History):
-    """Training loop 用的 History subclass。
+    """History subclass for training loops.
 
-    base class 已包含 win / total_reward / steps 三個 rolling 統計,
-    training script 不再需要自己維護 recent_* deque,直接 query 這裡即可。
+    The base class already tracks rolling win / total_reward / steps, so training
+    scripts should query this instead of maintaining recent_* deques.
     """
     pass

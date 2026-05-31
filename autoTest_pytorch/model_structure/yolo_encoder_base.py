@@ -52,15 +52,17 @@ DEFAULT_ENCODER_NHEAD = 4
 DEFAULT_ENCODER_FF_MULT = 4
 DEFAULT_ENCODER_DROPOUT = 0.1
 
-# Encoder shape — 從 START_DIM 開始幾何壓縮 (每層除二) 直到 FINAL_DIM,再用 uniform
-# 層補滿到 TOTAL_LAYERS。START_DIM == FINAL_DIM 時 encoder 內不做壓縮,YOLO 128-ch →
-# FINAL_DIM 的維度轉換由 token_adapter (LayerNorm + Linear) 負責;此時 V3 encoder 就跟
-# Stage 1 的 EncoderDecoderTransformer 結構一致,可直接載 Stage 1 權重。把 START_DIM
-# 改回 YOLO_FEATURE_CHANNELS 則 encoder 第一層做 self-attn at d=128 再線性壓到 FINAL_DIM。
+# Encoder shape: geometrically compress from START_DIM to FINAL_DIM by halving
+# per layer, then fill the remaining layers uniformly. When START_DIM == FINAL_DIM,
+# the encoder does no compression; token_adapter (LayerNorm + Linear) maps YOLO
+# 128-ch features to FINAL_DIM. Then V3 matches Stage 1's EncoderDecoderTransformer
+# shape and can load Stage 1 weights directly. Setting START_DIM back to
+# YOLO_FEATURE_CHANNELS makes the first encoder layer self-attend at d=128 before
+# projecting to FINAL_DIM.
 # Both v3 and YOLOGridStatePredictor read DEFAULT_ENCODER_DIMS.
-DEFAULT_ENCODER_FINAL_DIM    = 64  # 編碼最終 dim (= decoder d_model)
-DEFAULT_ENCODER_TOTAL_LAYERS = 4   # encoder 總層數 (壓縮 + uniform);須 ≥ log2(start_dim/final_dim)
-DEFAULT_ENCODER_START_DIM    = DEFAULT_ENCODER_FINAL_DIM   # = FINAL_DIM → encoder 全 uniform
+DEFAULT_ENCODER_FINAL_DIM    = 64  # final encoder dim (= decoder d_model)
+DEFAULT_ENCODER_TOTAL_LAYERS = 4   # total encoder layers (compression + uniform); must be >= log2(start_dim/final_dim)
+DEFAULT_ENCODER_START_DIM    = DEFAULT_ENCODER_FINAL_DIM   # = FINAL_DIM -> all-uniform encoder
 
 
 def build_encoder_dims(
@@ -69,27 +71,29 @@ def build_encoder_dims(
     nhead: int = DEFAULT_ENCODER_NHEAD,
     start_dim: int = YOLO_FEATURE_CHANNELS,
 ) -> list[int]:
-    """建立 HierarchicalEncoder 的 dims list。
+    """Build the dims list for HierarchicalEncoder.
 
-    從 start_dim 每次除二降到 final_dim(壓縮段),再把 final_dim 重複
-    補滿 uniform 層直到層數 = total_layers。回傳的 list 長度 = total_layers + 1,
-    第一個元素是 token_adapter 輸出 dim (= start_dim),其餘 total_layers
-    個是每層的輸出 dim。
+    Halve from start_dim down to final_dim for the compression segment, then
+    repeat final_dim until the layer count reaches total_layers. Returned list
+    length is total_layers + 1. The first item is token_adapter output dim
+    (= start_dim); the remaining total_layers items are per-layer output dims.
 
-    start_dim 預設 = YOLO_FEATURE_CHANNELS,token_adapter 不做維度壓縮、encoder 內負責;
-    若 start_dim == final_dim,encoder 全 uniform,token_adapter 負責把 YOLO_FEATURE_CHANNELS
-    壓到 final_dim(此時結構等同 Stage 1 的 EncoderDecoderTransformer)。
+    Default start_dim is YOLO_FEATURE_CHANNELS, so token_adapter does not
+    compress and encoder handles it. If start_dim == final_dim, the encoder is
+    all-uniform and token_adapter compresses YOLO_FEATURE_CHANNELS to final_dim,
+    matching Stage 1's EncoderDecoderTransformer shape.
 
-    範例:
-        build_encoder_dims(32, 5)               → [128, 64, 32, 32, 32, 32]   (2 壓縮 + 3 uniform)
-        build_encoder_dims(64, 4)               → [128, 64, 64, 64, 64]       (1 壓縮 + 3 uniform)
-        build_encoder_dims(32, 2)               → [128, 64, 32]               (純壓縮,無 uniform)
-        build_encoder_dims(128, 4)              → [128, 128, 128, 128, 128]   (純 uniform,無壓縮)
-        build_encoder_dims(64, 4, start_dim=64) → [64, 64, 64, 64, 64]        (壓縮交給 token_adapter,encoder 純 uniform)
+    Examples:
+        build_encoder_dims(32, 5)               -> [128, 64, 32, 32, 32, 32]   (2 compression + 3 uniform)
+        build_encoder_dims(64, 4)               -> [128, 64, 64, 64, 64]       (1 compression + 3 uniform)
+        build_encoder_dims(32, 2)               -> [128, 64, 32]               (compression only)
+        build_encoder_dims(128, 4)              -> [128, 128, 128, 128, 128]   (uniform only)
+        build_encoder_dims(64, 4, start_dim=64) -> [64, 64, 64, 64, 64]        (token_adapter compresses; encoder uniform)
 
     Raises:
-        ValueError: final_dim/start_dim 不是 2 的次方、不在 [nhead, start_dim] 區間、
-                    start_dim 不能整除 final_dim、或 total_layers 不夠壓到目標。
+        ValueError: final_dim/start_dim ratio is not a power of 2, final_dim is
+                    outside [nhead, start_dim], start_dim is not divisible by
+                    final_dim, or total_layers is too small.
     """
     if not isinstance(final_dim, int) or final_dim <= 0:
         raise ValueError(f"final_dim must be a positive int, got {final_dim!r}")
@@ -112,7 +116,7 @@ def build_encoder_dims(
             f"(got ratio={ratio}); final_dim must be a power-of-2 divisor of start_dim."
         )
 
-    # 壓縮段:start_dim → start_dim/2 → ... → final_dim
+    # Compression segment: start_dim -> start_dim/2 -> ... -> final_dim.
     compression: list[int] = []
     d = start_dim
     while d > final_dim:

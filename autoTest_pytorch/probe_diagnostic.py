@@ -1,14 +1,14 @@
 """
-Probing Diagnostic — 診斷 Transformer Minesweeper agent 訓練失敗原因。
+Probing Diagnostic: diagnose Transformer Minesweeper agent training failures.
 
-Probe 1: Attention Pattern — attention heads 有學到看鄰居嗎?
-Probe 3: Q-Value Landscape — critic 能分辨安全格 vs 地雷格嗎?
+Probe 1: Attention Pattern: did attention heads learn to look at neighbors?
+Probe 3: Q-Value Landscape: can the critic separate safe cells from mines?
 
-執行方式:
+Usage:
   cd autoTest_pytorch
   python probe_diagnostic.py
 
-輸出:
+Output:
   models/stage1_transformer/probe_report.txt
 """
 
@@ -22,12 +22,12 @@ from collections import defaultdict
 from Minesweeper.MinesweeperLogic import MinesweeperLogic, BoardConfig
 from RL_Agent import GRID_STATE_CHANNELS, device
 from transformer_discrete_agent import TRANSFORMER_MODEL_PATH, TransformerActorNetwork
-# Probe 跟 train 用同一份難度設定 — train 決定挑哪個 preset。
+# Probe uses the same difficulty setting as training; train chooses the preset.
 from train_stage1_simple import GRID_CONFIG
 
 REPORT_PATH = TRANSFORMER_MODEL_PATH / 'probe_report.txt'
 SEEDS = [42, 123, 7]
-NUM_EXTRA_CLICKS = 3  # 第一次點擊後再多點幾下產生 frontier
+NUM_EXTRA_CLICKS = 3  # Extra clicks after the first click to create a frontier.
 
 
 # ============================================================
@@ -35,7 +35,7 @@ NUM_EXTRA_CLICKS = 3  # 第一次點擊後再多點幾下產生 frontier
 # ============================================================
 
 def get_neighbors(r, c, rows, cols):
-    """取得 (r, c) 的合法鄰居座標。"""
+    """Return valid neighbor coordinates for (r, c)."""
     neighbors = []
     for dr in [-1, 0, 1]:
         for dc in [-1, 0, 1]:
@@ -48,17 +48,17 @@ def get_neighbors(r, c, rows, cols):
 
 
 def create_game_state(seed: int, config: BoardConfig):
-    """建立一個有 frontier 的遊戲局面。
+    """Create a game state with a frontier.
 
     Returns:
         (logic, state_tensor)
     """
     random.seed(seed)
     logic = MinesweeperLogic(rows=config.rows, cols=config.cols, mines_count=config.mines)
-    # 第一次點擊中央，觸發 flood-fill
+    # First click in the center to trigger flood-fill.
     logic.click(logic.rows // 2, logic.cols // 2)
 
-    # 再多點幾個安全的未翻開格
+    # Click a few more safe unrevealed cells.
     safe_unrevealed = [
         (r, c) for r in range(logic.rows) for c in range(logic.cols)
         if (r, c) not in logic.mines and (r, c) not in logic.revealed
@@ -73,7 +73,7 @@ def create_game_state(seed: int, config: BoardConfig):
 
 
 def format_grid_with_mines(logic):
-    """畫出 grid，標記地雷位置 M。"""
+    """Render the grid as text and mark mines as M."""
     grid = logic.get_grid_state()
     lines = []
     lines.append("    " + "  ".join(f"{c}" for c in range(logic.cols)))
@@ -96,12 +96,12 @@ def format_grid_with_mines(logic):
 
 
 def get_numbered_cells(logic):
-    """找出所有已翻開且數字 >= 1 的 frontier cells。"""
+    """Find all revealed frontier cells with number >= 1."""
     grid = logic.get_grid_state()
     cells = []
     for r in range(logic.rows):
         for c in range(logic.cols):
-            if grid[r][c] >= 1:  # 已翻開、數字 1-8
+            if grid[r][c] >= 1:  # Revealed number 1-8.
                 cells.append((r, c, grid[r][c]))
     return cells
 
@@ -111,7 +111,7 @@ def get_numbered_cells(logic):
 # ============================================================
 
 def extract_attention_weights(actor, state_tensor):
-    """用 hooks 擷取每層 self_attn 的 attention weights。
+    """Capture each layer self_attn attention weights with hooks.
 
     Returns:
         attn_store: dict[layer_idx] → (1, nhead, T, T) where T = num_tokens
@@ -141,15 +141,15 @@ def extract_attention_weights(actor, state_tensor):
         h2 = layer.self_attn.register_forward_hook(make_post(layer_idx))
         handles.extend([h1, h2])
 
-    # Forward pass (用 train mode 避免 PyTorch fast path 繞過 self_attn hooks)
-    # no_grad 確保不會更新任何參數，dropout 的影響對診斷可忽略
+    # Forward pass in train mode so PyTorch fast path does not bypass hooks.
+    # no_grad prevents parameter updates; dropout noise is acceptable for diagnostics.
     actor.train()
     with torch.no_grad():
         state_batch = state_tensor.unsqueeze(0).to(device)
         probs, _ = actor(state_batch)
     actor.eval()
 
-    # 移除 hooks
+    # Remove hooks.
     for h in handles:
         h.remove()
 
@@ -157,7 +157,7 @@ def extract_attention_weights(actor, state_tensor):
 
 
 def analyze_attention(attn_store, logic, f):
-    """分析 attention pattern，寫入報告。
+    """Analyze attention pattern and write the report section.
 
     Returns:
         metrics dict
@@ -171,7 +171,7 @@ def analyze_attention(attn_store, logic, f):
     num_heads = attn_store[0].shape[1]
     num_cells = logic.rows * logic.cols  # = num_tokens (attn shape: (1, h, T, T))
 
-    # 計算每層每 head 的鄰居 attention 比例
+    # Compute neighbor-attention ratio for each layer/head.
     layer_head_ratios = defaultdict(list)  # (layer, head) → [ratios]
     layer_head_entropies = defaultdict(list)
 
@@ -190,14 +190,14 @@ def analyze_attention(attn_store, logic, f):
                 ent = -(attn * torch.log(attn + 1e-10)).sum().item()
                 layer_head_entropies[(li, hi)].append(ent)
 
-    # 彙總
+    # Summarize.
     avg_ratios = {}
     avg_entropies = {}
     for key in layer_head_ratios:
         avg_ratios[key] = np.mean(layer_head_ratios[key])
         avg_entropies[key] = np.mean(layer_head_entropies[key])
 
-    # 找最好的 head
+    # Find the best head.
     best_key = max(avg_ratios, key=avg_ratios.get)
     best_ratio = avg_ratios[best_key]
 
@@ -207,13 +207,13 @@ def analyze_attention(attn_store, logic, f):
     overall_ratio = np.mean(all_ratios)
     overall_entropy = np.mean(all_entropies)
 
-    # 中央格的鄰居數作為「uniform attention」基線(corner = 3, edge = 5, center = 8)。
+    # Use the center-cell neighbor count as the uniform-attention baseline.
     center_neighbors = len(get_neighbors(logic.rows // 2, logic.cols // 2,
                                          rows=logic.rows, cols=logic.cols))
     uniform_baseline = center_neighbors / num_cells
     uniform_entropy = float(np.log(num_cells))
 
-    # 寫入 per-layer summary
+    # Write per-layer summary.
     f.write(f"\n  Per-layer neighbor attention ratio (baseline={uniform_baseline:.2f}):\n")
     for li in range(num_layers):
         head_strs = []
@@ -231,7 +231,7 @@ def analyze_attention(attn_store, logic, f):
     f.write(f"\n  Best head: Layer {best_key[0]} Head {best_key[1]}"
             f" (neighbor ratio={best_ratio:.3f})\n")
 
-    # 印出 best head 在前 3 個 numbered cell 的 attention heatmap
+    # Print best-head attention heatmaps for the first 3 numbered cells.
     show_cells = numbered_cells[:3]
     for r, c, num in show_cells:
         tok = r * logic.cols + c
@@ -274,7 +274,7 @@ def analyze_attention(attn_store, logic, f):
 # ============================================================
 
 def analyze_q_values(backbone, q_network, state_tensor, logic, f):
-    """分析 Q-value landscape，寫入報告。
+    """Analyze Q-value landscape and write the report section.
 
     Returns:
         metrics dict
@@ -289,7 +289,7 @@ def analyze_q_values(backbone, q_network, state_tensor, logic, f):
 
     q_grid = q_min.reshape(logic.rows, logic.cols)
 
-    # 分類 cells
+    # Classify cells.
     safe_qs = []
     mine_qs = []
     revealed_count = 0
@@ -303,7 +303,7 @@ def analyze_q_values(backbone, q_network, state_tensor, logic, f):
             else:
                 safe_qs.append(q_grid[r, c])
 
-    # Q-value grid 文字
+    # Q-value grid text.
     f.write("\n  Q-Values (min of twin Q):\n")
     f.write("       " + "      ".join(f"{cc}" for cc in range(logic.cols)) + "\n")
 
@@ -320,7 +320,7 @@ def analyze_q_values(backbone, q_network, state_tensor, logic, f):
 
     f.write(f"  ---- = revealed, M = mine\n")
 
-    # 統計
+    # Statistics.
     safe_qs = np.array(safe_qs) if safe_qs else np.array([0.0])
     mine_qs = np.array(mine_qs) if mine_qs else np.array([0.0])
 
@@ -330,7 +330,7 @@ def analyze_q_values(backbone, q_network, state_tensor, logic, f):
     all_unrevealed = np.concatenate([safe_qs, mine_qs])
     q_std = all_unrevealed.std()
 
-    # Rank accuracy: safe cells 中 Q > median mine Q 的比例
+    # Rank accuracy: ratio of safe cells with Q > median mine Q.
     if len(mine_qs) > 0 and len(safe_qs) > 0:
         mine_median = np.median(mine_qs)
         rank_acc = (safe_qs > mine_median).mean() * 100
@@ -361,7 +361,7 @@ def analyze_q_values(backbone, q_network, state_tensor, logic, f):
 # ============================================================
 
 def generate_verdict(attn_metrics_list, q_metrics_list, f, config: BoardConfig):
-    """根據所有 probe 結果產生診斷結論。"""
+    """Generate diagnostic verdict from all probe results."""
     f.write("\n" + "=" * 55 + "\n")
     f.write("  DIAGNOSTIC VERDICT\n")
     f.write("=" * 55 + "\n")
@@ -372,7 +372,7 @@ def generate_verdict(attn_metrics_list, q_metrics_list, f, config: BoardConfig):
         avg_ratio = np.mean([m['overall_ratio'] for m in valid_attn])
         avg_entropy = np.mean([m['overall_entropy'] for m in valid_attn])
         best_ratio = max(m['best_ratio'] for m in valid_attn)
-        # baseline / uniform 由 analyze_attention 從 logic.rows × logic.cols 算好寫進 metrics
+        # analyze_attention computes baseline / uniform from logic.rows x logic.cols.
         uniform_baseline = valid_attn[0]['uniform_baseline']
         uniform_entropy = valid_attn[0]['uniform_entropy']
 
@@ -411,7 +411,7 @@ def generate_verdict(attn_metrics_list, q_metrics_list, f, config: BoardConfig):
         f.write(f"    Avg Q std:           {avg_std:.4f}\n")
         f.write(f"    STATUS: {q_status}\n")
 
-    # Overall — entropy target 用 log(num_cells) 而不是寫死,跟 attention probe 的 uniform 一致
+    # Overall: use log(num_cells) as entropy target, consistent with attention probe uniform.
     entropy_target = (
         valid_attn[0]['uniform_entropy'] if valid_attn else float(np.log(config.rows * config.cols))
     )
@@ -428,7 +428,7 @@ def generate_verdict(attn_metrics_list, q_metrics_list, f, config: BoardConfig):
 # ============================================================
 
 def main():
-    # 檢查 model 檔案
+    # Check model files.
     actor_path = TRANSFORMER_MODEL_PATH / 'actor.pth'
     critic_path = TRANSFORMER_MODEL_PATH / 'critic.pth'
 
@@ -439,7 +439,7 @@ def main():
         print(f"ERROR: Critic model not found at {critic_path}")
         sys.exit(1)
 
-    # 載入 models
+    # Load models.
     print("Loading models...")
     actor = TransformerActorNetwork().to(device)
     actor.load_state_dict(torch.load(actor_path, map_location=device))
@@ -451,7 +451,7 @@ def main():
 
     print(f"Models loaded from {TRANSFORMER_MODEL_PATH}")
 
-    # 開啟報告檔
+    # Open report file.
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(REPORT_PATH, 'w', encoding='utf-8') as f:
         f.write("=" * 55 + "\n")
@@ -474,7 +474,7 @@ def main():
             f.write(f"\n--- PROBE 1: ATTENTION PATTERN ---\n")
             attn_store, probs = extract_attention_weights(actor, state)
 
-            # 印出 action probs top-5
+            # Print action-probability top 5.
             p = probs[0]
             top5_vals, top5_idx = p.topk(5)
             f.write(f"\n  Action probs top-5:\n")

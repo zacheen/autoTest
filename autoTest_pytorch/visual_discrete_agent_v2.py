@@ -71,7 +71,7 @@ GRID_H = 6
 GRID_W = 6
 NUM_ACTIONS = GRID_H * GRID_W
 VISUAL_BATCH_SIZE   = 20
-VISUAL_WARMUP_STEPS = 1000   # 不到這個數量不開始訓練
+VISUAL_WARMUP_STEPS = 1000   # Do not train before this many samples.
 
 # ── training hyper-params ────────────────────────────────────────────
 VISUAL_N_STEP = 1
@@ -83,9 +83,9 @@ VISUAL_HISTOGRAM_EVERY = 20
 USE_AMP = False
 
 # ── YOLO training control ─────────────────────────────────────────────
-# False = 診斷模式：backward 會流過 YOLO（可量測 grad），但 grad 在
-#         optimizer.step() 前被清零，YOLO 參數不會被更新。
-# True  = 完整訓練：YOLO 和 backbone/head 一起更新。
+# False = diagnostic mode: backward flows through YOLO so grads can be measured,
+#         but YOLO grads are zeroed before optimizer.step(), so parameters stay fixed.
+# True  = full training: update YOLO together with backbone/head.
 YOLO_UPDATE_ENABLED = False
 
 # ── learning rates per module group ──────────────────────────────────
@@ -193,21 +193,20 @@ class VisualAgentV2(VisualAgentCommonMixin):
 
         # ── episode / step bookkeeping ──
         self.total_it = 0
-        # episode_count 改成 @property delegate 到 training_history.total_episodes,
-        # 單一 source of truth — 不再維護獨立 counter。
+        # episode_count delegates to training_history.total_episodes as the single
+        # source of truth; no separate counter is maintained.
         self.train_every_n_steps = TRAIN_EVERY_N_STEPS
         self.pending_train_steps = 0
         self.n_step = VISUAL_N_STEP
         self.n_step_gamma = MINESWEEPER_REWARD_CONFIG.gamma
         self.n_step_buffer = deque()
-        # recent_real_rewards 搬到 TrainingHistory._step_rewards;store_transition
-        # 內 call self.training_history.record_step_reward(reward),train_step 結尾
-        # 用 self.training_history.avg_step_reward() 拿 rolling mean。跟 v3 / stage1
-        # 共用同一個 method。
+        # recent_real_rewards moved to TrainingHistory._step_rewards. store_transition
+        # records rewards, and train_step reads the rolling mean via avg_step_reward().
+        # Shared with v3 / stage1.
 
         # ── adaptive epsilon state (win-rate based) ──
-        # v2 沿用較寬的 wr_max=0.9（與 v3 的 0.85 不同）— 透過 controller 參數注入。
-        # Episode 結果累積/查詢交給 TrainingHistory,controller 只吃 win_rate。
+        # v2 keeps a wider wr_max=0.9, unlike v3's 0.85, injected via controller args.
+        # Episode accumulation/querying lives in TrainingHistory; controller only uses win_rate.
         self.epsilon_controller = AdaptiveEpsilonController(
             wr_min=0.1,
             wr_max=0.9,
@@ -252,9 +251,9 @@ class VisualAgentV2(VisualAgentCommonMixin):
     def episode_count_public(self) -> int:
         return self.training_history.total_episodes
 
-    # episode_count delegate 到 training_history.total_episodes — 由
-    # log_episode_metrics() 內的 history.record() 自動 += 1,on_episode_end
-    # 不再 increment。Read-only,setter 沒提供(資料源應該是 history)。
+    # episode_count delegates to training_history.total_episodes. history.record()
+    # inside log_episode_metrics() increments it, so on_episode_end does not.
+    # Read-only; no setter because history is the source of truth.
     @property
     def episode_count(self) -> int:
         return self.training_history.total_episodes
@@ -427,7 +426,7 @@ class VisualAgentV2(VisualAgentCommonMixin):
     def train_step(self):
         buf_size = self.replay_buffer.size()
         if buf_size < VISUAL_WARMUP_STEPS:
-            return None   # warm-up: buffer 未達 VISUAL_WARMUP_STEPS 不訓練
+            return None   # Warm-up: do not train until buffer reaches VISUAL_WARMUP_STEPS.
 
         self.total_it += 1
         state, action, next_state, reward, done, sample_indices, is_weights, discounts, n_steps = (
@@ -456,14 +455,14 @@ class VisualAgentV2(VisualAgentCommonMixin):
                 target_quantiles = reward + (1 - done) * discounts * next_target_quantiles
 
         # ── current branch (gradients flow through YOLO → backbone → head) ──
-        # 不呼叫 predict_grid_state（內部有 @torch.no_grad + self.eval()，會完全
-        # 阻斷 YOLO 的梯度）。直接呼叫 forward() 取 logits，接 scaled-sigmoid
-        # 作為 differentiable 的 grid-state 表示。
+        # Do not call predict_grid_state; it uses @torch.no_grad + self.eval(),
+        # which blocks YOLO gradients. Call forward() directly for logits, then
+        # build a differentiable grid-state representation.
         with torch.autocast(device_type=device.type, dtype=torch.float16,
                             enabled=(USE_AMP and device.type == "cuda")):
-            # hard one-hot — 與 train_stage1_simple.py 的 input 格式完全相同
-            # 以便確認 Q_loss 是否從 Stage 1 繼承（argmax 會阻斷 YOLO 梯度，
-            # 但 yolo_pre 仍能量測到 0，代表梯度確實被擋住了）
+            # Hard one-hot: exactly matches train_stage1_simple.py input format.
+            # This checks whether Q_loss carries over from Stage 1. argmax blocks
+            # YOLO gradients, and yolo_pre staying 0 confirms the block.
             yolo_logits = self.yolo_predictor.forward(state, self.grid_h, self.grid_w)
             pred        = yolo_logits.argmax(dim=1, keepdim=True)          # (B, 1, H, W)
             grid_state  = torch.zeros_like(yolo_logits).scatter_(1, pred, 1.0)  # (B, 12, H, W) one-hot
@@ -503,7 +502,8 @@ class VisualAgentV2(VisualAgentCommonMixin):
         backbone_pre = self._module_grad_norm(self.backbone)
         head_pre     = self._module_grad_norm(self.q_network)
 
-        # 診斷模式：grad 已記錄，清空 YOLO grad → optimizer.step() 不更新 YOLO
+        # Diagnostic mode: grads were recorded, then zero YOLO grads so optimizer.step()
+        # does not update YOLO.
         if not YOLO_UPDATE_ENABLED:
             for p in self.yolo_predictor.parameters():
                 if p.grad is not None:
@@ -515,7 +515,7 @@ class VisualAgentV2(VisualAgentCommonMixin):
         )
         grad_norm_total = torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=VISUAL_GRAD_CLIP_NORM)
 
-        yolo_post     = self._module_grad_norm(self.yolo_predictor)  # 診斷模式は 0
+        yolo_post     = self._module_grad_norm(self.yolo_predictor)  # Diagnostic mode: 0.
         backbone_post = self._module_grad_norm(self.backbone)
         head_post     = self._module_grad_norm(self.q_network)
 
@@ -529,7 +529,7 @@ class VisualAgentV2(VisualAgentCommonMixin):
         # ── logging ──
         with torch.no_grad():
             q_mean = q_taken.mean().item()
-            # raw reward rolling mean(來源:training_history._step_rewards)。
+            # Raw reward rolling mean from training_history._step_rewards.
             real_reward_mean = self.training_history.avg_step_reward()
             q0 = q_2d[0].view(-1)
             top_vals, top_idx = torch.topk(q0, k=min(5, self.num_actions))
@@ -553,7 +553,7 @@ class VisualAgentV2(VisualAgentCommonMixin):
         self.tb_writer.add_scalar("train/q_mean",           q_mean,                       self.total_it)
         self.tb_writer.add_scalar("train/real_reward_mean", real_reward_mean,             self.total_it)
         self.tb_writer.add_scalar("train/epsilon",          self.epsilon,                 self.total_it)
-        # td_error 診斷：找出 Q_loss 大的原因
+        # td_error diagnostics: find why Q_loss is large.
         self.tb_writer.add_scalar("train/td_error_mean",   td_error.mean().item(),       self.total_it)
         self.tb_writer.add_scalar("train/td_error_max",    td_error.max().item(),        self.total_it)
         self.tb_writer.add_scalar("train/target_q_mean",   target_quantiles.float().mean().item(), self.total_it)
@@ -590,8 +590,8 @@ class VisualAgentV2(VisualAgentCommonMixin):
 
     def on_episode_end(self) -> None:
         self._flush_n_step_buffer()
-        # episode_count 是 @property delegate,history.record() 已自動 += 1。
-        # epsilon 也已在 log_episode_metrics() 透過 controller.update 更新好。
+        # episode_count is a property delegate; history.record() already incremented it.
+        # epsilon was also updated through controller.update() in log_episode_metrics().
         self.tb_writer.add_scalar("episode/epsilon", self.epsilon, self.episode_count)
         self._save_model()
         if self.episode_count % SAVE_EVERY_N_EPISODES == 0:
@@ -599,10 +599,10 @@ class VisualAgentV2(VisualAgentCommonMixin):
             self.save_persistent()
 
     def log_episode_metrics(self, win: bool, invalid_click_rate: float, reward_mean: float) -> None:
-        # 1) 先把結果記到 history,2) 從 history 取 rolling win rate,
-        # 3) 用 win rate 餵 controller 更新 epsilon。
-        # 注意:v2 沒有 total_reward / steps 可傳,只 wire invalid_rate;
-        # avg_reward / reward_per_step 這邊會永遠為 0,需要的話 caller 再補。
+        # 1) Record result to history. 2) Read rolling win rate from history.
+        # 3) Feed win rate to controller to update epsilon.
+        # v2 has no total_reward / steps to pass, only invalid_rate; avg_reward /
+        # reward_per_step stay 0 unless the caller supplies them later.
         self.training_history.record(win=win, invalid_rate=invalid_click_rate)
         ep_idx = self.training_history.total_episodes
         rolling_wr = self.training_history.win_rate(window=100)
