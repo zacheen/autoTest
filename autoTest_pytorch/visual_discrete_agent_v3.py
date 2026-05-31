@@ -156,8 +156,7 @@ IMAGE_SIZE = (640, 640)
 GRID_H = 6
 GRID_W = 6
 NUM_ACTIONS = GRID_H * GRID_W
-VISUAL_BATCH_SIZE = 32
-MINIMUM_DATA_SIZE = 2000 # below this amount, won't start training
+BATCH_SIZE = 32
 
 # ── Encoder dims ─────────────────────────────────────────────────────
 # 形狀由 model_structure.yolo_encoder_base 的 DEFAULT_ENCODER_FINAL_DIM /
@@ -181,8 +180,8 @@ DECODER_DROPOUT    = 0.1
 DROPOUT_LATCH_WR_THRESHOLD = 0.4
 
 # ── training hyper-params ────────────────────────────────────────────
-VISUAL_N_STEP = 1
-VISUAL_GRAD_CLIP_NORM = 10.0   # 與 TransformerDiscreteAgent 對齊；token_adapter + encoder 加入可訓練後仍維持 10.0
+N_STEP = 1
+GRAD_CLIP_NORM = 10.0   # 與 TransformerDiscreteAgent 對齊；token_adapter + encoder 加入可訓練後仍維持 10.0
 TRAIN_EVERY_N_STEPS = 1
 TARGET_UPDATE_FREQ = 200
 SAVE_EVERY_N_EPISODES = 500
@@ -215,27 +214,28 @@ LR_WARMUP_START_FACTOR  = 0.0
 LR_RESUME_WARMUP_STEPS  = 2000   # 每次重啟（包含第一次）的額外 warmup 長度
 
 # ── replay buffer ────────────────────────────────────────────────────
-VISUAL_BUFFER_CAPACITY = 2048
-VISUAL_SAVE_CAPACITY   = 512
-VISUAL_BUFFER_OVERFLOW = 256
-VISUAL_PER_ALPHA       = 0.6
-VISUAL_PER_UNIFORM_MIX = 0.2
-VISUAL_PRIORITY_MIN    = 0.05
-VISUAL_PRIORITY_MAX    = 5.0
-VISUAL_PRIORITY_EPS    = 1e-3
-VISUAL_AGE_DECAY       = 0.002
+BUFFER_CAPACITY = 2048
+SAVE_CAPACITY   = 512
+MINIMUM_DATA_SIZE = min(BUFFER_CAPACITY, SAVE_CAPACITY*4)-1  # below this amount, won't start training
+BUFFER_OVERFLOW = 256
+PER_ALPHA       = 0.6
+PER_UNIFORM_MIX = 0.2
+PRIORITY_MIN    = 0.05
+PRIORITY_MAX    = 5.0
+PRIORITY_EPS    = 1e-3
+AGE_DECAY       = 0.002
 # PER β annealing — 對齊 transformer_discrete_agent.py 的 PER_BETA_START/END。
 # β 從 BETA_START 線性 anneal 到 BETA_END,在 episode_count = BETA_EP 時飽和。
 # β 小 → IS weight 偏平均(弱修正,訓練初期穩);β=1 → 完全修正 priority 抽樣 bias。
-VISUAL_PER_BETA_START  = 0.4
-VISUAL_PER_BETA_END    = 1.0
-VISUAL_PER_BETA_EP     = 5000
+PER_BETA_START  = 0.4
+PER_BETA_END    = 1.0
+PER_BETA_EP     = 5000
 # PER spread_decay latch — 對齊 transformer_discrete_agent.py 的 spread_decay 設計。
 # FQF quantile spread 進 priority modifier:wide spread = uncertain prediction → 抑制
 # 這類 sample 的有效 priority(避免被 env 隨機性主宰)。起步關閉(early RL variance
 # 大,spread 不能代表 uncertainty);win_rate(100) > LATCH_WR_THRESHOLD 後一次性
 # latch ON、永不關回 — 跟 dropout latch 同 threshold、同 monotone 設計。
-VISUAL_SPREAD_DECAY             = 2.0
+SPREAD_DECAY             = 2.0
 SPREAD_DECAY_LATCH_WR_THRESHOLD = DROPOUT_LATCH_WR_THRESHOLD
 
 LOG_ACTIONS = True
@@ -333,9 +333,9 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.replay_persistent_path = VISUAL_V3_REPLAY_PERSISTENT_PATH
         self.action_log_path = VISUAL_V3_ACTION_LOG_PATH
         self.image_size = IMAGE_SIZE
-        self.save_capacity = VISUAL_SAVE_CAPACITY
-        self.priority_min = VISUAL_PRIORITY_MIN
-        self.priority_max = VISUAL_PRIORITY_MAX
+        self.save_capacity = SAVE_CAPACITY
+        self.priority_min = PRIORITY_MIN
+        self.priority_max = PRIORITY_MAX
         self.log_prefix = "[V3]"
         self.log_actions = LOG_ACTIONS
 
@@ -419,21 +419,21 @@ class VisualAgentV3(VisualAgentCommonMixin):
         VISUAL_V3_MODEL_PATH.mkdir(parents=True, exist_ok=True)
         VISUAL_V3_REPLAY_PATH.mkdir(parents=True, exist_ok=True)
         self.replay_buffer = CategorizedReplayBuffer(
-            max_size=VISUAL_BUFFER_CAPACITY,
+            max_size=BUFFER_CAPACITY,
             storage_mode="disk",
             save_dir=VISUAL_V3_REPLAY_PATH,
             win_threshold=MINESWEEPER_REWARD_CONFIG.replay_win_threshold,
             lose_threshold=MINESWEEPER_REWARD_CONFIG.replay_lose_threshold,
             invalid_threshold=MINESWEEPER_REWARD_CONFIG.replay_invalid_threshold,
-            overflow_margin=VISUAL_BUFFER_OVERFLOW,
-            alpha=VISUAL_PER_ALPHA,
-            uniform_mix=VISUAL_PER_UNIFORM_MIX,
-            priority_min=VISUAL_PRIORITY_MIN,
-            priority_max=VISUAL_PRIORITY_MAX,
-            priority_eps=VISUAL_PRIORITY_EPS,
-            age_decay=VISUAL_AGE_DECAY,
-            beta_start=VISUAL_PER_BETA_START,
-            spread_decay=VISUAL_SPREAD_DECAY,
+            overflow_margin=BUFFER_OVERFLOW,
+            alpha=PER_ALPHA,
+            uniform_mix=PER_UNIFORM_MIX,
+            priority_min=PRIORITY_MIN,
+            priority_max=PRIORITY_MAX,
+            priority_eps=PRIORITY_EPS,
+            age_decay=AGE_DECAY,
+            beta_start=PER_BETA_START,
+            spread_decay=SPREAD_DECAY,
             quota_check_class="win",  # Minesweeper: win is the rare-event bottleneck class
         )
 
@@ -450,7 +450,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # 單一 source of truth — 不再維護獨立 counter。
         self.train_every_n_steps = TRAIN_EVERY_N_STEPS
         self.pending_train_steps = 0
-        self.n_step = VISUAL_N_STEP
+        self.n_step = N_STEP
         self.n_step_gamma = MINESWEEPER_REWARD_CONFIG.gamma
         self.n_step_buffer = deque()
         # recent_real_rewards 搬到 TrainingHistory._step_rewards;mixin 的
@@ -883,14 +883,14 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # SessionArchiveManager 的 on_rollover callback 處理)。
         self.archive.maybe_rollover()
         # PER β annealing — 對齊 transformer_discrete_agent.py:641-646。β 從
-        # BETA_START 線性 anneal 到 BETA_END(VISUAL_PER_BETA_EP 個 episode 飽和),
+        # BETA_START 線性 anneal 到 BETA_END(PER_BETA_EP 個 episode 飽和),
         # 早期偏平均(弱修正、訓練穩),後期完全修正 priority 抽樣 bias。
-        per_beta = VISUAL_PER_BETA_START + (VISUAL_PER_BETA_END - VISUAL_PER_BETA_START) * min(
-            self.episode_count / VISUAL_PER_BETA_EP, 1.0
+        per_beta = PER_BETA_START + (PER_BETA_END - PER_BETA_START) * min(
+            self.episode_count / PER_BETA_EP, 1.0
         )
         state, action, next_state, reward, done, sample_indices, is_weights, discounts, n_steps = (
             self.replay_buffer.sample(
-                VISUAL_BATCH_SIZE,
+                BATCH_SIZE,
                 beta=per_beta,
                 device=device,
                 include_extra=True,
@@ -987,9 +987,9 @@ class VisualAgentV3(VisualAgentCommonMixin):
             list(self.backbone.parameters())
             + list(self.q_network.parameters())
         )
-        grad_norm_total = torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=VISUAL_GRAD_CLIP_NORM)
+        grad_norm_total = torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=GRAD_CLIP_NORM)
         grad_norm_total_value = float(grad_norm_total)
-        grad_clip_threshold = float(VISUAL_GRAD_CLIP_NORM)
+        grad_clip_threshold = float(GRAD_CLIP_NORM)
         grad_clip_scale = min(1.0, grad_clip_threshold / (grad_norm_total_value + 1e-12))
         grad_clip_percent = 1.0 - grad_clip_scale
         grad_clip_excess_norm = max(0.0, grad_norm_total_value - grad_clip_threshold)

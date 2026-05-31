@@ -134,7 +134,7 @@ a fast SSD while model weights / logs stay on the project drive.
 | `replay_buffer/` | Runtime PER buffer — one `state_<id>.pt` + `next_state_<id>.pt` per stored transition (uint8) |
 | `replay_buffer_save/` | Top-`save_capacity` snapshot copied from `replay_buffer/` every `SAVE_EVERY_N_EPISODES`; referenced by paths inside `training_state.pth` |
 
-> The project root is on a HDD; the `_save_tensor` / `_load_tensor` hot loop in `CategorizedReplayBuffer` cannot tolerate HDD random-IO latency for the visual buffer (~2.34 MB per entry × 40 reads per `sample()` call × every step). Putting `VISUAL_V3_REPLAY_BASE` on an SSD is what makes a non-trivial `VISUAL_BUFFER_CAPACITY` practical.
+> The project root is on a HDD; the `_save_tensor` / `_load_tensor` hot loop in `CategorizedReplayBuffer` cannot tolerate HDD random-IO latency for the visual buffer (~2.34 MB per entry × 40 reads per `sample()` call × every step). Putting `VISUAL_V3_REPLAY_BASE` on an SSD is what makes a non-trivial `BUFFER_CAPACITY` practical.
 
 ---
 

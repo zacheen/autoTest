@@ -30,7 +30,7 @@
 
 ---
 
-**Problem**: V3 stores every transition as a separate `.pt` file via `CategorizedReplayBuffer(storage_mode="disk")` and reads 40 of them per `sample()` call, every training step. The project root sits on a HDD, where small-file random reads are too slow to scale `VISUAL_BUFFER_CAPACITY` beyond a couple thousand.
+**Problem**: V3 stores every transition as a separate `.pt` file via `CategorizedReplayBuffer(storage_mode="disk")` and reads 40 of them per `sample()` call, every training step. The project root sits on a HDD, where small-file random reads are too slow to scale `BUFFER_CAPACITY` beyond a couple thousand.
 
 **Mitigation**: Split the v3 disk layout. Keep model weights / `training_state.pth` / TensorBoard / action logs under `VISUAL_V3_MODEL_PATH` on the project drive (low-frequency writes), and route the hot replay-buffer I/O — `VISUAL_V3_REPLAY_PATH` and `VISUAL_V3_REPLAY_PERSISTENT_PATH` — to an SSD via `VISUAL_V3_REPLAY_BASE` (currently `C:\dont_move\temp\autotest\`). `training_state.pth` keeps cross-drive absolute paths to the persistent snapshot, which `pathlib` handles transparently.
 

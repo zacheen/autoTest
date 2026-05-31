@@ -41,21 +41,22 @@ SEED: int = seed_everything()
 
 BATCH_SIZE = 128
 GRID_STATE_CHANNELS = 12
-PER_CAPACITY = 10000
+BUFFER_CAPACITY = 10000
+SAVE_CAPACITY = 512
+SAVE_EVERY_N_EPISODES = 500
+MINIMUM_DATA_SIZE = min(BUFFER_CAPACITY, SAVE_CAPACITY*4)-1  # below this amount, won't start training
+
 PER_ALPHA = 0.6
 PER_BETA_START = 0.4
 PER_BETA_END = 1.0
 # Phase 1 (stratified balanced) 占 batch 的比例。1.0 = 全部 batch 走 per-class
 # stratified,PER 只在某類不足時補位。0.5 = 原始 50/50。0.0 = 純 PER 全域抽。
 PER_BALANCED_RATIO = 1.0
-SAVE_CAPACITY = 512
-SAVE_EVERY_N_EPISODES = 500
 TARGET_UPDATE_FREQ = 50
 N_STEP = 1
 NUM_FQF_FRACTIONS = 8
 FQF_ENTROPY_COEF = 1e-3
 FQF_HUBER_KAPPA = 1.0
-MINIMUM_DATA_SIZE = min(PER_CAPACITY, SAVE_CAPACITY*4)-1  # below this amount, won't start training
 GRAD_CLIP_NORM = 8.0
 # Heavy diagnostics — log less frequently to avoid TensorBoard bloat / overhead.
 HISTOGRAM_EVERY = 200          # per-layer weight/grad norms
@@ -251,7 +252,7 @@ class TransformerDiscreteAgent:
         self._base_lrs = [group["lr"] for group in self.optimizer.param_groups]
 
         self.replay_buffer = CategorizedReplayBuffer(
-            max_size=PER_CAPACITY,
+            max_size=BUFFER_CAPACITY,
             storage_mode="ram",
             win_threshold=MINESWEEPER_REWARD_CONFIG.replay_win_threshold,
             lose_threshold=MINESWEEPER_REWARD_CONFIG.replay_lose_threshold,
@@ -1703,7 +1704,7 @@ class TransformerDiscreteAgent:
                     loaded = len(persistent_entries)
                 else:
                     # Legacy transition format
-                    loaded = min(len(persistent_entries), PER_CAPACITY)
+                    loaded = min(len(persistent_entries), BUFFER_CAPACITY)
                     for idx in range(loaded):
                         entry = persistent_entries[idx]
                         self.replay_buffer.store(
