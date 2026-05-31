@@ -1,24 +1,27 @@
-"""YOLO Grid-State Predictor — 監督式訓練：screenshot → 12-channel grid state。
+"""YOLO Grid-State Predictor: supervised training from screenshot to 12-channel grid state.
 
-設計文件：docs/DESIGN_YOLO_GRID_PREDICTOR.md
+Design doc: docs/DESIGN_YOLO_GRID_PREDICTOR.md
 
-Pipeline（Phase 1 監督訓練,dim 由 yolo_encoder_base 的 FINAL_DIM / TOTAL_LAYERS 決定）：
+Pipeline, Phase 1 supervised training. Dimensions come from
+yolo_encoder_base FINAL_DIM / TOTAL_LAYERS:
     Screenshot (B, 3, 640, 640)
-      ↓ YOLO11n backbone（fine-tune, LR 1e-5）
+      ↓ YOLO11n backbone (fine-tune, LR 1e-5)
     (B, 128, 40, 40)
       ↓ token adapter + 2D positional encoding
     (B, 1600, 128)                                   = memory tokens
       ↓ Hierarchical encoder (build_encoder_dims(final_dim, total_layers))
     (B, 1600, final_dim)
       ↓ learned queries + 2D positional encoding    = H*W queries
-      ↓ Cross-Attention（num_cross_attn_layers 層 TransformerDecoder，含 self-attn + cross-attn）
+      ↓ Cross-Attention, num_cross_attn_layers TransformerDecoder layers
+        with self-attn + cross-attn
     (B, H*W, final_dim)
       ↓ classification head Linear(final_dim, 12)
     (B, 12, H, W)
 
-該 tensor 可直接餵入凍結的 TransformerDiscreteAgent 做推論（Phase 2）。
+This tensor can be fed directly into frozen TransformerDiscreteAgent for Phase 2 inference.
 
-Fixed-grid variant：加入 2-layer encoder，query 改成 learned tokens，模型綁定初始化時的 grid 大小。
+Fixed-grid variant: adds a 2-layer encoder, uses learned query tokens, and binds
+the model to the grid size used at initialization.
 """
 
 from __future__ import annotations
@@ -45,13 +48,13 @@ from model_structure.yolo_encoder_base import (
 
 
 # --------------------------------------------------------------------------- #
-# 12-channel 定義（須與 Minesweeper/MinesweeperLogic.py 的 get_grid_state_array 一致） #
+# 12-channel definitions, matching Minesweeper/MinesweeperLogic.py get_grid_state_array. #
 # --------------------------------------------------------------------------- #
 CH_UNREVEALED = 0
 CH_FLAGGED = 1
-CH_NUM_0 = 2           # 數字 0（全空白）
-CH_NUM_8 = 10          # 數字 8
-CH_MINE = 11           # 地雷（game over 才可見）
+CH_NUM_0 = 2           # Number 0, blank cell.
+CH_NUM_8 = 10          # Number 8.
+CH_MINE = 11           # Mine, visible only after game over.
 NUM_CHANNELS = 12
 
 
@@ -59,22 +62,23 @@ NUM_CHANNELS = 12
 # Server API state → grid tensor                                              #
 # --------------------------------------------------------------------------- #
 def server_state_to_grid_tensor(server_state: dict) -> torch.Tensor:
-    """把 Minesweeper web API 回傳的 server_state 轉成 (H, W) 的 class-index LongTensor。
+    """Convert Minesweeper web API server_state to an (H, W) class-index LongTensor.
 
-    用途：監督訓練的 label（配合 CrossEntropyLoss）。
+    Used as supervised training label for CrossEntropyLoss.
 
-    Mapping（server cell.state → 12-channel class index）：
+    Mapping, server cell.state to 12-channel class index:
         "hidden"                                           → 0  (CH_UNREVEALED)
         "flagged" / "flagged_mine" / "wrong_flag"          → 1  (CH_FLAGGED)
-        "revealed" 帶 value=n (0..8)                       → 2+n (CH_NUM_0 + n)
+        "revealed" with value=n (0..8)                      → 2+n (CH_NUM_0 + n)
         "mine" / "hit_mine"                                → 11 (CH_MINE)
-        其他未知狀態                                        → 0  (預設視為未翻開)
+        any other unknown state                             → 0  (default unrevealed)
 
     Args:
-        server_state: dict，包含 "board" 為 list[list[dict]]，每格有 "state" 與 "value"。
+        server_state: dict containing "board" as list[list[dict]], each with
+            "state" and "value".
 
     Returns:
-        torch.LongTensor，shape (H, W)，值域 [0, 11]。
+        torch.LongTensor with shape (H, W), values in [0, 11].
     """
     if server_state is None:
         raise ValueError("server_state is None")
@@ -106,21 +110,21 @@ def server_state_to_grid_tensor(server_state: dict) -> torch.Tensor:
 
 
 # --------------------------------------------------------------------------- #
-# Dataset 蒐集器                                                               #
+# Dataset recorder                                                             #
 # --------------------------------------------------------------------------- #
 class VisionDatasetRecorder:
-    """把 (screenshot, server_state_12ch_label) pairs 存到磁碟。
+    """Persist (screenshot, server_state_12ch_label) pairs to disk.
 
-    目錄結構：
+    Directory layout:
         dataset_dir/
-          ├── index.jsonl              # 每行一筆 metadata
+          ├── index.jsonl              # One metadata record per line.
           ├── screenshots/
           │   └── screen_000001.pt     # uint8 tensor (3, 640, 640)
           └── labels/
               └── label_000001.pt      # int64 tensor (H, W) class index 0~11
 
-    用 screenshot SHA1 hash 做去重（同一張畫面重複出現則跳過）。
-    支援續跑：開檔時會讀取 index.jsonl 統計已有筆數與 hash。
+    Deduplicates by screenshot SHA1 hash. Resume is supported by reading
+    index.jsonl on open to recover existing count and hashes.
     """
 
     def __init__(self, dataset_dir):
@@ -154,14 +158,14 @@ class VisionDatasetRecorder:
         return hashlib.sha1(screen_uint8.numpy().tobytes()).hexdigest()
 
     def record(self, screenshot: torch.Tensor, server_state: dict) -> bool:
-        """存一筆 (screenshot, label) pair。
+        """Store one (screenshot, label) pair.
 
         Args:
-            screenshot: (3, 640, 640) float tensor in [0, 1]（preprocess_screen 輸出）。
-            server_state: dict from Web API。
+            screenshot: (3, 640, 640) float tensor in [0, 1], from preprocess_screen.
+            server_state: dict from Web API.
 
         Returns:
-            True 表示成功新增；False 表示資料無效或重複，略過。
+            True if a new sample was added; False if invalid or duplicate.
         """
         if screenshot is None or server_state is None:
             return False
@@ -169,9 +173,9 @@ class VisionDatasetRecorder:
         if not board:
             return False
 
-        # 踩雷後的畫面（status == "lost"）跳過：
-        # 地雷只在 game over 後才可見，實際遊玩時預測器永遠不會遇到這種狀態，
-        # 蒐集這些樣本只會讓 CH_MINE(class 11) 比例失真並浪費訓練資源。
+        # Skip post-mine-hit screens (status == "lost"). Mines are only visible
+        # after game over, a state the predictor never sees during real play.
+        # Collecting these samples skews CH_MINE (class 11) and wastes training.
         if server_state.get("status") == "lost":
             return False
 
@@ -208,7 +212,7 @@ class VisionDatasetRecorder:
         self._seen_hashes.add(h)
         self.count = idx
 
-        # 第 1 筆 + 之後每 50 筆的第 3 筆 (idx % 50 == 3) 存一張可視化確認圖
+        # Save a visual check image for the first sample and then idx % 50 == 3.
         if idx == 1 or idx % 50 == 3:
             try:
                 self._save_check_image(idx, screen_uint8, label)
@@ -218,20 +222,20 @@ class VisionDatasetRecorder:
 
         return True
 
-    # ----------- label 可視化確認圖 ----------- #
+    # ----------- label visualization check image ----------- #
     _LABEL_SYMBOLS = {
-        0:  ("?",   (120, 120, 120)),  # unrevealed — 灰
-        1:  ("F",   (255, 180,   0)),  # flagged    — 黃
-        2:  ("·",   (200, 200, 200)),  # 數字 0 (空格) — 淡灰
-        3:  ("1",   ( 50, 130, 255)),  # 1 — 藍
-        4:  ("2",   ( 50, 180,  80)),  # 2 — 綠
-        5:  ("3",   (255,  60,  60)),  # 3 — 紅
-        6:  ("4",   (  0,   0, 160)),  # 4 — 深藍
-        7:  ("5",   (160,   0,   0)),  # 5 — 深紅
-        8:  ("6",   (  0, 180, 180)),  # 6 — 青
-        9:  ("7",   (  0,   0,   0)),  # 7 — 黑
-        10: ("8",   ( 80,  80,  80)),  # 8 — 深灰
-        11: ("M",   (255,   0, 255)),  # mine  — 紫紅
+        0:  ("?",   (120, 120, 120)),  # unrevealed, gray.
+        1:  ("F",   (255, 180,   0)),  # flagged, yellow.
+        2:  ("·",   (200, 200, 200)),  # number 0, blank, light gray.
+        3:  ("1",   ( 50, 130, 255)),  # 1, blue.
+        4:  ("2",   ( 50, 180,  80)),  # 2, green.
+        5:  ("3",   (255,  60,  60)),  # 3, red.
+        6:  ("4",   (  0,   0, 160)),  # 4, dark blue.
+        7:  ("5",   (160,   0,   0)),  # 5, dark red.
+        8:  ("6",   (  0, 180, 180)),  # 6, cyan.
+        9:  ("7",   (  0,   0,   0)),  # 7, black.
+        10: ("8",   ( 80,  80,  80)),  # 8, dark gray.
+        11: ("M",   (255,   0, 255)),  # mine, magenta.
     }
 
     def _save_check_image(
@@ -240,14 +244,14 @@ class VisionDatasetRecorder:
         screen_uint8: torch.Tensor,
         label: torch.Tensor,
     ) -> None:
-        """把 screenshot 和 label 合成一張確認圖，每格左上角標示 active class 符號。
+        """Combine screenshot and label into a check image with per-cell class marks.
 
-        存放路徑：{dataset_dir}/check_data/check_{idx:06d}.png
+        Output path: {dataset_dir}/check_data/check_{idx:06d}.png
         """
         try:
             from PIL import Image, ImageDraw, ImageFont
         except ImportError:
-            return  # Pillow 未安裝時安靜略過
+            return  # Quietly skip if Pillow is not installed.
 
         check_dir = self.dir / "check_data"
         check_dir.mkdir(parents=True, exist_ok=True)
@@ -269,7 +273,7 @@ class VisionDatasetRecorder:
         cell_w = img_w / grid_w
         cell_h = img_h / grid_h
 
-        # 畫格線
+        # Draw grid lines.
         for row in range(1, grid_h):
             y = int(row * cell_h)
             draw.line([0, y, img_w, y], fill=(255, 255, 255), width=1)
@@ -277,7 +281,7 @@ class VisionDatasetRecorder:
             x = int(col * cell_w)
             draw.line([x, 0, x, img_h], fill=(255, 255, 255), width=1)
 
-        # 每格左上角標 label
+        # Draw label at each cell's top-left corner.
         for r in range(grid_h):
             for c in range(grid_w):
                 cls = int(label[r, c].item())
@@ -285,7 +289,7 @@ class VisionDatasetRecorder:
                 x0 = int(c * cell_w) + 4
                 y0 = int(r * cell_h) + 3
 
-                # 黑色陰影讓文字清晰
+                # Black shadow improves text readability.
                 draw.text((x0 + 1, y0 + 1), symbol, fill=(0, 0, 0), font=font_large)
                 draw.text((x0,     y0),     symbol, fill=color,     font=font_large)
 
@@ -295,20 +299,20 @@ class VisionDatasetRecorder:
 
 
 # --------------------------------------------------------------------------- #
-# YOLO Grid-State Predictor 模型                                               #
+# YOLO Grid-State Predictor model                                              #
 # --------------------------------------------------------------------------- #
 
 
 class YOLOGridStatePredictor(YOLOEncoderBase):
-    """Screenshot → 12-channel grid state（fixed-grid learned-query variant）。
+    """Screenshot to 12-channel grid state, fixed-grid learned-query variant.
 
-    設計重點：
-      * 繼承 YOLOEncoderBase（YOLO + token_adapter + HierarchicalEncoder,
-        dims 由 yolo_encoder_base.DEFAULT_ENCODER_FINAL_DIM / TOTAL_LAYERS 決定）
-      * YOLO backbone 整個跟著 fine-tune（LR 設小一點：1e-5）
+    Design notes:
+      * Inherits YOLOEncoderBase: YOLO + token_adapter + HierarchicalEncoder.
+        Dims come from yolo_encoder_base.DEFAULT_ENCODER_FINAL_DIM / TOTAL_LAYERS.
+      * Fine-tunes the whole YOLO backbone with a small LR, 1e-5.
       * Learned queries + 2D positional embedding for a fixed grid
-      * Cross-attention 2 層（nn.TransformerDecoder），含 self-attn + cross-attn + FFN
-      * 輸出 (B, 12, H, W) logits，配合 nn.CrossEntropyLoss（12 class 互斥）
+      * 2-layer cross-attention via nn.TransformerDecoder with self-attn + cross-attn + FFN
+      * Outputs (B, 12, H, W) logits for nn.CrossEntropyLoss over 12 exclusive classes
     """
 
     def __init__(
@@ -357,7 +361,7 @@ class YOLOGridStatePredictor(YOLOEncoderBase):
         return list(self.feature_extractor.parameters())
 
     def non_yolo_parameters(self):
-        """除了 YOLO backbone 以外的所有可學習參數（adapter / encoder / decoder / head）。"""
+        """All trainable parameters except the YOLO backbone."""
         other = []
         other += list(self.token_adapter.parameters())
         other += list(self.encoder.parameters())
@@ -366,7 +370,7 @@ class YOLOGridStatePredictor(YOLOEncoderBase):
         other += list(self.classification_head.parameters())
         return other
 
-    # freeze_yolo / unfreeze_yolo / set_yolo_bn_eval 繼承自 YOLOEncoderBase
+    # freeze_yolo / unfreeze_yolo / set_yolo_bn_eval are inherited from YOLOEncoderBase.
     def freeze_yolo(self):
         for p in self.feature_extractor.parameters():
             p.requires_grad_(False)
@@ -385,10 +389,10 @@ class YOLOGridStatePredictor(YOLOEncoderBase):
     def forward(self, screenshot: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            screenshot: (B, 3, 640, 640) float tensor，已正規化到 [0, 1]。
+            screenshot: (B, 3, 640, 640) float tensor normalized to [0, 1].
 
         Returns:
-            logits: (B, num_classes, grid_h, grid_w)，**尚未過 softmax**。
+            logits: (B, num_classes, grid_h, grid_w), before softmax.
         """
         memory  = self.encode(screenshot)                            # (B, 1600, out_dim)
         queries = self._build_queries(batch_size=memory.size(0))     # (B, num_queries, out_dim)
@@ -403,10 +407,11 @@ class YOLOGridStatePredictor(YOLOEncoderBase):
         self,
         screenshot: torch.Tensor,
     ) -> torch.Tensor:
-        """推論介面：輸出 one-hot-like grid state tensor (B, 12, H, W)，可直接餵給 TransformerDiscreteAgent。
+        """Inference API: return one-hot-like grid state tensor (B, 12, H, W).
 
-        注意：這裡把 argmax 結果轉成 one-hot（與 MinesweeperLogic.get_grid_state_array 同格式）。
-        若要保留 soft distribution，改用 forward() 後手動 softmax 即可。
+        This output can be fed directly to TransformerDiscreteAgent. The argmax
+        result is converted to one-hot, matching MinesweeperLogic.get_grid_state_array.
+        Use forward() plus manual softmax if a soft distribution is needed.
         """
         self.eval()
         logits = self.forward(screenshot)
@@ -417,7 +422,7 @@ class YOLOGridStatePredictor(YOLOEncoderBase):
 
 
 # --------------------------------------------------------------------------- #
-# Class index → 可讀名稱（TensorBoard 用）                                    #
+# Class index to readable name, for TensorBoard.                               #
 # --------------------------------------------------------------------------- #
 _CLASS_NAMES = [
     "hidden",           # 0
@@ -431,7 +436,7 @@ _CLASS_NAMES = [
     "num6",             # 8
     "num7",             # 9
     "num8",             # 10
-    "mine",             # 11（實際上訓練資料裡不會出現，但保留對應）
+    "mine",             # 11, kept for mapping though training data should not contain it.
 ]
 
 
@@ -439,15 +444,16 @@ _CLASS_NAMES = [
 # Dataset                                                                      #
 # --------------------------------------------------------------------------- #
 class VisionSupervisedDataset(Dataset):
-    """讀取 VisionDatasetRecorder 存下的 (screenshot, label) pairs。
+    """Read (screenshot, label) pairs saved by VisionDatasetRecorder.
 
-    每個 sample 回傳 (screenshot_float, label_long)：
-        screenshot_float : torch.float32, shape (3, 640, 640), 值域 [0, 1]
-        label_long       : torch.int64,   shape (H, W),        值域 [0, 11]
+    Each sample returns (screenshot_float, label_long):
+        screenshot_float : torch.float32, shape (3, 640, 640), values in [0, 1]
+        label_long       : torch.int64,   shape (H, W),        values in [0, 11]
 
     Args:
-        cache_in_ram: True 時在 __init__ 把所有樣本載入 RAM，消除磁碟 I/O 瓶頸。
-                      每張截圖約 1.2 MB（uint8），5000 筆 ≈ 5.9 GB，請先確認 RAM 夠用。
+        cache_in_ram: If True, load all samples into RAM in __init__ to remove
+            disk I/O bottlenecks. Each screenshot is about 1.2 MB as uint8, so
+            5000 samples are about 5.9 GB. Check RAM first.
     """
 
     SCENE_CANVAS_SIZE = (1080, 1920)   # H, W
@@ -598,10 +604,11 @@ class VisionSupervisedDataset(Dataset):
         val_ratio: float = 0.15,
         seed: int = 42,
     ) -> tuple[list[dict], list[dict]]:
-        """讀取 index.jsonl，過濾掉實際檔案不存在的 entry，再切成 train / val。
+        """Read index.jsonl, filter missing files, then split into train / val.
 
-        手動刪除某些有問題的 .pt 檔後仍可正常執行，
-        不連續的編號（如刪了 screen_000641.pt 但保留 screen_001641.pt）不影響讀取。
+        This still works after manually deleting bad .pt files. Non-contiguous
+        IDs, such as deleting screen_000641.pt while keeping screen_001641.pt,
+        do not affect loading.
         """
         dataset_dir = Path(dataset_dir)
         index_path = dataset_dir / "index.jsonl"
@@ -621,7 +628,7 @@ class VisionSupervisedDataset(Dataset):
                     except json.JSONDecodeError:
                         pass
 
-        # 只保留兩個 .pt 檔都存在的 entry
+        # Keep only entries where both .pt files exist.
         valid_entries: list[dict] = []
         for entry in raw_entries:
             if (
@@ -646,9 +653,9 @@ class VisionSupervisedDataset(Dataset):
 # Trainer                                                                      #
 # --------------------------------------------------------------------------- #
 class YOLOGridStateTrainer:
-    """監督式訓練：(screenshot, grid_label) → YOLOGridStatePredictor。"""
+    """Supervised training: (screenshot, grid_label) to YOLOGridStatePredictor."""
 
-    # ---- 超參數（可直接改這裡） ----
+    # ---- Hyperparameters, safe to edit here. ----
     TRAIN_BATCH_SIZE = 16
     ORIGINAL_BATCH_PROB = 0.20
     LR_YOLO       = 1e-5   # YOLO backbone LR
@@ -657,13 +664,13 @@ class YOLOGridStateTrainer:
     TOTAL_EPOCHS  = 50
     VAL_RATIO     = 0.15
     SEED          = 42
-    GRAD_CLIP_NORM = 1.0   # clip_grad_norm_ 的 max_norm;太寬會炸 gradient,太緊收斂慢
-    # DataLoader 並行讀取數量。
-    # 0 = 主進程序列讀取（GPU 使用率低）；2~4 = worker 預取，GPU 利用率高。
-    # Windows 需要 if __name__ guard（已有），可安全設為 2。
+    GRAD_CLIP_NORM = 1.0   # clip_grad_norm_ max_norm; too wide explodes, too tight slows convergence.
+    # Number of parallel DataLoader workers.
+    # 0 = main-process serial reads, lower GPU utilization. 2~4 = worker prefetch.
+    # Windows needs an if __name__ guard, already present, so 2 is safe.
     NUM_WORKERS   = 2
-    # True = 啟動時把全部資料載入 RAM，徹底消除磁碟 I/O。
-    # 每張截圖 ~1.2 MB(uint8)，5000 筆 ≈ 5.9 GB，請確認 RAM 夠用再開。
+    # True = load all data into RAM at startup to remove disk I/O.
+    # Each screenshot is ~1.2 MB uint8; 5000 samples are ~5.9 GB. Check RAM first.
     CACHE_IN_RAM  = False
 
     def __init__(
@@ -687,7 +694,7 @@ class YOLOGridStateTrainer:
         print(f"[Trainer] Dataset: train={len(train_entries)}, val={len(val_entries)}")
 
         use_pin  = self.device.type == "cuda"
-        use_pw   = self.NUM_WORKERS > 0   # persistent_workers 需要 num_workers > 0
+        use_pw   = self.NUM_WORKERS > 0   # persistent_workers requires num_workers > 0.
         pf       = 4 if self.NUM_WORKERS > 0 else None  # prefetch_factor per worker
 
         self.train_loader_original = DataLoader(
@@ -751,7 +758,7 @@ class YOLOGridStateTrainer:
             prefetch_factor=pf,
         )
 
-        # 模型 + loss
+        # Model + loss.
         self.model = YOLOGridStatePredictor(
             grid_h=self.grid_h,
             grid_w=self.grid_w,
@@ -874,7 +881,7 @@ class YOLOGridStateTrainer:
 
         self.tb_writer.flush()
 
-        # Console：只印還沒學好（acc < 0.95）的 class，減少雜訊
+        # Console: only print classes that are not learned yet, acc < 0.95, to reduce noise.
         print(
             f"  Epoch {epoch:03d} | "
             f"train loss={train_m['loss']:.4f} acc={train_m['acc']:.3f} | "
@@ -893,7 +900,7 @@ class YOLOGridStateTrainer:
             print(f"  ★ best val_acc={self.best_val_acc:.4f} → best.pth saved")
 
     def load_checkpoint(self) -> int:
-        """Checkpoint 讀取。回傳下一個要跑的 epoch（沒有 checkpoint 則回傳 0）。"""
+        """Load checkpoint and return the next epoch, or 0 if no checkpoint exists."""
         ckpt_path = self.model_save_dir / "checkpoint.pth"
         if not ckpt_path.exists():
             return 0
@@ -911,7 +918,7 @@ class YOLOGridStateTrainer:
     # Main training entry point                                            #
     # ------------------------------------------------------------------ #
     def train(self) -> None:
-        """單階段訓練主迴圈。可中斷後重跑（自動讀取 checkpoint）。"""
+        """Single-stage training loop; can resume after interruption via checkpoint."""
         total_epochs = self.TOTAL_EPOCHS
         start_epoch = self.load_checkpoint()
         self.model.unfreeze_yolo()
@@ -942,21 +949,21 @@ class YOLOGridStateTrainer:
 # Entry point                                                                  #
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
-    # ---- 改這裡就好 ----
+    # ---- Edit here. ----
     DATASET_DIR    = Path("./datasets/vision_supervised")
     MODEL_SAVE_DIR = Path("./models/yolo_grid_predictor")
     GRID_H = 6
     GRID_W = 6
 
-    # ---- 選擇性覆蓋超參數 ----
+    # ---- Optional hyperparameter overrides. ----
     # YOLOGridStateTrainer.TOTAL_EPOCHS = 50
     # YOLOGridStateTrainer.BATCH_SIZE    = 4
     #
-    # GPU 使用率低（~10%）的調整建議：
-    #   1. NUM_WORKERS=2 已預設開啟（worker 預取消除磁碟等待）
-    #   2. RAM 充裕（>10 GB 可用）時開 CACHE_IN_RAM：
+    # Suggestions for low GPU utilization, around 10%:
+    #   1. NUM_WORKERS=2 is enabled by default for worker prefetch.
+    #   2. If RAM is enough, >10 GB free, enable CACHE_IN_RAM:
     #      YOLOGridStateTrainer.CACHE_IN_RAM = True
-    #   3. GPU VRAM 充裕時加大 batch：
+    #   3. If GPU VRAM is enough, increase batch size:
     #      YOLOGridStateTrainer.BATCH_SIZE = 16
 
     trainer = YOLOGridStateTrainer(

@@ -52,10 +52,9 @@ class VisualAgentCommonMixin:
         reward: float,
         done: bool,
     ) -> None:
-        # raw reward 直接記到 training_history.step_rewards(per-transition rolling
-        # mean,給 train/real_reward_mean 用)。v2 / v3 都繼承這個 mixin,所以
-        # 兩邊同時切換到 history 版的 source of truth — agent 端不再各自維護
-        # recent_real_rewards deque。
+        # Record raw rewards into training_history.step_rewards for the
+        # train/real_reward_mean rolling metric. v2 / v3 share this mixin, so
+        # neither agent keeps its own recent_real_rewards deque.
         self.training_history.record_step_reward(float(reward))
         transition = {
             "state": self._to_storage_state(state),
@@ -105,8 +104,8 @@ class VisualAgentCommonMixin:
             self._commit_n_step_transition(len(self.n_step_buffer))
 
     def _save_optimizer_state(self) -> None:
-        # optimizer state 只含 optimizer / scaler / total_it / episode_count / epsilon。
-        # Episode 結果累積/查詢搬到 TrainingHistory,寫到獨立檔 training_history.pth。
+        # Optimizer state only stores optimizer / scaler / total_it / episode_count / epsilon.
+        # Episode results live in TrainingHistory and are written to training_history.pth.
         payload = {
             "optimizer": self.optimizer.state_dict(),
             "scaler": self.scaler.state_dict(),
@@ -116,7 +115,7 @@ class VisualAgentCommonMixin:
         payload.update(self.epsilon_controller.state_dict())
         torch.save(payload, self._optimizer_state_path())
 
-        # TrainingHistory 走獨立檔,跟 optimizer state 解耦。
+        # TrainingHistory uses an independent file, decoupled from optimizer state.
         try:
             torch.save(self.training_history.state_dict(), self._training_history_path())
         except Exception as exc:
@@ -130,15 +129,14 @@ class VisualAgentCommonMixin:
             state = torch.load(opt_path, map_location=self.device, weights_only=False)
             self.optimizer.load_state_dict(state["optimizer"])
             self.total_it = state.get("total_it", 0)
-            # episode_count 不再直接 set — 它是 @property delegate 到
-            # training_history.total_episodes,後者由獨立 .pth 檔還原。
-            # 舊 opt state 裡的 "episode_count" key 直接忽略。
-            # AdaptiveEpsilonController 只剩 epsilon 一個 key。
+            # episode_count is no longer set directly. It delegates to
+            # training_history.total_episodes, restored from its own .pth file.
+            # Ignore the legacy "episode_count" key in optimizer state.
+            # AdaptiveEpsilonController now stores only epsilon.
             self.epsilon_controller.load_state_dict(state)
 
-            # TrainingHistory:優先用獨立檔;舊 checkpoint 還沒拆檔時,
-            # 從 optimizer state 撈 legacy 扁平 keys (result_window /
-            # total_episodes) 餵進去,完成一次性 migration。
+            # TrainingHistory: prefer its independent file. For old checkpoints
+            # before the split, migrate legacy flat keys from optimizer state.
             self._load_training_history(legacy_state=state)
 
             print(
@@ -159,10 +157,10 @@ class VisualAgentCommonMixin:
                 print(f"{self.log_prefix} {message}")
 
     def _load_training_history(self, legacy_state: dict | None = None) -> None:
-        """Load TrainingHistory:獨立檔優先,舊 flat optimizer state 是 fallback。
+        """Load TrainingHistory, preferring the independent file.
 
-        legacy_state 是當前 optimizer state 的 dict (load 流程順手帶進來);
-        若新獨立檔不存在但 legacy_state 含有舊扁平 keys,撈出來做 migration。
+        legacy_state is the current optimizer state. If the new file is missing
+        but legacy_state contains old flat keys, migrate from it.
         """
         history_path = self._training_history_path()
         if history_path.exists():
@@ -176,7 +174,7 @@ class VisualAgentCommonMixin:
                 return
             except Exception as exc:
                 print(f"{self.log_prefix} Failed to load training_history.pth: {exc}")
-                # 落到下面 legacy fallback
+                # Fall through to legacy fallback below.
         if legacy_state and any(
             k in legacy_state for k in ("result_window", "total_episodes", "total_wins")
         ):
@@ -252,8 +250,8 @@ class VisualAgentCommonMixin:
                 skipped_missing += 1
                 continue
 
-            # weights_only=True：peek 出來的東西必定是 tensor;限制反序列化能執行的
-            # opcode,避免 replay_buffer_save/ 底下的 .pt 被惡意/損毀檔案 RCE。
+            # weights_only=True ensures the peek result is a tensor and limits
+            # deserialization opcodes to reduce RCE risk from corrupt/malicious .pt files.
             try:
                 peek = torch.load(str(state_src), map_location="cpu", weights_only=True)
                 if not torch.is_tensor(peek) or tuple(peek.shape) != expected_shape:
@@ -263,8 +261,8 @@ class VisualAgentCommonMixin:
                 skipped_load_error += 1
                 continue
 
-            # next_state 也要 peek+驗 shape,避免 state.pt 是新格式但 next_state.pt 是舊
-            # 格式(版本切換時的混雜狀態)造成 train_step 拿到形狀錯誤的 tensor 而 crash。
+            # Also peek and validate next_state shape so mixed-format entries from
+            # version switches cannot crash train_step with a wrong tensor shape.
             next_state_dst_candidate = None
             next_src_str = entry.get("next_state", entry.get("next_state_path"))
             if next_src_str:
@@ -310,9 +308,9 @@ class VisualAgentCommonMixin:
                     )
                 ),
                 "insert_order": loaded_count + 1,
-                # 對齊 stage1(RAM 走 load_from_entries 會 setdefault 這兩欄,但 disk 路徑
-                # 漏帶)— 沒這兩欄會讓 resume 後 spread_decay 連續性斷掉、age_decay 的
-                # sample_count 也歸零。Legacy entry 沒這欄就 default 0 / 0.0。
+                # Match stage1. RAM load_from_entries setdefaults these fields, but
+                # the disk path used to miss them. Without them, spread_decay continuity
+                # breaks after resume and sample_count resets for age/sample decay.
                 "sample_count": int(entry.get("sample_count", 0)),
                 "quantile_spread": float(entry.get("quantile_spread", 0.0)),
             }
@@ -324,8 +322,8 @@ class VisualAgentCommonMixin:
         self.replay_buffer.size_count = loaded_count
         self.replay_buffer.next_storage_id = loaded_count
         self.replay_buffer.insert_counter = loaded_count
-        # 把略過原因攤開,避免 expected_shape 改了之後使用者只看到 "Loaded 0"
-        # (例如 v3 從截圖切到 cached features 那一次,所有舊 entries 都會 shape mismatch)。
+        # Show skip reasons so expected_shape changes do not just print "Loaded 0".
+        # Example: V3 screenshot entries became cached features, making old entries mismatch.
         skipped_total = skipped_missing + skipped_shape_mismatch + skipped_load_error
         suffix = ""
         if skipped_total > 0:
@@ -337,16 +335,14 @@ class VisualAgentCommonMixin:
         print(f"{self.log_prefix} Loaded {loaded_count} replay buffer entries{suffix}")
 
     def _purge_stale_replay_files(self) -> None:
-        """刪除 replay_path / replay_persistent_path 內 shape 與目前 replay_state_shape
-        不一致的 .pt 檔(以及讀檔失敗的損毀檔)。
+        """Delete replay .pt files whose shape no longer matches replay_state_shape.
 
-        呼叫時機:agent __init__ 內、try_load_model() 之前。用途是把上一版架構留下的
-        殘留資料砍乾淨,例如 v3 從 (3, 640, 640) 截圖切到 (128, h, w) cached features
-        那一次,舊 .pt 全部都會 shape mismatch。
+        Called in agent __init__ before try_load_model(). This removes stale data
+        from older architectures, e.g. when V3 switched from (3, 640, 640)
+        screenshots to (128, h, w) cached features.
 
-        若 replay_persistent_path 內有 .pt 被刪,順手把 training_state.pth 一起刪 —
-        它的 persistent_entries 內路徑已部分指向不存在的檔,留著只會讓
-        _load_persistent_training_state 印一堆 missing warning。
+        If persistent .pt files are deleted, delete training_state.pth too because
+        its persistent_entries may point at missing paths.
         """
         expected_shape = tuple(
             getattr(self, "replay_state_shape", (3, *self.image_size))
@@ -359,15 +355,15 @@ class VisualAgentCommonMixin:
             for pt_file in dir_path.glob("*.pt"):
                 keep = False
                 try:
-                    # weights_only=True 限制 pickle 反序列化能跑的 opcode,
-                    # 避免損毀/惡意檔案 RCE。
+                    # weights_only=True limits pickle deserialization opcodes and
+                    # reduces RCE risk from corrupt/malicious files.
                     peek = torch.load(
                         str(pt_file), map_location="cpu", weights_only=True
                     )
                     if torch.is_tensor(peek) and tuple(peek.shape) == expected_shape:
                         keep = True
                 except Exception:
-                    keep = False  # 讀失敗 → 損毀 → 也視為該刪
+                    keep = False  # Read failure means corrupt, so delete it too.
                 if not keep:
                     try:
                         pt_file.unlink()
@@ -382,8 +378,7 @@ class VisualAgentCommonMixin:
         deleted_runtime = _purge_dir(self.replay_path)
         deleted_persistent = _purge_dir(self.replay_persistent_path)
 
-        # Persistent .pt 被砍 → training_state.pth 的 entries 指向不存在的檔。
-        # 直接刪掉它,避免 _load_persistent_training_state 拿過時 metadata。
+        # Deleted persistent .pt files make training_state.pth metadata stale.
         if deleted_persistent > 0:
             ts_path = self._training_state_path()
             if ts_path.exists():
