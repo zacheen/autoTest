@@ -7,9 +7,11 @@ pandas
 opencv-python
 pyautogui
 selenium
+webdriver-manager
 torch
 torchvision
 torchinfo
+TensorBoard
 ultralytics
 pynput
 numpy

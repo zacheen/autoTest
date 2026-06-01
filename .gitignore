@@ -13,8 +13,8 @@ datasets*
 # compare picture
 *comp*
 
-# OOM
-OOM/*
+# custom bat
+activate_server.bat
 
 # TOOL
 models/research/object_detection/TOOL/labelImg-master/labelImg.exe
