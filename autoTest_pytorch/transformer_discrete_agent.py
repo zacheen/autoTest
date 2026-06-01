@@ -18,6 +18,7 @@ from model_structure.optimizer_factory import build_fqf_optimizer
 from model_structure.adaptive_epsilon import AdaptiveEpsilonController
 from model_structure.history import TrainingHistory
 from model_structure.hyperparameter_dump import dump_hyperparameters
+from model_structure.checkpoint_log import CheckpointLogger
 from model_structure.rng_utils import seed_everything
 from model_structure.sdp_backend import set_sdp_all
 from model_structure.archive_manager import (
@@ -306,37 +307,19 @@ class TransformerDiscreteAgent:
         # comparison with hyperparameters.txt and console logs.
         print(f"[FQF] SEED = {SEED}")
 
-        try:
-            dump_hyperparameters(
-                out_path=self.archive.session_dir / "hyperparameters.txt",
-                modules=[sys.modules[__name__]],
-                dataclass_instances={"reward_config": MINESWEEPER_REWARD_CONFIG},
-                instance_attrs={
-                    "epsilon_controller": (
-                        self.epsilon_controller,
-                        ["wr_min", "wr_max", "eps_min", "eps_max"],
-                    ),
-                    "optimizer (AdamW)": self.optimizer,
-                },
-                models={
-                    # backbone: freeze status + torchinfo layer summary.
-                    # input_size uses the real grid state tensor shape.
-                    "model.backbone": (
-                        self.backbone,
-                        (1, GRID_STATE_CHANNELS, self.grid_h, self.grid_w),
-                    ),
-                    # Do not pass input_size for q_network. It consumes backbone
-                    # cell features and returns dicts, so torchinfo adds little.
-                    "model.q_network": (self.q_network, None),
-                },
-            )
-        except Exception as exc:
-            print(f"[FQF] hyperparameters dump failed: {exc}")
+        # Checkpoint logger: green prints on successful load, red on failure,
+        # and per-area source tracker that hyperparameters.txt emits as a
+        # [loaded_checkpoints] section. Created before try_load_model so the
+        # load chain can record sources; dump_hyperparameters runs after the
+        # load so the tracker is final.
+        self.checkpoint_logger = CheckpointLogger("[FQF CHECKPOINT]")
 
         # io_log: plain-text append file swapped to each new hour directory.
         # Banner comes from _build_io_log_banner.
         self._io_log = RolloverTextLog(banner_factory=self._build_io_log_banner)
         self._io_log.swap_to(self.archive.current_archive_dir / "train_io_log.txt")
+        # Mirror checkpoint messages to the io_log file as well.
+        self.checkpoint_logger.attach_io_log(self._io_log)
 
         # Register hour rollover callback: swap io_log. SessionArchiveManager
         # prints rollover console messages.
@@ -366,6 +349,37 @@ class TransformerDiscreteAgent:
         self._write_metric_docs()
 
         self.try_load_model()
+
+        # dump_hyperparameters runs AFTER try_load_model so the
+        # [loaded_checkpoints] section reflects the final effective weight
+        # source per area (canonical vs archive fallback vs random init).
+        try:
+            dump_hyperparameters(
+                out_path=self.archive.session_dir / "hyperparameters.txt",
+                modules=[sys.modules[__name__]],
+                dataclass_instances={"reward_config": MINESWEEPER_REWARD_CONFIG},
+                instance_attrs={
+                    "epsilon_controller": (
+                        self.epsilon_controller,
+                        ["wr_min", "wr_max", "eps_min", "eps_max"],
+                    ),
+                    "optimizer (AdamW)": self.optimizer,
+                },
+                models={
+                    # backbone: freeze status + torchinfo layer summary.
+                    # input_size uses the real grid state tensor shape.
+                    "model.backbone": (
+                        self.backbone,
+                        (1, GRID_STATE_CHANNELS, self.grid_h, self.grid_w),
+                    ),
+                    # Do not pass input_size for q_network. It consumes backbone
+                    # cell features and returns dicts, so torchinfo adds little.
+                    "model.q_network": (self.q_network, None),
+                },
+                loaded_checkpoints=self.checkpoint_logger.loaded_sources,
+            )
+        except Exception as exc:
+            print(f"[FQF] hyperparameters dump failed: {exc}")
 
         # Weight snapshots for diagnosing drift. Must be captured AFTER
         # try_load_model so that "init" reflects the actual starting point
@@ -1505,8 +1519,8 @@ class TransformerDiscreteAgent:
             return canonical_path
         archive_path = self.archive.find_latest_archive(canonical_path.name)
         if archive_path is not None:
-            print(
-                f"[FQF] canonical {canonical_path.name} missing, "
+            self.checkpoint_logger.info(
+                f"canonical {canonical_path.name} missing, "
                 f"falling back to latest archive: {archive_path}"
             )
             return archive_path
@@ -1530,9 +1544,17 @@ class TransformerDiscreteAgent:
                 self.training_history.load_state_dict(
                     hist_state, deque_cls=self.deque_cls
                 )
+                self.checkpoint_logger.success(
+                    "training_history",
+                    history_path,
+                    f"Loaded training_history: {history_path}",
+                )
                 return
             except Exception as exc:
-                print(f"[FQF] Failed to load training_history.pth: {exc}")
+                self.checkpoint_logger.failure(
+                    "training_history",
+                    f"Failed to load training_history.pth ({history_path}): {exc}",
+                )
                 # Fall through to the legacy fallback below.
         if legacy_state and any(
             k in legacy_state for k in ("result_window", "total_episodes", "total_wins")
@@ -1543,7 +1565,11 @@ class TransformerDiscreteAgent:
                 "total_wins": legacy_state.get("total_wins", 0),
             }
             self.training_history.load_state_dict(legacy, deque_cls=self.deque_cls)
-            print("[FQF] Migrated legacy training history from optimizer state")
+            self.checkpoint_logger.mark_special(
+                "training_history",
+                "<migrated from legacy optimizer_state.pth>",
+                "Migrated legacy training history from optimizer state",
+            )
 
     def _raise_if_corrupt(self, label, path, state_dict):
         """Load-time NaN probe: raise if checkpoint contains NaN/Inf.
@@ -1568,18 +1594,34 @@ class TransformerDiscreteAgent:
             try:
                 backbone_state = torch.load(backbone_path, map_location=device, weights_only=True)
             except Exception as exc:
-                print(f"[FQF] Failed to read Backbone: {exc}")
+                self.checkpoint_logger.failure(
+                    "backbone", f"Failed to read Backbone ({backbone_path}): {exc}"
+                )
             if backbone_state is not None:
                 self._raise_if_corrupt("backbone(disk)", backbone_path, backbone_state)
                 try:
                     incompatible = self.backbone.load_backbone_state(backbone_state, strict=False)
-                    print("[FQF] Loaded Backbone")
+                    self.checkpoint_logger.success(
+                        "backbone", backbone_path, f"Loaded Backbone: {backbone_path}"
+                    )
                     if incompatible.missing_keys:
-                        print(f"[FQF] Backbone missing keys: {incompatible.missing_keys}")
+                        self.checkpoint_logger.info(
+                            f"Backbone missing keys: {incompatible.missing_keys}"
+                        )
                     if incompatible.unexpected_keys:
-                        print(f"[FQF] Backbone unexpected keys: {incompatible.unexpected_keys}")
+                        self.checkpoint_logger.info(
+                            f"Backbone unexpected keys: {incompatible.unexpected_keys}"
+                        )
                 except Exception as exc:
-                    print(f"[FQF] Failed to apply Backbone state: {exc}")
+                    self.checkpoint_logger.failure(
+                        "backbone", f"Failed to apply Backbone state: {exc}"
+                    )
+        else:
+            self.checkpoint_logger.failure(
+                "backbone",
+                f"MISSING backbone checkpoint: {TRANSFORMER_MODEL_PATH / 'backbone.pth'}"
+                f" | using initialized backbone",
+            )
 
         q_path = self._resolve_load_path(TRANSFORMER_MODEL_PATH / "fqf_network.pth")
         if q_path is not None:
@@ -1587,16 +1629,31 @@ class TransformerDiscreteAgent:
             try:
                 q_state = torch.load(q_path, map_location=device, weights_only=True)
             except Exception as exc:
-                print(f"[FQF] Failed to read FQF-Network: {exc}")
+                self.checkpoint_logger.failure(
+                    "q_network", f"Failed to read FQF-Network ({q_path}): {exc}"
+                )
             if q_state is not None:
                 self._raise_if_corrupt("q_network(disk)", q_path, q_state)
                 try:
                     self.q_network.load_state_dict(q_state)
-                    print("[FQF] Loaded FQF-Network")
+                    self.checkpoint_logger.success(
+                        "q_network", q_path, f"Loaded FQF-Network: {q_path}"
+                    )
                 except Exception as exc:
-                    print(f"[FQF] Failed to apply FQF-Network state: {exc}")
+                    self.checkpoint_logger.failure(
+                        "q_network", f"Failed to apply FQF-Network state: {exc}"
+                    )
         elif (TRANSFORMER_MODEL_PATH / "q_network.pth").exists():
-            print("[FQF] Skip legacy q_network.pth because DDQN head shape is incompatible")
+            self.checkpoint_logger.failure(
+                "q_network",
+                "Skip legacy q_network.pth because DDQN head shape is incompatible",
+            )
+        else:
+            self.checkpoint_logger.failure(
+                "q_network",
+                f"MISSING FQF-Network checkpoint: {TRANSFORMER_MODEL_PATH / 'fqf_network.pth'}"
+                f" | using initialized q_network",
+            )
 
         q_target_path = self._resolve_load_path(TRANSFORMER_MODEL_PATH / "fqf_target.pth")
         if q_target_path is not None:
@@ -1604,16 +1661,31 @@ class TransformerDiscreteAgent:
             try:
                 qt_state = torch.load(q_target_path, map_location=device, weights_only=True)
             except Exception as exc:
-                print(f"[FQF] Failed to read FQF-Target: {exc}")
+                self.checkpoint_logger.failure(
+                    "q_target", f"Failed to read FQF-Target ({q_target_path}): {exc}"
+                )
             if qt_state is not None:
                 self._raise_if_corrupt("q_target(disk)", q_target_path, qt_state)
                 try:
                     self.q_target.load_state_dict(qt_state)
-                    print("[FQF] Loaded FQF-Target")
+                    self.checkpoint_logger.success(
+                        "q_target", q_target_path, f"Loaded FQF-Target: {q_target_path}"
+                    )
                 except Exception as exc:
-                    print(f"[FQF] Failed to apply FQF-Target state: {exc}")
+                    self.checkpoint_logger.failure(
+                        "q_target", f"Failed to apply FQF-Target state: {exc}"
+                    )
         elif (TRANSFORMER_MODEL_PATH / "q_target.pth").exists():
-            print("[FQF] Skip legacy q_target.pth because DDQN head shape is incompatible")
+            self.checkpoint_logger.failure(
+                "q_target",
+                "Skip legacy q_target.pth because DDQN head shape is incompatible",
+            )
+        else:
+            self.checkpoint_logger.failure(
+                "q_target",
+                f"MISSING FQF-Target checkpoint: {TRANSFORMER_MODEL_PATH / 'fqf_target.pth'}"
+                f" | using initialized q_target",
+            )
 
         opt_path = self._resolve_load_path(TRANSFORMER_MODEL_PATH / "optimizer_state.pth")
         if opt_path is not None:
@@ -1621,7 +1693,9 @@ class TransformerDiscreteAgent:
             try:
                 opt_payload = torch.load(opt_path, map_location=device, weights_only=False)
             except Exception as exc:
-                print(f"[FQF] Failed to read optimizer state: {exc}")
+                self.checkpoint_logger.failure(
+                    "optimizer_state", f"Failed to read optimizer state ({opt_path}): {exc}"
+                )
             if opt_payload is not None:
                 # Load-time optimizer probe: scan for NaN/Inf and exp_avg_sq < 0.
                 # Adam v cannot be negative; if it is, bit-level corruption can
@@ -1644,10 +1718,12 @@ class TransformerDiscreteAgent:
                     # epsilon; flattened legacy history uses the fallback loader.
                     self.epsilon_controller.load_state_dict(opt_payload)
                     self._load_training_history(legacy_state=opt_payload)
-                    print(
-                        f"[FQF] Loaded optimizer: total_it={self.total_it},"
+                    self.checkpoint_logger.success(
+                        "optimizer_state",
+                        opt_path,
+                        f"Loaded optimizer ({opt_path}): total_it={self.total_it},"
                         f" episode={self.episode_count}, epsilon={self.epsilon:.4f},"
-                        f" total_episodes={self.training_history.total_episodes}"
+                        f" total_episodes={self.training_history.total_episodes}",
                     )
                     # RNG state restore: resume random / numpy / torch / cuda RNG
                     # from the save point so trajectories continue from the saved
@@ -1698,7 +1774,16 @@ class TransformerDiscreteAgent:
                             f" 那刻延續(這是 win rate drop 的根因,新 save 會修)"
                         )
                 except Exception as exc:
-                    print(f"[FQF] Failed to apply optimizer state: {exc}")
+                    self.checkpoint_logger.failure(
+                        "optimizer_state", f"Failed to apply optimizer state: {exc}"
+                    )
+        else:
+            self.checkpoint_logger.failure(
+                "optimizer_state",
+                f"MISSING optimizer checkpoint:"
+                f" {TRANSFORMER_MODEL_PATH / 'optimizer_state.pth'}"
+                f" | total_it stays at {self.total_it}",
+            )
 
         # New name is replay_buffer.pth. If it is missing but legacy
         # training_state.pth exists, load the legacy file. The next save writes the
@@ -1706,7 +1791,9 @@ class TransformerDiscreteAgent:
         replay_buffer_path = TRANSFORMER_MODEL_PATH / "replay_buffer.pth"
         legacy_path = TRANSFORMER_MODEL_PATH / "training_state.pth"
         if not replay_buffer_path.exists() and legacy_path.exists():
-            print(f"[FQF] replay_buffer.pth not found, loading from legacy training_state.pth")
+            self.checkpoint_logger.info(
+                "replay_buffer.pth not found, loading from legacy training_state.pth"
+            )
             training_state_path = legacy_path
         else:
             training_state_path = replay_buffer_path
@@ -1714,7 +1801,7 @@ class TransformerDiscreteAgent:
             try:
                 state = torch.load(training_state_path, map_location=device, weights_only=False)
                 persistent_entries = state.get("persistent_entries", [])
-                
+
                 # Check format to cleanly transition if an old save has a different shape
                 if persistent_entries and isinstance(persistent_entries[0], dict) and "storage_id" in persistent_entries[0]:
                     # Exactly load using new format
@@ -1732,8 +1819,27 @@ class TransformerDiscreteAgent:
                             entry["reward"],
                             entry["done"],
                         )
-                
+
                 if loaded > 0:
-                    print(f"[FQF] Loaded {loaded} replay buffer entries")
+                    self.checkpoint_logger.success(
+                        "replay_buffer",
+                        training_state_path,
+                        f"Loaded {loaded} replay buffer entries from"
+                        f" {training_state_path}",
+                    )
+                else:
+                    self.checkpoint_logger.failure(
+                        "replay_buffer",
+                        f"replay buffer file empty: {training_state_path}",
+                    )
             except Exception as exc:
-                print(f"[FQF] Failed to load replay buffer: {exc}")
+                self.checkpoint_logger.failure(
+                    "replay_buffer",
+                    f"Failed to load replay buffer ({training_state_path}): {exc}",
+                )
+        else:
+            self.checkpoint_logger.failure(
+                "replay_buffer",
+                f"MISSING replay buffer checkpoint: {replay_buffer_path}"
+                f" | replay buffer starts empty",
+            )

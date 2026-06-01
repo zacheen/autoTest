@@ -139,11 +139,21 @@ class VisualAgentCommonMixin:
             # before the split, migrate legacy flat keys from optimizer state.
             self._load_training_history(legacy_state=state)
 
-            print(
-                f"{self.log_prefix} Loaded optimizer: total_it={self.total_it}, "
-                f"episode={self.episode_count}, epsilon={self.epsilon_controller.epsilon:.4f}, "
+            success_msg = (
+                f"Loaded optimizer ({opt_path}): total_it={self.total_it}, "
+                f"episode={self.episode_count}, "
+                f"epsilon={self.epsilon_controller.epsilon:.4f}, "
                 f"total_episodes={self.training_history.total_episodes}"
             )
+            # Route through CheckpointLogger so success prints green and the
+            # [loaded_checkpoints] tracker captures opt_path. Falls back to a
+            # plain log_prefix print for v1/v2 agents that have no logger.
+            if hasattr(self, "checkpoint_logger"):
+                self.checkpoint_logger.success(
+                    "optimizer_state", opt_path, success_msg
+                )
+            else:
+                print(f"{self.log_prefix} {success_msg}")
             if "scaler" in state and self.scaler.is_enabled():
                 try:
                     self.scaler.load_state_dict(state["scaler"])
@@ -151,7 +161,9 @@ class VisualAgentCommonMixin:
                     print(f"{self.log_prefix} Failed to load GradScaler state: {scaler_exc}")
         except Exception as exc:
             message = f"MISSING/FAILED optimizer checkpoint: {opt_path} | error={exc}"
-            if hasattr(self, "_log_checkpoint_message"):
+            if hasattr(self, "checkpoint_logger"):
+                self.checkpoint_logger.failure("optimizer_state", message)
+            elif hasattr(self, "_log_checkpoint_message"):
                 self._log_checkpoint_message(message, warning=True)
             else:
                 print(f"{self.log_prefix} {message}")
@@ -171,9 +183,21 @@ class VisualAgentCommonMixin:
                 self.training_history.load_state_dict(
                     hist_state, deque_cls=self.deque_cls
                 )
+                if hasattr(self, "checkpoint_logger"):
+                    self.checkpoint_logger.success(
+                        "training_history",
+                        history_path,
+                        f"Loaded training_history: {history_path}",
+                    )
                 return
             except Exception as exc:
-                print(f"{self.log_prefix} Failed to load training_history.pth: {exc}")
+                message = (
+                    f"Failed to load training_history.pth ({history_path}): {exc}"
+                )
+                if hasattr(self, "checkpoint_logger"):
+                    self.checkpoint_logger.failure("training_history", message)
+                else:
+                    print(f"{self.log_prefix} {message}")
                 # Fall through to legacy fallback below.
         if legacy_state and any(
             k in legacy_state for k in ("result_window", "total_episodes", "total_wins")
@@ -184,9 +208,16 @@ class VisualAgentCommonMixin:
                 "total_wins": legacy_state.get("total_wins", 0),
             }
             self.training_history.load_state_dict(legacy, deque_cls=self.deque_cls)
-            print(
-                f"{self.log_prefix} Migrated legacy training history from optimizer state"
-            )
+            if hasattr(self, "checkpoint_logger"):
+                self.checkpoint_logger.mark_special(
+                    "training_history",
+                    "<migrated from legacy optimizer_state.pth>",
+                    "Migrated legacy training history from optimizer state",
+                )
+            else:
+                print(
+                    f"{self.log_prefix} Migrated legacy training history from optimizer state"
+                )
 
     def save_persistent(self) -> None:
         buf = self.replay_buffer
@@ -217,15 +248,19 @@ class VisualAgentCommonMixin:
             # key so older save files keep loading.
             persistent_entries = state.get("persistent_entries") or state.get("persistent_index", [])
             if persistent_entries:
-                self._load_persistent_buffer(persistent_entries)
+                # _load_persistent_buffer prints the per-entry summary and
+                # records the source on the checkpoint_logger when present.
+                self._load_persistent_buffer(persistent_entries, source_path=ts_path)
         except Exception as exc:
             message = f"MISSING/FAILED replay/training checkpoint: {ts_path} | error={exc}"
-            if hasattr(self, "_log_checkpoint_message"):
+            if hasattr(self, "checkpoint_logger"):
+                self.checkpoint_logger.failure("replay_buffer", message)
+            elif hasattr(self, "_log_checkpoint_message"):
                 self._log_checkpoint_message(message, warning=True)
             else:
                 print(f"{self.log_prefix} {message}")
 
-    def _load_persistent_buffer(self, persistent_entries) -> None:
+    def _load_persistent_buffer(self, persistent_entries, source_path=None) -> None:
         self.replay_path.mkdir(parents=True, exist_ok=True)
         for file_path in self.replay_path.glob("*.pt"):
             file_path.unlink()
@@ -332,7 +367,15 @@ class VisualAgentCommonMixin:
                 f"(missing={skipped_missing}, shape!={tuple(expected_shape)}={skipped_shape_mismatch}, "
                 f"load_error={skipped_load_error})"
             )
-        print(f"{self.log_prefix} Loaded {loaded_count} replay buffer entries{suffix}")
+        success_msg = f"Loaded {loaded_count} replay buffer entries{suffix}"
+        if hasattr(self, "checkpoint_logger") and loaded_count > 0:
+            self.checkpoint_logger.success(
+                "replay_buffer",
+                source_path if source_path is not None else self._training_state_path(),
+                success_msg,
+            )
+        else:
+            print(f"{self.log_prefix} {success_msg}")
 
     def _purge_stale_replay_files(self) -> None:
         """Delete replay .pt files whose shape no longer matches replay_state_shape.

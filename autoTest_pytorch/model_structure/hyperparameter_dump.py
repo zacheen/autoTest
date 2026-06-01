@@ -189,6 +189,7 @@ def dump_hyperparameters(
     dataclass_instances: dict[str, Any] | None = None,
     instance_attrs: dict[str, Any] | None = None,
     models: dict[str, tuple[Any, tuple[int, ...] | None]] | None = None,
+    loaded_checkpoints: dict[str, str] | None = None,
 ) -> None:
     """One-shot dump of training settings to out_path.
 
@@ -203,6 +204,11 @@ def dump_hyperparameters(
               (a) freeze status per top-level submodule from requires_grad
               (b) torchinfo summary, skipped when input_size is None
             input_size should be `(batch, *input_shape)`, e.g. `(1, 3, 640, 640)`.
+        loaded_checkpoints: dict[area -> source path or sentinel].
+            Emitted as a [loaded_checkpoints] section right after the header so
+            the operator can immediately see which weights this session actually
+            used (Stage 1 warm-start vs V3 own checkpoint vs random init).
+            Pass ``CheckpointLogger.loaded_sources`` from model_structure.checkpoint_log.
     """
     lines: list[str] = [
         "# Hyperparameters dump",
@@ -214,6 +220,16 @@ def dump_hyperparameters(
         commit, dirty = git
         lines.append(f"# Git:       {commit} (dirty: {dirty})")
     lines.append("")
+
+    if loaded_checkpoints:
+        lines.append("[loaded_checkpoints]")
+        # Sort by area name for stable diffs across runs. Pad keys so values
+        # line up in the text file.
+        keys = sorted(loaded_checkpoints.keys())
+        key_width = max(len(k) for k in keys)
+        for key in keys:
+            lines.append(f"{key.ljust(key_width)} = {loaded_checkpoints[key]}")
+        lines.append("")
 
     for module in modules or []:
         lines.extend(_dump_module(module))

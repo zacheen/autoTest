@@ -74,10 +74,9 @@ from model_structure.archive_manager import (
 from model_structure.training_logger import TrainingLogger
 from model_structure.adaptive_epsilon import AdaptiveEpsilonController
 from model_structure.history import TrainingHistory
+from model_structure.checkpoint_log import CheckpointLogger
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-CHECKPOINT_RED = "\033[91;1m"
-CHECKPOINT_RESET = "\033[0m"
 
 # ── CUDA SDP backend toggles ─────────────────────────────────────────
 # Encoder self-attention at seq_len=1600 materializes a full (B, H, 1600, 1600)
@@ -335,6 +334,12 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.log_prefix = "[V3]"
         self.log_actions = LOG_ACTIONS
 
+        # Checkpoint logger: green prints on successful load, red on failure,
+        # and per-area source tracker that hyperparameters.txt emits as a
+        # [loaded_checkpoints] section. Built before backbone construction so
+        # the YOLO11n load can also record its source path.
+        self.checkpoint_logger = CheckpointLogger("[V3 CHECKPOINT]")
+
         # Backbone: YOLO11n is frozen; the rest is trainable. Encoder / decoder /
         # queries are loaded from Stage 1 below when possible.
         # Replay stores YOLO backbone output (128, h, w), not raw screenshots, so
@@ -342,6 +347,14 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # token_adapter + encoder + decoder + query_tokens are RL fine-tune targets.
         # token_adapter is always random init because Stage 1 has no Linear(128->64).
         self.backbone = VisualBackboneV3(grid_h=grid_h, grid_w=grid_w).to(device)
+        # Record which yolo11n.pt the ultralytics loader actually resolved — the
+        # default "yolo11n.pt" string can map to cwd / cache / site-packages and
+        # the operator otherwise has no way to tell from logs.
+        self.checkpoint_logger.success(
+            "yolo_backbone",
+            self.backbone.feature_extractor.yolo_source,
+            f"Loaded YOLO11n backbone: {self.backbone.feature_extractor.yolo_source}",
+        )
         self.backbone.freeze_feature_extractor()
         # BN must be eval before dummy forward, or zero-input batch stats with
         # momentum=0.1 will contaminate checkpoint-loaded running_mean/running_var.
@@ -484,40 +497,14 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # comparison with hyperparameters.txt and console logs.
         print(f"[V3] SEED = {SEED}")
 
-        # Hyperparameters dump, including git commit + dirty flag.
-        # Writes module ALL_CAPS constants, reward_config dataclass, selected
-        # controller / optimizer fields, and model summaries at session start.
-        try:
-            dump_hyperparameters(
-                out_path=self.archive.session_dir / "hyperparameters.txt",
-                modules=[sys.modules[__name__]],
-                dataclass_instances={"reward_config": MINESWEEPER_REWARD_CONFIG},
-                instance_attrs={
-                    "epsilon_controller": (
-                        self.epsilon_controller,
-                        ["wr_min", "wr_max", "eps_min", "eps_max"],
-                    ),
-                    "optimizer (AdamW)": self.optimizer,
-                },
-                models={
-                    # backbone:freeze status(YOLO frozen / token_adapter+encoder+decoder
-                    # trainable) + torchinfo layer summary. input_size is the real
-                    # screenshot shape (1, 3, 640, 640). One YOLO forward is acceptable.
-                    "model.backbone": (self.backbone, (1, 3, *IMAGE_SIZE)),
-                    # Do not pass input_size for q_network. Like stage1, freeze status
-                    # and param counts are enough; dict-returning forward is not useful for torchinfo.
-                    "model.q_network": (self.q_network, None),
-                },
-            )
-        except Exception as exc:
-            print(f"[V3] hyperparameters dump failed: {exc}")
-
         # ── text log + TensorBoard ──
         # io_log: plain-text append file swapped to each new hour directory.
         # Banner comes from _build_io_log_banner.
         VISUAL_V3_TENSORBOARD_DIR.mkdir(parents=True, exist_ok=True)
         self._io_log = RolloverTextLog(banner_factory=self._build_io_log_banner)
         self._io_log.swap_to(self.archive.current_archive_dir / "train_io_log.txt")
+        # Mirror checkpoint messages to the io_log file as well.
+        self.checkpoint_logger.attach_io_log(self._io_log)
 
         # Register hour rollover callback: swap io_log. Console messages are
         # printed by SessionArchiveManager.
@@ -558,6 +545,37 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # was set after dummy forward above.
         self._purge_stale_replay_files()
         self.try_load_model()
+
+        # Hyperparameters dump runs AFTER try_load_model so the
+        # [loaded_checkpoints] section reflects the final effective weight
+        # source per area (Stage 1 warm-start, V3 own checkpoint, random
+        # init, or YOLO11n weights actually resolved by ultralytics).
+        try:
+            dump_hyperparameters(
+                out_path=self.archive.session_dir / "hyperparameters.txt",
+                modules=[sys.modules[__name__]],
+                dataclass_instances={"reward_config": MINESWEEPER_REWARD_CONFIG},
+                instance_attrs={
+                    "epsilon_controller": (
+                        self.epsilon_controller,
+                        ["wr_min", "wr_max", "eps_min", "eps_max"],
+                    ),
+                    "optimizer (AdamW)": self.optimizer,
+                },
+                models={
+                    # backbone:freeze status(YOLO frozen / token_adapter+encoder+decoder
+                    # trainable) + torchinfo layer summary. input_size is the real
+                    # screenshot shape (1, 3, 640, 640). One YOLO forward is acceptable.
+                    "model.backbone": (self.backbone, (1, 3, *IMAGE_SIZE)),
+                    # Do not pass input_size for q_network. Like stage1, freeze status
+                    # and param counts are enough; dict-returning forward is not useful for torchinfo.
+                    "model.q_network": (self.q_network, None),
+                },
+                loaded_checkpoints=self.checkpoint_logger.loaded_sources,
+            )
+        except Exception as exc:
+            print(f"[V3] hyperparameters dump failed: {exc}")
+
         self._init_weight_reference = self._capture_trainable_weight_snapshot()
         self._rolling_weight_reference = self._capture_trainable_weight_snapshot()
         self._rolling_weight_reference_step = self.total_it
@@ -604,9 +622,12 @@ class VisualAgentV3(VisualAgentCommonMixin):
         missing = [p for p in (backbone_pth, qnet_pth, qtgt_pth) if not p.exists()]
         if missing:
             for p in missing:
-                self._log_checkpoint_message(
+                self.checkpoint_logger.failure(
+                    # Area name matches the area that V3 own try_load_model may
+                    # later overwrite. failure() uses setdefault so a later
+                    # success will overwrite this INIT_FROM_SCRATCH marker.
+                    self._stage1_area_for_path(p),
                     f"Stage 1 checkpoint 不存在: {p} — all-or-nothing 放棄整批,使用 random init",
-                    warning=True,
                 )
             return False
 
@@ -637,27 +658,41 @@ class VisualAgentV3(VisualAgentCommonMixin):
         missing_keys, unexpected_keys = self.backbone.load_state_dict(remapped, strict=False)
         # Missing should include feature_extractor.* / token_adapter.* /
         # memory_position.* because V3 has them and Stage 1 does not. unexpected should be empty.
-        self._log_checkpoint_message(
-            f"Stage 1 backbone loaded ({len(remapped)} tensors from {backbone_pth.name})"
+        self.checkpoint_logger.success(
+            "backbone",
+            backbone_pth,
+            f"Stage 1 backbone loaded ({len(remapped)} tensors from {backbone_pth})",
         )
         if unexpected_keys:
-            self._log_checkpoint_message(
+            self.checkpoint_logger.warn(
                 f"Stage 1 backbone unexpected keys (應為空): {unexpected_keys[:5]}"
-                f"{'...' if len(unexpected_keys) > 5 else ''}",
-                warning=True,
+                f"{'...' if len(unexpected_keys) > 5 else ''}"
             )
 
         # FQF online + target
         self.q_network.load_state_dict(
             torch.load(qnet_pth, map_location="cpu", weights_only=False)
         )
-        self._log_checkpoint_message(f"Stage 1 fqf_network loaded ({qnet_pth.name})")
+        self.checkpoint_logger.success(
+            "q_network", qnet_pth, f"Stage 1 fqf_network loaded: {qnet_pth}"
+        )
         self.q_target.load_state_dict(
             torch.load(qtgt_pth, map_location="cpu", weights_only=False)
         )
-        self._log_checkpoint_message(f"Stage 1 fqf_target loaded ({qtgt_pth.name})")
+        self.checkpoint_logger.success(
+            "q_target", qtgt_pth, f"Stage 1 fqf_target loaded: {qtgt_pth}"
+        )
 
         return True
+
+    @staticmethod
+    def _stage1_area_for_path(p: Path) -> str:
+        """Map a Stage 1 checkpoint file name back to its tracker area name."""
+        return {
+            "backbone.pth":    "backbone",
+            "fqf_network.pth": "q_network",
+            "fqf_target.pth":  "q_target",
+        }.get(p.name, p.name)
 
     # ──────────────────────────── dropout latch ────────────────────────────
 
@@ -676,9 +711,11 @@ class VisualAgentV3(VisualAgentCommonMixin):
     def _latch_dropout_on(self, *, reason: str) -> None:
         self._dropout_latched = True
         self._set_backbone_dropout_p(DECODER_DROPOUT)
-        self._log_checkpoint_message(
-            f"dropout latch ON (p={DECODER_DROPOUT}, threshold={DROPOUT_LATCH_WR_THRESHOLD}) — {reason}",
-            warning=True,
+        # Non-checkpoint event but we want red attention. logger.warn prints red
+        # without touching the loaded_sources tracker.
+        self.checkpoint_logger.warn(
+            f"dropout latch ON (p={DECODER_DROPOUT},"
+            f" threshold={DROPOUT_LATCH_WR_THRESHOLD}) — {reason}"
         )
 
     # ──────────────────────────── runtime modes ──────────────────────────
@@ -1302,83 +1339,102 @@ class VisualAgentV3(VisualAgentCommonMixin):
             print(f"[V3] WARN: archive snapshot write failed: {exc}")
 
     def _log_checkpoint_message(self, message: str, *, warning: bool = False) -> None:
-        prefix = "[V3 CHECKPOINT]"
-        line = f"{prefix} {message}"
+        """Thin wrapper used by VisualAgentCommonMixin fallbacks.
+
+        The mixin checks ``hasattr(self, "_log_checkpoint_message")`` for old
+        v1/v2 agents that don't have a CheckpointLogger; this delegator keeps
+        that contract working while routing colored output through the shared
+        logger. Direct checkpoint sites in this file call ``self.checkpoint_logger``
+        methods directly because they need ``success`` / ``failure`` semantics
+        with area names, which this two-state wrapper cannot express.
+        """
         if warning:
-            print(f"{CHECKPOINT_RED}{line}{CHECKPOINT_RESET}")
+            self.checkpoint_logger.warn(message)
         else:
-            print(line)
-        try:
-            self._io_log.write(f"{datetime.datetime.now().isoformat()} {line}\n")
-            self._io_log.flush()
-        except Exception:
-            pass
+            self.checkpoint_logger.info(message)
 
     def try_load_model(self) -> None:
+        # V3 own checkpoints. These run AFTER Stage 1 warm-start; a success here
+        # overwrites the Stage 1 source recorded in loaded_sources, so the
+        # tracker shows the actual weights in the model after this method ends.
         bb_path = VISUAL_V3_MODEL_PATH / "backbone.pth"
         if bb_path.exists():
             try:
                 self.backbone.load_state_dict(torch.load(bb_path, map_location=device, weights_only=True))
-                self._log_checkpoint_message(f"Loaded backbone: {bb_path}")
+                self.checkpoint_logger.success(
+                    "backbone", bb_path, f"Loaded backbone: {bb_path}"
+                )
             except Exception as exc:
-                self._log_checkpoint_message(
-                    f"MISSING/FAILED backbone checkpoint: {bb_path} | using initialized backbone | error={exc}",
-                    warning=True,
+                self.checkpoint_logger.failure(
+                    "backbone",
+                    f"MISSING/FAILED backbone checkpoint: {bb_path}"
+                    f" | using initialized backbone | error={exc}",
                 )
         else:
-            self._log_checkpoint_message(
+            self.checkpoint_logger.failure(
+                "backbone",
                 f"MISSING backbone checkpoint: {bb_path} | using initialized backbone",
-                warning=True,
             )
 
         q_path = VISUAL_V3_MODEL_PATH / "fqf_network.pth"
         if q_path.exists():
             try:
                 self.q_network.load_state_dict(torch.load(q_path, map_location=device, weights_only=True))
-                self._log_checkpoint_message(f"Loaded FQF-Network: {q_path}")
+                self.checkpoint_logger.success(
+                    "q_network", q_path, f"Loaded FQF-Network: {q_path}"
+                )
             except Exception as exc:
-                self._log_checkpoint_message(
-                    f"MISSING/FAILED FQF-Network checkpoint: {q_path} | using initialized q_network | error={exc}",
-                    warning=True,
+                self.checkpoint_logger.failure(
+                    "q_network",
+                    f"MISSING/FAILED FQF-Network checkpoint: {q_path}"
+                    f" | using initialized q_network | error={exc}",
                 )
         else:
-            self._log_checkpoint_message(
+            self.checkpoint_logger.failure(
+                "q_network",
                 f"MISSING FQF-Network checkpoint: {q_path} | using initialized q_network",
-                warning=True,
             )
 
         qt_path = VISUAL_V3_MODEL_PATH / "fqf_target.pth"
         if qt_path.exists():
             try:
                 self.q_target.load_state_dict(torch.load(qt_path, map_location=device, weights_only=True))
-                self._log_checkpoint_message(f"Loaded FQF-Target: {qt_path}")
+                self.checkpoint_logger.success(
+                    "q_target", qt_path, f"Loaded FQF-Target: {qt_path}"
+                )
             except Exception as exc:
-                self._log_checkpoint_message(
-                    f"MISSING/FAILED FQF-Target checkpoint: {qt_path} | copying q_network if available | error={exc}",
-                    warning=True,
+                self.checkpoint_logger.failure(
+                    "q_target",
+                    f"MISSING/FAILED FQF-Target checkpoint: {qt_path}"
+                    f" | copying q_network if available | error={exc}",
                 )
         elif q_path.exists():
-            self._log_checkpoint_message(
-                f"MISSING FQF-Target checkpoint: {qt_path} | copying q_network weights",
-                warning=True,
-            )
+            # No on-disk q_target but q_network exists. Copy weights and mark
+            # the tracker so the operator can see the special case.
             self.q_target.load_state_dict(self.q_network.state_dict())
+            self.checkpoint_logger.mark_special(
+                "q_target",
+                "<copied from q_network>",
+                f"MISSING FQF-Target checkpoint: {qt_path} | copied q_network weights",
+            )
         else:
-            self._log_checkpoint_message(
+            self.checkpoint_logger.failure(
+                "q_target",
                 f"MISSING FQF-Target checkpoint: {qt_path} | using initialized q_target",
-                warning=True,
             )
 
         if not self._optimizer_state_path().exists():
-            self._log_checkpoint_message(
-                f"MISSING optimizer checkpoint: {self._optimizer_state_path()} | total_it stays at {self.total_it}",
-                warning=True,
+            self.checkpoint_logger.failure(
+                "optimizer_state",
+                f"MISSING optimizer checkpoint: {self._optimizer_state_path()}"
+                f" | total_it stays at {self.total_it}",
             )
         self._load_optimizer_state()
         if not self._training_state_path().exists():
-            self._log_checkpoint_message(
-                f"MISSING replay/training checkpoint: {self._training_state_path()} | replay buffer starts empty",
-                warning=True,
+            self.checkpoint_logger.failure(
+                "replay_buffer",
+                f"MISSING replay/training checkpoint: {self._training_state_path()}"
+                f" | replay buffer starts empty",
             )
         self._load_persistent_training_state()
 

@@ -76,6 +76,15 @@ class YOLO11nLastFeatureExtractor(nn.Module):
     def __init__(self, model_path="yolo11n.pt"):
         super().__init__()
         yolo = YOLO(model_path)
+        # ultralytics resolves the on-disk weight file and stores its absolute
+        # path on the YOLO object (attr name has varied across versions).
+        # Capture it so the agent can log which yolo11n.pt actually loaded —
+        # otherwise the operator can't tell cwd vs cache vs site-packages.
+        self.yolo_source: str = str(
+            getattr(yolo, "ckpt_path", None)
+            or getattr(yolo, "pt_path", None)
+            or model_path
+        )
         self.backbone_layers = nn.ModuleList(
             yolo.model.model[idx] for idx in range(YOLO_LAST_LAYER_IDX + 1)
         )
