@@ -10,6 +10,27 @@ import torch.nn as nn
 from PIL import Image
 
 
+# Calibrated from models/visual_transformer_v3_6x6/action_logs/
+# 20260602_081604_step_0002.png. The captured tensor includes top/left debug
+# overlay and gray browser margin, so the Minesweeper board is not the full image.
+ACTION_LOG_BOARD_RECT_NORM = (
+    23 / 640,
+    21 / 640,
+    622 / 640,
+    620 / 640,
+)
+
+
+def _scaled_action_log_board_rect(img_w: int, img_h: int) -> tuple[int, int, int, int]:
+    left, top, right, bottom = ACTION_LOG_BOARD_RECT_NORM
+    return (
+        int(round(left * img_w)),
+        int(round(top * img_h)),
+        int(round(right * img_w)),
+        int(round(bottom * img_h)),
+    )
+
+
 class VisualAgentCommonMixin:
     """Shared agent utilities for visual RL variants."""
 
@@ -517,8 +538,9 @@ class VisualAgentCommonMixin:
             img_array = state.detach().cpu().clamp(0, 1).mul(255).byte().numpy().transpose(1, 2, 0)
             img = Image.fromarray(img_array)
             img_w, img_h = img.size
-            cell_w = img_w / self.grid_w
-            cell_h = img_h / self.grid_h
+            grid_left, grid_top, grid_right, grid_bottom = _scaled_action_log_board_rect(img_w, img_h)
+            cell_w = (grid_right - grid_left) / self.grid_w
+            cell_h = (grid_bottom - grid_top) / self.grid_h
 
             draw = ImageDraw.Draw(img)
             try:
@@ -527,17 +549,21 @@ class VisualAgentCommonMixin:
                 font = ImageFont.load_default()
 
             row, col = log_info["row"], log_info["col"]
+            left = int(round(grid_left + col * cell_w))
+            top = int(round(grid_top + row * cell_h))
+            right = int(round(grid_left + (col + 1) * cell_w))
+            bottom = int(round(grid_top + (row + 1) * cell_h))
             draw.rectangle(
-                [int(col * cell_w), int(row * cell_h), int((col + 1) * cell_w), int((row + 1) * cell_h)],
+                [left, top, right, bottom],
                 outline="red",
                 width=4,
             )
             for r in range(1, self.grid_h):
-                y = int(r * cell_h)
-                draw.line([0, y, img_w, y], fill="white", width=1)
+                y = int(round(grid_top + r * cell_h))
+                draw.line([grid_left, y, grid_right, y], fill="white", width=1)
             for c in range(1, self.grid_w):
-                x = int(c * cell_w)
-                draw.line([x, 0, x, img_h], fill="white", width=1)
+                x = int(round(grid_left + c * cell_w))
+                draw.line([x, grid_top, x, grid_bottom], fill="white", width=1)
 
             lines = [
                 f"Step: {step_count}",
