@@ -338,9 +338,6 @@ def main():
                 logger.log("episode/q_mean_avg", stats['q_mean'], step=ep_idx, csv_col="q_mean")
             logger.log("timestamp", datetime.datetime.now().isoformat(), step=ep_idx, tb=False)
 
-            # Episode-boundary internal counter: TB only, not CSV.
-            logger.log("train/n_step_buffer_len", len(agent.n_step_buffer), step=ep_idx, csv=False)
-
             # Evaluation.
             if episode >= EVAL_OFFSET and (episode - EVAL_OFFSET) % EVAL_INTERVAL == 0:
                 eval_stats = run_evaluation(logic, agent)

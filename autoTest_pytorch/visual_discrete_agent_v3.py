@@ -1160,8 +1160,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
             f"  fpn_norm_entropy={fpn_norm_entropy:.4f} | fpn_tau_std={fpn_tau_std:.4f}\n"
             f"  grad_total_pre={grad_norm_total_value:.6f} | grad_total_post={grad_post_total:.6f} | "
             f"clip_scale={grad_clip_scale:.6f} clip_percent={grad_clip_percent:.2%}\n"
-            f"  grad_clip_threshold={grad_clip_threshold:.6f} | "
-            f"backbone_pre={backbone_pre:.6f} head_pre={head_pre:.6f}\n"
+            f"  backbone_pre={backbone_pre:.6f} head_pre={head_pre:.6f}\n"
             f"{weight_delta_line}"
             f"---\n"
         )
@@ -1183,7 +1182,6 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.training_logger.log("train/target_q_mean",     target_q_mean,                                 step=step, csv=False)
         self.training_logger.log("grad/total_norm",         grad_norm_total_value,                         step=step, csv=False)
         self.training_logger.log("grad/post_total_norm",    grad_post_total,                               step=step, csv=False)
-        self.training_logger.log("grad/clip_threshold",     grad_clip_threshold,                           step=step, csv=False)
         self.training_logger.log("grad/clip_percent",       grad_clip_percent,                             step=step, csv=False)
         self.training_logger.log("grad/clip_excess_norm",   grad_clip_excess_norm,                         step=step, csv=False)
         self.training_logger.log("grad/clip_excess_ratio",  grad_clip_excess_ratio,                        step=step, csv=False)
@@ -1273,10 +1271,6 @@ class VisualAgentV3(VisualAgentCommonMixin):
         for bucket_name, count in self.replay_buffer.bucket_sizes().items():
             self.training_logger.log(f"buffer/bucket_{bucket_name}", count, step=ep_idx, csv=False)
         self.training_logger.log("buffer/total_size", self.replay_buffer.size(), step=ep_idx, csv=False)
-
-        # n_step_buffer_len should be 0 at episode boundaries.
-        # Persistent nonzero means flush failed.
-        self.training_logger.log("train/n_step_buffer_len", len(self.n_step_buffer), step=ep_idx, csv=False)
 
         self.training_logger.commit_csv_row()
         self.training_logger.flush()
