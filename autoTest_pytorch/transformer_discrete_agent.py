@@ -330,6 +330,7 @@ class TransformerDiscreteAgent:
         tb_root = TRANSFORMER_MODEL_PATH / "tensorboard"
         tb_root.mkdir(parents=True, exist_ok=True)
         self._metric_docs_sentinel = tb_root / ".metric_docs_written"
+        self._fqf_metric_docs_sentinel = tb_root / ".fqf_metric_docs_written"
         tb_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.tensorboard_log_dir = tb_root / tb_timestamp
         print(f"[FQF] TensorBoard: tensorboard --logdir {tb_root}")
@@ -356,6 +357,7 @@ class TransformerDiscreteAgent:
             self._handle_resume_metric_docs()
         else:
             self._write_metric_docs_once()
+        self._write_fqf_metric_docs_once()
 
         # dump_hyperparameters runs AFTER try_load_model so the
         # [loaded_checkpoints] section reflects the final effective weight
@@ -972,16 +974,70 @@ class TransformerDiscreteAgent:
         )
         self.training_logger.log_text("docs/is_weight_ratio", is_weight_ratio_doc, step=0)
 
+    def _write_fqf_metric_docs(self):
+        """Write FQF distribution and Huber clipping metric notes to TensorBoard."""
+        fpn_norm_entropy_doc = (
+            "**`fpn/norm_entropy`** — FQF fraction-proposal distribution entropy, "
+            "normalized to 0~1. It shows whether the fraction proposal network spreads "
+            "probability across quantile fractions or collapses into a few fractions.\n\n"
+            "| 數值區間 | 代表 | 越大越好嗎? |\n"
+            "|---|---|---|\n"
+            "| 接近 1.0 | fraction_probs 接近平均分配,quantile coverage 很廣 | 不一定; early 正常,但長期貼 1.0 代表 FPN 幾乎沒學到重點 |\n"
+            "| 0.5 ~ 0.9 | 有分配偏好,但沒有 collapse | 通常合理 |\n"
+            "| < 0.3 | 少數 fraction 主宰,quantile coverage 變窄 | 偏危險,可能 FPN collapse |\n\n"
+            "方向: 不是單純越大越好。太小代表 collapse; 太接近 1 且長期不動代表太 uniform。"
+        )
+        self.training_logger.log_text("docs/fpn_norm_entropy", fpn_norm_entropy_doc, step=0)
+
+        fpn_tau_std_doc = (
+            "**`fpn/tau_std`** — tau_hats 在 quantile axis 上的平均標準差。"
+            f"目前 `NUM_FQF_FRACTIONS={NUM_FQF_FRACTIONS}`,接近平均切分時大約是 0.30。"
+            "它表示 quantile fractions 覆蓋範圍有多寬。\n\n"
+            "| 數值區間 | 代表 | 越大越好嗎? |\n"
+            "|---|---|---|\n"
+            "| 0.25 ~ 0.32 | tau_hats 覆蓋大部分 0~1 quantile range | 通常合理 |\n"
+            "| 0.15 ~ 0.25 | 覆蓋偏窄,但還沒完全 collapse | 需要搭配 norm_entropy 觀察 |\n"
+            "| < 0.15 | tau_hats 擠在局部區域 | 偏危險,FPN 可能 collapse |\n\n"
+            "方向: 太小不好; 大到接近平均切分通常健康。但不是無限越大越好,要和 norm_entropy 一起看。"
+        )
+        self.training_logger.log_text("docs/fpn_tau_std", fpn_tau_std_doc, step=0)
+
+        frac_huber_clipped_doc = (
+            "**`train/frac_huber_clipped`** — quantile TD-error 中,絕對值超過 "
+            f"`FQF_HUBER_KAPPA={FQF_HUBER_KAPPA}` 的比例。超過 kappa 的部分會走 Huber linear branch,"
+            "表示 batch 裡有多少 target/current quantile 差距很大。\n\n"
+            "| 數值區間 | 代表 | 越大越好嗎? |\n"
+            "|---|---|---|\n"
+            "| < 0.05 | 大部分 TD-error 在 quadratic 區域,更新溫和 | 通常合理,收斂後常見 |\n"
+            "| 0.05 ~ 0.20 | 有一些大誤差,仍可接受 | early training 或策略改變時正常 |\n"
+            "| > 0.30 | 很多 quantile error 被 clipping | 偏危險,可能 target scale/Q scale 不穩或 reward shock |\n\n"
+            "方向: 通常越小越穩,但不是永遠越小越好。訓練早期或剛 resume 有 spike 可以接受; 長期偏高才需要擔心。"
+        )
+        self.training_logger.log_text("docs/frac_huber_clipped", frac_huber_clipped_doc, step=0)
+
     def _write_metric_docs_once(self):
         """Write static TensorBoard TEXT docs once per TensorBoard root."""
         if self._metric_docs_sentinel.exists():
             return
         self._write_metric_docs()
+        self._write_fqf_metric_docs()
         self.training_logger.flush()
         try:
             self._metric_docs_sentinel.touch(exist_ok=True)
+            self._fqf_metric_docs_sentinel.touch(exist_ok=True)
         except OSError as exc:
             print(f"[FQF] WARN: failed to write TensorBoard metric docs sentinel: {exc}")
+
+    def _write_fqf_metric_docs_once(self):
+        """Write newer FQF metric docs once even for roots with old doc sentinels."""
+        if self._fqf_metric_docs_sentinel.exists():
+            return
+        self._write_fqf_metric_docs()
+        self.training_logger.flush()
+        try:
+            self._fqf_metric_docs_sentinel.touch(exist_ok=True)
+        except OSError as exc:
+            print(f"[FQF] WARN: failed to write TensorBoard FQF metric docs sentinel: {exc}")
 
     def _handle_resume_metric_docs(self):
         """Avoid duplicate resume docs, but recreate them if the TB root is empty."""

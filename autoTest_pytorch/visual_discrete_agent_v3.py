@@ -49,6 +49,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from transformer_discrete_agent import (
     FQF_ENTROPY_COEF,
+    FQF_HUBER_KAPPA,
     NUM_FQF_FRACTIONS,
     TRANSFORMER_MODEL_PATH,
     _quantile_huber_loss,
@@ -501,6 +502,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # io_log: plain-text append file swapped to each new hour directory.
         # Banner comes from _build_io_log_banner.
         VISUAL_V3_TENSORBOARD_DIR.mkdir(parents=True, exist_ok=True)
+        self._fqf_metric_docs_sentinel = VISUAL_V3_TENSORBOARD_DIR / ".fqf_metric_docs_written"
         self._io_log = RolloverTextLog(banner_factory=self._build_io_log_banner)
         self._io_log.swap_to(self.archive.current_archive_dir / "train_io_log.txt")
         # Mirror checkpoint messages to the io_log file as well.
@@ -538,6 +540,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
             lambda new_dir: self.training_logger.swap_csv_to(new_dir / "training_log.csv")
         )
         print(f"[V3] CSV log: {csv_path}")
+        self._write_fqf_metric_docs_once()
 
         # Remove replay buffer .pt files from older architectures or corrupt files.
         # Must run before try_load_model(), or _load_persistent_training_state may
@@ -598,6 +601,58 @@ class VisualAgentV3(VisualAgentCommonMixin):
         atexit.register(self._save_model)
 
     # ──────────────────────────── Stage 1 warm-start ──────────────────────
+
+    def _write_fqf_metric_docs(self):
+        """Write FQF distribution and Huber clipping metric notes to TensorBoard."""
+        fpn_norm_entropy_doc = (
+            "**`fpn/norm_entropy`** — FQF fraction-proposal distribution entropy, "
+            "normalized to 0~1. It shows whether the fraction proposal network spreads "
+            "probability across quantile fractions or collapses into a few fractions.\n\n"
+            "| 數值區間 | 代表 | 越大越好嗎? |\n"
+            "|---|---|---|\n"
+            "| 接近 1.0 | fraction_probs 接近平均分配,quantile coverage 很廣 | 不一定; early 正常,但長期貼 1.0 代表 FPN 幾乎沒學到重點 |\n"
+            "| 0.5 ~ 0.9 | 有分配偏好,但沒有 collapse | 通常合理 |\n"
+            "| < 0.3 | 少數 fraction 主宰,quantile coverage 變窄 | 偏危險,可能 FPN collapse |\n\n"
+            "方向: 不是單純越大越好。太小代表 collapse; 太接近 1 且長期不動代表太 uniform。"
+        )
+        self.training_logger.log_text("docs/fpn_norm_entropy", fpn_norm_entropy_doc, step=0)
+
+        fpn_tau_std_doc = (
+            "**`fpn/tau_std`** — tau_hats 在 quantile axis 上的平均標準差。"
+            f"目前 `NUM_FQF_FRACTIONS={NUM_FQF_FRACTIONS}`,接近平均切分時大約是 0.30。"
+            "它表示 quantile fractions 覆蓋範圍有多寬。\n\n"
+            "| 數值區間 | 代表 | 越大越好嗎? |\n"
+            "|---|---|---|\n"
+            "| 0.25 ~ 0.32 | tau_hats 覆蓋大部分 0~1 quantile range | 通常合理 |\n"
+            "| 0.15 ~ 0.25 | 覆蓋偏窄,但還沒完全 collapse | 需要搭配 norm_entropy 觀察 |\n"
+            "| < 0.15 | tau_hats 擠在局部區域 | 偏危險,FPN 可能 collapse |\n\n"
+            "方向: 太小不好; 大到接近平均切分通常健康。但不是無限越大越好,要和 norm_entropy 一起看。"
+        )
+        self.training_logger.log_text("docs/fpn_tau_std", fpn_tau_std_doc, step=0)
+
+        frac_huber_clipped_doc = (
+            "**`train/frac_huber_clipped`** — quantile TD-error 中,絕對值超過 "
+            f"`FQF_HUBER_KAPPA={FQF_HUBER_KAPPA}` 的比例。超過 kappa 的部分會走 Huber linear branch,"
+            "表示 batch 裡有多少 target/current quantile 差距很大。\n\n"
+            "| 數值區間 | 代表 | 越大越好嗎? |\n"
+            "|---|---|---|\n"
+            "| < 0.05 | 大部分 TD-error 在 quadratic 區域,更新溫和 | 通常合理,收斂後常見 |\n"
+            "| 0.05 ~ 0.20 | 有一些大誤差,仍可接受 | early training 或策略改變時正常 |\n"
+            "| > 0.30 | 很多 quantile error 被 clipping | 偏危險,可能 target scale/Q scale 不穩或 reward shock |\n\n"
+            "方向: 通常越小越穩,但不是永遠越小越好。訓練早期或剛 resume 有 spike 可以接受; 長期偏高才需要擔心。"
+        )
+        self.training_logger.log_text("docs/frac_huber_clipped", frac_huber_clipped_doc, step=0)
+
+    def _write_fqf_metric_docs_once(self):
+        """Write FQF metric docs once per TensorBoard root."""
+        if self._fqf_metric_docs_sentinel.exists():
+            return
+        self._write_fqf_metric_docs()
+        self.training_logger.flush()
+        try:
+            self._fqf_metric_docs_sentinel.touch(exist_ok=True)
+        except OSError as exc:
+            print(f"[V3] WARN: failed to write TensorBoard FQF metric docs sentinel: {exc}")
 
     def _load_stage1_weights(self, stage1_dir: Path) -> bool:
         """Load encoder/decoder/queries/FQF from Stage 1 checkpoint, all-or-nothing.
@@ -1213,16 +1268,14 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.training_logger.log("timestamp",                  datetime.datetime.now().isoformat(), step=ep_idx, tb=False)
         self.training_logger.log("episode",                    ep_idx,                    step=ep_idx, tb=False)
 
-        # Replay buffer composition is also logged in train_step, but before
-        # MINIMUM_DATA_SIZE train_step returns None. Logging here gives fill curves
-        # and bucket ratios from episode 1. TB only via csv=False.
+        # Replay buffer composition is logged at episode end so fill curves and
+        # bucket ratios are visible from episode 1. TB only via csv=False.
         for bucket_name, count in self.replay_buffer.bucket_sizes().items():
             self.training_logger.log(f"buffer/bucket_{bucket_name}", count, step=ep_idx, csv=False)
         self.training_logger.log("buffer/total_size", self.replay_buffer.size(), step=ep_idx, csv=False)
 
-        # Internal counters. total_it counts train_step calls; n_step_buffer_len
-        # should be 0 at episode boundaries. Persistent nonzero means flush failed.
-        self.training_logger.log("train/total_it",          self.total_it,           step=ep_idx, csv=False)
+        # n_step_buffer_len should be 0 at episode boundaries.
+        # Persistent nonzero means flush failed.
         self.training_logger.log("train/n_step_buffer_len", len(self.n_step_buffer), step=ep_idx, csv=False)
 
         self.training_logger.commit_csv_row()

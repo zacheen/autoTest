@@ -322,7 +322,7 @@ def main():
 
             # Episode-summary metrics go through TrainingLogger, writing both TB
             # and CSV row buffer. High-frequency train/* / grad/* / fpn/* /
-            # buffer/* / weight_norm/* are written by agent.train_step on total_it.
+            # weight_norm/* are written by agent.train_step on the update step.
             # NOTE: `episode/reward_mean` / `episode/invalid_click_rate` / `episode/epsilon`
             # are already written to TB by agent.log_episode_metrics; do not duplicate.
             ep_idx = agent.episode_count
@@ -338,8 +338,7 @@ def main():
                 logger.log("episode/q_mean_avg", stats['q_mean'], step=ep_idx, csv_col="q_mean")
             logger.log("timestamp", datetime.datetime.now().isoformat(), step=ep_idx, tb=False)
 
-            # Agent internal counters: TB only, per-step nature, not CSV.
-            logger.log("train/total_it", agent.total_it, step=ep_idx, csv=False)
+            # Episode-boundary internal counter: TB only, not CSV.
             logger.log("train/n_step_buffer_len", len(agent.n_step_buffer), step=ep_idx, csv=False)
 
             # Evaluation.
