@@ -351,7 +351,12 @@ def main():
             logger.commit_csv_row()
 
             # Evaluation.
-            if should_run_eval(episode, offset=EVAL_OFFSET, interval=EVAL_INTERVAL):
+            if should_run_eval(
+                episode,
+                offset=EVAL_OFFSET,
+                interval=EVAL_INTERVAL,
+                training_started=agent.total_it > 0,
+            ):
                 eval_started_at, seconds_since_last_eval = start_eval_timing(last_eval_started_at)
                 last_eval_started_at = eval_started_at
                 eval_stats = run_evaluation(logic, agent)

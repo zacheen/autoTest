@@ -7,8 +7,16 @@ import time
 from typing import Callable
 
 
-def should_run_eval(episode: int, *, offset: int, interval: int) -> bool:
+def should_run_eval(
+    episode: int,
+    *,
+    offset: int,
+    interval: int,
+    training_started: bool = True,
+) -> bool:
     """Return whether the current episode should trigger evaluation."""
+    if not training_started:
+        return False
     return episode >= offset and (episode - offset) % interval == 0
 
 

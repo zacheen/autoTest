@@ -324,7 +324,12 @@ class Game_test_case(unittest.TestCase) :
 
     def maybe_run_eval(self, agent):
         episode = agent.episode_count
-        if not should_run_eval(episode, offset=EVAL_OFFSET, interval=EVAL_INTERVAL):
+        if not should_run_eval(
+            episode,
+            offset=EVAL_OFFSET,
+            interval=EVAL_INTERVAL,
+            training_started=agent.total_it > 0,
+        ):
             return
 
         eval_started_at, seconds_since_last_eval = start_eval_timing(
