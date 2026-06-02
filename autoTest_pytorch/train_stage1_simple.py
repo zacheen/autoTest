@@ -192,7 +192,10 @@ def compute_reward(result):
     return MINESWEEPER_REWARD_CONFIG.valid_click
 
 
-def run_episode(logic, agent, add_noise=True):
+def run_episode(logic, agent, add_noise=True, *, store_data=None, train=True):
+    if store_data is None:
+        store_data = add_noise
+
     logic.reset()
     agent.reset_episode()
     episode_reward = 0.0
@@ -220,13 +223,14 @@ def run_episode(logic, agent, add_noise=True):
         is_win = result.win
         next_state = torch.from_numpy(logic.get_grid_state_array())
 
-        if add_noise:
-            # Skip first step: first click is always valid and dilutes the valid group.
-            if episode_steps > 0:
+        if store_data:
+            # Training keeps the old skip-first-click rule; eval data stores every step.
+            if not train or episode_steps > 0:
                 agent.store_transition(state, (row, col), next_state, reward, done)
-                train_info = agent.train_step()
-                if train_info is not None:
-                    train_info_list.append(train_info)
+                if train:
+                    train_info = agent.train_step()
+                    if train_info is not None:
+                        train_info_list.append(train_info)
 
         episode_steps += 1
 
@@ -259,7 +263,7 @@ def run_fixed_policy_evaluation(logic, agent, num_episodes):
     eval_hist = History(max_capacity=num_episodes)
 
     for _ in range(num_episodes):
-        stats = run_episode(logic, agent, add_noise=False)
+        stats = run_episode(logic, agent, add_noise=False, store_data=True, train=False)
         eval_hist.record(
             win=stats['is_win'],
             total_reward=stats['reward'],

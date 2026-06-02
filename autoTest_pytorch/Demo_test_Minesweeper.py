@@ -377,7 +377,7 @@ class Game_test_case(unittest.TestCase) :
         invalid_rates = []
 
         for eval_idx in range(1, num_episodes + 1):
-            stats = self.run_eval_episode(agent)
+            stats = self.run_eval_episode(agent, store_data=True)
             rewards.append(stats["reward"])
             wins.append(1 if stats["is_win"] else 0)
             steps.append(stats["steps"])
@@ -397,7 +397,7 @@ class Game_test_case(unittest.TestCase) :
             "avg_invalid_rate": sum(invalid_rates) / max(len(invalid_rates), 1),
         }
 
-    def run_eval_episode(self, agent):
+    def run_eval_episode(self, agent, *, store_data=True):
         if not WEB_API.start_new_game():
             raise RuntimeError("[V3 EVAL] Failed to start eval game")
 
@@ -405,7 +405,7 @@ class Game_test_case(unittest.TestCase) :
         game_status.agent = agent
         game_status.noise = False
         game_status.server_state = WEB_API.get_game_state()
-        agent.clear_blocked_actions(reason="eval episode reset")
+        agent.reset_episode()
 
         done = False
         while not done and game_status.step_count < EVAL_MAX_STEPS_PER_EPISODE:
@@ -422,6 +422,14 @@ class Game_test_case(unittest.TestCase) :
                 game_status.invalid_click_count += 1
                 game_status.record_reward(game_status.reward)
                 agent.block_action_for_state(current_screenshot, action)
+                if store_data:
+                    agent.store_transition(
+                        current_screenshot,
+                        action,
+                        current_screenshot,
+                        game_status.reward,
+                        False,
+                    )
                 game_status.step_count += 1
                 time.sleep(EVAL_STEP_WAIT_SECONDS)
                 continue
@@ -438,19 +446,31 @@ class Game_test_case(unittest.TestCase) :
                 game_status.reward = MINESWEEPER_REWARD_CONFIG.lose
                 game_status.game_over = 1
                 done = True
+                game_status.next_state = None
             elif server_status == "won":
                 game_status.reward = MINESWEEPER_REWARD_CONFIG.win
                 game_status.game_over = 1
                 game_status.won = True
                 done = True
+                game_status.next_state = None
             elif board_changed:
                 game_status.reward = MINESWEEPER_REWARD_CONFIG.valid_click
+                game_status.next_state = self.capture_grid_state(game_status)
             else:
                 game_status.reward = MINESWEEPER_REWARD_CONFIG.invalid_click
                 game_status.invalid_click_count += 1
                 agent.block_action_for_state(current_screenshot, action)
+                game_status.next_state = current_screenshot
 
             game_status.record_reward(game_status.reward)
+            if store_data:
+                agent.store_transition(
+                    current_screenshot,
+                    action,
+                    game_status.next_state,
+                    game_status.reward,
+                    bool(game_status.game_over),
+                )
             game_status.step_count += 1
             time.sleep(EVAL_STEP_WAIT_SECONDS)
 
