@@ -52,6 +52,9 @@ PER_BETA_END = 1.0
 # Phase 1 stratified-balanced ratio inside each batch. 1.0 = all per-class
 # stratified, with PER only filling shortages. 0.5 = original 50/50. 0.0 = pure global PER.
 PER_BALANCED_RATIO = 1.0
+# Resume-only replay quota gate. If the loaded rolling win rate is already above
+# this threshold, require class quota to be filled before optimizer updates resume.
+CLASS_QUOTA_GATE_WR_THRESHOLD = 0.5
 TARGET_UPDATE_FREQ = 50
 N_STEP = 1
 NUM_FQF_FRACTIONS = 8
@@ -265,6 +268,7 @@ class TransformerDiscreteAgent:
             spread_decay=2.0,
         )
         self.total_it = 0
+        self.is_resume_training = False
         self.steps_since_resume = 0  # reset each startup; used for resume LR warmup, not saved
         # episode_count delegates to training_history.total_episodes as single source of truth.
         self.n_step = N_STEP
@@ -282,13 +286,9 @@ class TransformerDiscreteAgent:
         self.training_history = TrainingHistory()
         self.deque_cls = deque  # used by training_history.load_state_dict()
 
-        # Lazy-captured at first train_step: if the loaded TrainingHistory shows last
-        # win_rate(window=100) > 0.5, we additionally gate training on the replay buffer
-        # having all 4 classes filled to their 12.5% soft-floor quota. Fresh runs
-        # (history empty → win_rate=0) and weak resumes skip this gate.
-        # Captured once and frozen for the whole session — won't flip when live win_rate
-        # crosses 50% mid-training.
-        self._class_quota_gate_enabled: bool | None = None
+        # Captured after checkpoint loading from startup history only.
+        # Fresh runs start empty; live win-rate changes do not flip this gate.
+        self._class_quota_gate_enabled = False
 
         # Episode-scoped blocked actions: clicked cells are masked within this episode.
         self.blocked_actions: set[int] = set()
@@ -329,6 +329,7 @@ class TransformerDiscreteAgent:
         # internal to TrainingLogger; all TB writes go through training_logger.
         tb_root = TRANSFORMER_MODEL_PATH / "tensorboard"
         tb_root.mkdir(parents=True, exist_ok=True)
+        self._metric_docs_sentinel = tb_root / ".metric_docs_written"
         tb_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.tensorboard_log_dir = tb_root / tb_timestamp
         print(f"[FQF] TensorBoard: tensorboard --logdir {tb_root}")
@@ -346,9 +347,15 @@ class TransformerDiscreteAgent:
             lambda new_dir: self.training_logger.swap_csv_to(new_dir / "training_log.csv")
         )
         print(f"[FQF] CSV log: {csv_path}")
-        self._write_metric_docs()
 
         self.try_load_model()
+        self._class_quota_gate_enabled = (
+            self.training_history.win_rate(window=100) > CLASS_QUOTA_GATE_WR_THRESHOLD
+        )
+        if self.is_resume_training:
+            self._handle_resume_metric_docs()
+        else:
+            self._write_metric_docs_once()
 
         # dump_hyperparameters runs AFTER try_load_model so the
         # [loaded_checkpoints] section reflects the final effective weight
@@ -516,11 +523,8 @@ class TransformerDiscreteAgent:
         if buf_size < MINIMUM_DATA_SIZE:
             return None
 
-        # Capture-once class_quota gate decision based on loaded training_history.
-        # Only enforce balanced-data warmup when resuming from a session that was already
-        # performing well (win_rate > 50%); fresh / weak runs proceed without this gate.
-        if self._class_quota_gate_enabled is None:
-            self._class_quota_gate_enabled = self.training_history.win_rate(window=100) > 0.5
+        # Startup-history quota gate. Fresh live win-rate changes do not flip this
+        # mid-session; resumed high-win-rate sessions must refill class quota first.
         if self._class_quota_gate_enabled and not self.replay_buffer.is_class_quota_filled():
             return None
 
@@ -967,6 +971,33 @@ class TransformerDiscreteAgent:
             "把活條目的 weight 壓到 ~1e-5。"
         )
         self.training_logger.log_text("docs/is_weight_ratio", is_weight_ratio_doc, step=0)
+
+    def _write_metric_docs_once(self):
+        """Write static TensorBoard TEXT docs once per TensorBoard root."""
+        if self._metric_docs_sentinel.exists():
+            return
+        self._write_metric_docs()
+        self.training_logger.flush()
+        try:
+            self._metric_docs_sentinel.touch(exist_ok=True)
+        except OSError as exc:
+            print(f"[FQF] WARN: failed to write TensorBoard metric docs sentinel: {exc}")
+
+    def _handle_resume_metric_docs(self):
+        """Avoid duplicate resume docs, but recreate them if the TB root is empty."""
+        if self._metric_docs_sentinel.exists():
+            return
+        try:
+            has_prior_runs = any(
+                child.is_dir() and child != self.tensorboard_log_dir
+                for child in self._metric_docs_sentinel.parent.iterdir()
+            )
+            if has_prior_runs:
+                self._metric_docs_sentinel.touch(exist_ok=True)
+            else:
+                self._write_metric_docs_once()
+        except OSError as exc:
+            print(f"[FQF] WARN: failed to inspect TensorBoard metric docs sentinel: {exc}")
 
     def _assert_finite(self, stage, name, tensor):
         """NaN/Inf probe for training; raises with stage / tensor / step on hit.
@@ -1773,6 +1804,7 @@ class TransformerDiscreteAgent:
                             f" restart will use fresh RNG,trajectory 不會跟 save"
                             f" 那刻延續(這是 win rate drop 的根因,新 save 會修)"
                         )
+                    self.is_resume_training = True
                 except Exception as exc:
                     self.checkpoint_logger.failure(
                         "optimizer_state", f"Failed to apply optimizer state: {exc}"
