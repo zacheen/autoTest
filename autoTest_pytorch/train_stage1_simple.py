@@ -34,6 +34,7 @@ from transformer_discrete_agent import (
     TRANSFORMER_D_MODEL,
     TRANSFORMER_NHEAD,
     TRANSFORMER_NUM_LAYERS,
+    MINIMUM_DATA_SIZE,
 )
 
 
@@ -52,6 +53,7 @@ SAVE_DEMO_INTERVAL = 300
 EVAL_INTERVAL = 200
 EVAL_EPISODES = 30
 EVAL_OFFSET = 50  # First eval at ep 50, then every EVAL_INTERVAL: 50, 250, 450...
+RESUME_PREFILL_EVAL_EPISODES = 300
 
 # ---------- Paths ----------
 TENSORBOARD_DIR = Path("./models/stage1_transformer/tensorboard")
@@ -305,6 +307,7 @@ def main():
     # Cumulative wins use agent.training_history.total_wins.
     start_time = time.time()
     last_eval_started_at = None
+    resume_eval_checked = False
 
     try:
         for episode in range(1, MAX_EPISODES + 1):
@@ -350,16 +353,41 @@ def main():
             logger.log("episode", ep_idx, step=ep_idx, tb=False)
             logger.commit_csv_row()
 
+            eval_episodes = None
+
+            # Resume evaluation runs once with the ordinary fixed-policy eval
+            # path. If replay is still below the training threshold, use a larger
+            # 300-episode sample; otherwise use the normal eval size.
+            if agent.is_resume_training and agent.total_it > 0 and not resume_eval_checked:
+                resume_eval_checked = True
+                eval_episodes = (
+                    RESUME_PREFILL_EVAL_EPISODES
+                    if agent.replay_buffer.size() < MINIMUM_DATA_SIZE
+                    else EVAL_EPISODES
+                )
+                print(
+                    f"[EVAL] Resume eval: replay "
+                    f"{agent.replay_buffer.size()}/{MINIMUM_DATA_SIZE}, "
+                    f"episodes={eval_episodes}"
+                )
+
             # Evaluation.
-            if should_run_eval(
+            elif should_run_eval(
                 episode,
                 offset=EVAL_OFFSET,
                 interval=EVAL_INTERVAL,
-                training_started=agent.total_it > 0,
+                training_started=agent.total_it > 0 and agent.replay_buffer.size() >= MINIMUM_DATA_SIZE,
             ):
+                eval_episodes = EVAL_EPISODES
+                print(
+                    f"[EVAL] Start fixed-policy evaluation at episode {episode}: "
+                    f"{eval_episodes} episodes"
+                )
+
+            if eval_episodes is not None:
                 eval_started_at, seconds_since_last_eval = start_eval_timing(last_eval_started_at)
                 last_eval_started_at = eval_started_at
-                eval_stats = run_evaluation(logic, agent)
+                eval_stats = run_fixed_policy_evaluation(logic, agent, eval_episodes)
                 duration_seconds = finish_eval_timing(eval_started_at)
                 log_eval_metrics(
                     logger,

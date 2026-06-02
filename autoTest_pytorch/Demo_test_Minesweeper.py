@@ -43,7 +43,7 @@ from model_structure.eval_utils import (
     start_eval_timing,
 )
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
-from visual_discrete_agent_v3 import get_agent
+from visual_discrete_agent_v3 import MINIMUM_DATA_SIZE, get_agent
 
 
 EVAL_INTERVAL = 200
@@ -51,6 +51,7 @@ EVAL_EPISODES = 30
 EVAL_OFFSET = 50
 EVAL_MAX_STEPS_PER_EPISODE = 200
 EVAL_STEP_WAIT_SECONDS = 0.1
+RESUME_PREFILL_EVAL_EPISODES = 300
 
 
 class Minesweeper_Begin_thread (Thread):
@@ -127,6 +128,7 @@ class Game_only_var() :
 
 class Game_test_case(unittest.TestCase) :
     _last_eval_started_at = None
+    _resume_eval_checked = False
 
     @classmethod
     def setUpClass(self):
@@ -324,24 +326,39 @@ class Game_test_case(unittest.TestCase) :
 
     def maybe_run_eval(self, agent):
         episode = agent.episode_count
-        if not should_run_eval(
+        eval_episodes = None
+
+        if agent.total_it > 0 and not Game_test_case._resume_eval_checked:
+            Game_test_case._resume_eval_checked = True
+            eval_episodes = (
+                RESUME_PREFILL_EVAL_EPISODES
+                if agent.replay_buffer.size() < MINIMUM_DATA_SIZE
+                else EVAL_EPISODES
+            )
+            print(
+                f"[V3 EVAL] Resume eval: replay "
+                f"{agent.replay_buffer.size()}/{MINIMUM_DATA_SIZE}, "
+                f"episodes={eval_episodes}"
+            )
+        elif should_run_eval(
             episode,
             offset=EVAL_OFFSET,
             interval=EVAL_INTERVAL,
-            training_started=agent.total_it > 0,
+            training_started=agent.total_it > 0 and agent.replay_buffer.size() >= MINIMUM_DATA_SIZE,
         ):
+            eval_episodes = EVAL_EPISODES
+            print(
+                f"[V3 EVAL] Start fixed-policy evaluation at episode {episode}: "
+                f"{eval_episodes} episodes"
+            )
+        else:
             return
 
         eval_started_at, seconds_since_last_eval = start_eval_timing(
             Game_test_case._last_eval_started_at
         )
         Game_test_case._last_eval_started_at = eval_started_at
-
-        print(
-            f"[V3 EVAL] Start fixed-policy evaluation at episode {episode}: "
-            f"{EVAL_EPISODES} episodes"
-        )
-        eval_stats = self.run_fixed_policy_evaluation(agent, EVAL_EPISODES)
+        eval_stats = self.run_fixed_policy_evaluation(agent, eval_episodes)
         duration_seconds = finish_eval_timing(eval_started_at)
 
         agent.log_eval_metrics(
