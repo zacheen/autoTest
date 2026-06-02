@@ -215,6 +215,7 @@ _DEFAULT_CSV_FIELDS = (
     "episode", "reward", "steps", "is_win", "invalid_rate",
     "Q_loss", "q_mean", "epsilon",
     "eval_avg_reward", "eval_win_rate", "eval_avg_steps", "eval_avg_invalid_rate",
+    "eval_seconds_since_last_eval", "eval_duration_seconds",
     "timestamp",
 )
 

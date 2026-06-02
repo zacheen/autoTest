@@ -37,8 +37,20 @@ from util.Gf_Except import Game_fail_Exception
 from Minesweeper_web_client import MinesweeperWebClient
 
 from Minesweeper.Minesweeper_manager import Minesweeper_manager
+from model_structure.eval_utils import (
+    finish_eval_timing,
+    should_run_eval,
+    start_eval_timing,
+)
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from visual_discrete_agent_v3 import get_agent
+
+
+EVAL_INTERVAL = 200
+EVAL_EPISODES = 30
+EVAL_OFFSET = 50
+EVAL_MAX_STEPS_PER_EPISODE = 200
+EVAL_STEP_WAIT_SECONDS = 0.1
 
 
 class Minesweeper_Begin_thread (Thread):
@@ -114,6 +126,8 @@ class Game_only_var() :
         pass
 
 class Game_test_case(unittest.TestCase) :
+    _last_eval_started_at = None
+
     @classmethod
     def setUpClass(self):
         # Per-game init values.
@@ -308,6 +322,123 @@ class Game_test_case(unittest.TestCase) :
                 return 0.0
             return self.total_reward / self.reward_count
 
+    def maybe_run_eval(self, agent):
+        episode = agent.episode_count
+        if not should_run_eval(episode, offset=EVAL_OFFSET, interval=EVAL_INTERVAL):
+            return
+
+        eval_started_at, seconds_since_last_eval = start_eval_timing(
+            Game_test_case._last_eval_started_at
+        )
+        Game_test_case._last_eval_started_at = eval_started_at
+
+        print(
+            f"[V3 EVAL] Start fixed-policy evaluation at episode {episode}: "
+            f"{EVAL_EPISODES} episodes"
+        )
+        eval_stats = self.run_fixed_policy_evaluation(agent, EVAL_EPISODES)
+        duration_seconds = finish_eval_timing(eval_started_at)
+
+        agent.log_eval_metrics(
+            avg_reward=eval_stats["avg_reward"],
+            win_rate=eval_stats["win_rate"],
+            avg_steps=eval_stats["avg_steps"],
+            avg_invalid_rate=eval_stats["avg_invalid_rate"],
+            seconds_since_last_eval=seconds_since_last_eval,
+            duration_seconds=duration_seconds,
+        )
+
+    def run_fixed_policy_evaluation(self, agent, num_episodes):
+        rewards = []
+        wins = []
+        steps = []
+        invalid_rates = []
+
+        for eval_idx in range(1, num_episodes + 1):
+            stats = self.run_eval_episode(agent)
+            rewards.append(stats["reward"])
+            wins.append(1 if stats["is_win"] else 0)
+            steps.append(stats["steps"])
+            invalid_rates.append(stats["invalid_rate"])
+            print(
+                f"[V3 EVAL] {eval_idx:>2}/{num_episodes}: "
+                f"{'WIN ' if stats['is_win'] else 'LOSE'} | "
+                f"reward={stats['reward']:.3f} | "
+                f"steps={stats['steps']} | "
+                f"invalid={stats['invalid_rate']:.2%}"
+            )
+
+        return {
+            "avg_reward": sum(rewards) / max(len(rewards), 1),
+            "win_rate": sum(wins) / max(len(wins), 1) * 100.0,
+            "avg_steps": sum(steps) / max(len(steps), 1),
+            "avg_invalid_rate": sum(invalid_rates) / max(len(invalid_rates), 1),
+        }
+
+    def run_eval_episode(self, agent):
+        if not WEB_API.start_new_game():
+            raise RuntimeError("[V3 EVAL] Failed to start eval game")
+
+        game_status = Game_test_case.Game_status()
+        game_status.agent = agent
+        game_status.noise = False
+        game_status.server_state = WEB_API.get_game_state()
+        agent.clear_blocked_actions(reason="eval episode reset")
+
+        done = False
+        while not done and game_status.step_count < EVAL_MAX_STEPS_PER_EPISODE:
+            check_pause()
+            current_screenshot = self.capture_grid_state(game_status)
+            action, _ = agent.select_action(current_screenshot, add_noise=False)
+            game_status.update_state(current_screenshot, action)
+            row, col = agent.action_to_grid(action)
+            game_status.click_attempt_count += 1
+
+            api_result = WEB_API.click_cell_with_state(row, col)
+            if not api_result or not api_result.get("ok"):
+                game_status.reward = MINESWEEPER_REWARD_CONFIG.invalid_click
+                game_status.invalid_click_count += 1
+                game_status.record_reward(game_status.reward)
+                agent.block_action_for_state(current_screenshot, action)
+                game_status.step_count += 1
+                time.sleep(EVAL_STEP_WAIT_SECONDS)
+                continue
+
+            next_server_state = api_result.get("data")
+            board_changed = (
+                self._board_signature(next_server_state) !=
+                self._board_signature(game_status.server_state)
+            )
+            game_status.server_state = next_server_state
+
+            server_status = game_status.server_state.get("status")
+            if server_status == "lost":
+                game_status.reward = MINESWEEPER_REWARD_CONFIG.lose
+                game_status.game_over = 1
+                done = True
+            elif server_status == "won":
+                game_status.reward = MINESWEEPER_REWARD_CONFIG.win
+                game_status.game_over = 1
+                game_status.won = True
+                done = True
+            elif board_changed:
+                game_status.reward = MINESWEEPER_REWARD_CONFIG.valid_click
+            else:
+                game_status.reward = MINESWEEPER_REWARD_CONFIG.invalid_click
+                game_status.invalid_click_count += 1
+                agent.block_action_for_state(current_screenshot, action)
+
+            game_status.record_reward(game_status.reward)
+            game_status.step_count += 1
+            time.sleep(EVAL_STEP_WAIT_SECONDS)
+
+        return {
+            "reward": game_status.total_reward,
+            "steps": game_status.step_count,
+            "is_win": game_status.won,
+            "invalid_rate": game_status.invalid_click_rate(),
+        }
+
     def test_RL(self):
         global glo_var
         glo_var.state.set_record_time()
@@ -326,6 +457,7 @@ class Game_test_case(unittest.TestCase) :
                     reward_mean=game_status.average_reward(),
                 )
                 game_status.agent.on_episode_end()
+                self.maybe_run_eval(game_status.agent)
                 self.assertTrue(True, "game_over(really finish the game)")
                 break
             elif glo_var.state.fail_playing :
@@ -418,6 +550,7 @@ class Game_test_case(unittest.TestCase) :
                     reward_mean=game_status.average_reward(),
                 )
                 game_status.agent.on_episode_end()
+                self.maybe_run_eval(game_status.agent)
                 self.assertTrue(True, "game_over(really finish the game)")
                 break
             elif glo_var.state.fail_playing:

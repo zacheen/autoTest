@@ -76,6 +76,7 @@ from model_structure.training_logger import TrainingLogger
 from model_structure.adaptive_epsilon import AdaptiveEpsilonController
 from model_structure.history import TrainingHistory
 from model_structure.checkpoint_log import CheckpointLogger
+from model_structure.eval_utils import log_eval_metrics as log_eval_metrics_common
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -522,13 +523,16 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
         # CSV + TB dispatcher: write each episode summary to both with raw values
         # for AI consumption. CSV rolls over hourly. Schema aligns with stage1,
-        # but V3 omits eval/* because Demo_test_Minesweeper has no eval loop.
+        # including eval rows written by Demo_test_Minesweeper.
         # Q_loss / q_mean are per-step TB metrics, not episode-level CSV fields.
         # Agent no longer keeps a separate SummaryWriter reference.
         csv_fields = [
             "timestamp", "episode",
             "reward_mean", "is_win", "invalid_click_rate",
             "win_rate_recent", "epsilon",
+            "eval_avg_reward", "eval_win_rate", "eval_avg_steps",
+            "eval_avg_invalid_rate", "eval_seconds_since_last_eval",
+            "eval_duration_seconds",
         ]
         csv_path = self.archive.current_archive_dir / "training_log.csv"
         self.training_logger = TrainingLogger(
@@ -1284,6 +1288,29 @@ class VisualAgentV3(VisualAgentCommonMixin):
         )
 
     # ──────────────────────────── checkpoints ──────────────────────────
+
+    def log_eval_metrics(
+        self,
+        *,
+        avg_reward: float,
+        win_rate: float,
+        avg_steps: float,
+        avg_invalid_rate: float,
+        seconds_since_last_eval: float,
+        duration_seconds: float,
+    ) -> None:
+        """Record one fixed-policy evaluation summary."""
+        log_eval_metrics_common(
+            self.training_logger,
+            episode=self.episode_count,
+            avg_reward=avg_reward,
+            win_rate=win_rate,
+            avg_steps=avg_steps,
+            avg_invalid_rate=avg_invalid_rate,
+            seconds_since_last_eval=seconds_since_last_eval,
+            duration_seconds=duration_seconds,
+            console_prefix="V3 EVAL",
+        )
 
     def _scan_state_dict_finite(self, sd_label, state_dict):
         """Scan all floating tensors in a state_dict and return [(label, msg)].

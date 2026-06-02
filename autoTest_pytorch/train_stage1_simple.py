@@ -20,6 +20,12 @@ import torch
 from pathlib import Path
 
 from Minesweeper.MinesweeperLogic import MinesweeperLogic, get_board_config
+from model_structure.eval_utils import (
+    finish_eval_timing,
+    log_eval_metrics,
+    should_run_eval,
+    start_eval_timing,
+)
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from model_structure.history import History
 from transformer_discrete_agent import (
@@ -298,6 +304,7 @@ def main():
     # query training_history methods directly, and resume persistence comes for free.
     # Cumulative wins use agent.training_history.total_wins.
     start_time = time.time()
+    last_eval_started_at = None
 
     try:
         for episode in range(1, MAX_EPISODES + 1):
@@ -338,24 +345,28 @@ def main():
                 logger.log("episode/q_mean_avg", stats['q_mean'], step=ep_idx, csv_col="q_mean")
             logger.log("timestamp", datetime.datetime.now().isoformat(), step=ep_idx, tb=False)
 
-            # Evaluation.
-            if episode >= EVAL_OFFSET and (episode - EVAL_OFFSET) % EVAL_INTERVAL == 0:
-                eval_stats = run_evaluation(logic, agent)
-                logger.log("eval/avg_reward",       eval_stats['avg_reward'],        step=ep_idx, csv_col="eval_avg_reward")
-                logger.log("eval/win_rate",         eval_stats['win_rate'],          step=ep_idx, csv_col="eval_win_rate")
-                logger.log("eval/avg_steps",        eval_stats['avg_steps'],         step=ep_idx, csv_col="eval_avg_steps")
-                logger.log("eval/avg_invalid_rate", eval_stats['avg_invalid_rate'], step=ep_idx, csv_col="eval_avg_invalid_rate")
-
-                print(f"  [EVAL Ep {episode:>6d}] "
-                      f"Avg Reward: {eval_stats['avg_reward']:>7.2f} | "
-                      f"Win Rate: {eval_stats['win_rate']:>5.1f}% | "
-                      f"Avg Steps: {eval_stats['avg_steps']:>5.1f} | "
-                      f"Invalid Rate: {eval_stats['avg_invalid_rate']:.2%}")
-
             # Add CSV-only episode index last, before commit, so the first CSV
             # column is episode instead of episode/reward_sum.
             logger.log("episode", ep_idx, step=ep_idx, tb=False)
             logger.commit_csv_row()
+
+            # Evaluation.
+            if should_run_eval(episode, offset=EVAL_OFFSET, interval=EVAL_INTERVAL):
+                eval_started_at, seconds_since_last_eval = start_eval_timing(last_eval_started_at)
+                last_eval_started_at = eval_started_at
+                eval_stats = run_evaluation(logic, agent)
+                duration_seconds = finish_eval_timing(eval_started_at)
+                log_eval_metrics(
+                    logger,
+                    episode=ep_idx,
+                    avg_reward=eval_stats['avg_reward'],
+                    win_rate=eval_stats['win_rate'],
+                    avg_steps=eval_stats['avg_steps'],
+                    avg_invalid_rate=eval_stats['avg_invalid_rate'],
+                    seconds_since_last_eval=seconds_since_last_eval,
+                    duration_seconds=duration_seconds,
+                    console_prefix="EVAL",
+                )
 
             # Console log
             if episode % LOG_INTERVAL == 0:
