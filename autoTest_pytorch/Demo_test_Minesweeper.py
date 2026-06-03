@@ -1,5 +1,6 @@
 ﻿import unittest
 import os
+from contextlib import nullcontext
 from threading import Thread, Event
 import datetime
 import random
@@ -376,19 +377,25 @@ class Game_test_case(unittest.TestCase) :
         steps = []
         invalid_rates = []
 
-        for eval_idx in range(1, num_episodes + 1):
-            stats = self.run_eval_episode(agent, store_data=True)
-            rewards.append(stats["reward"])
-            wins.append(1 if stats["is_win"] else 0)
-            steps.append(stats["steps"])
-            invalid_rates.append(stats["invalid_rate"])
-            print(
-                f"[V3 EVAL] {eval_idx:>2}/{num_episodes}: "
-                f"{'WIN ' if stats['is_win'] else 'LOSE'} | "
-                f"reward={stats['reward']:.3f} | "
-                f"steps={stats['steps']} | "
-                f"invalid={stats['invalid_rate']:.2%}"
-            )
+        policy_context = (
+            agent.fixed_policy_mode()
+            if hasattr(agent, "fixed_policy_mode")
+            else nullcontext()
+        )
+        with policy_context:
+            for eval_idx in range(1, num_episodes + 1):
+                stats = self.run_eval_episode(agent, store_data=True)
+                rewards.append(stats["reward"])
+                wins.append(1 if stats["is_win"] else 0)
+                steps.append(stats["steps"])
+                invalid_rates.append(stats["invalid_rate"])
+                print(
+                    f"[V3 EVAL] {eval_idx:>2}/{num_episodes}: "
+                    f"{'WIN ' if stats['is_win'] else 'LOSE'} | "
+                    f"reward={stats['reward']:.3f} | "
+                    f"steps={stats['steps']} | "
+                    f"invalid={stats['invalid_rate']:.2%}"
+                )
 
         return {
             "avg_reward": sum(rewards) / max(len(rewards), 1),

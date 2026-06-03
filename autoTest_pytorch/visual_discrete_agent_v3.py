@@ -38,6 +38,7 @@ import math
 import random
 import sys
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
@@ -156,7 +157,7 @@ IMAGE_SIZE = (640, 640)
 GRID_H = 6
 GRID_W = 6
 NUM_ACTIONS = GRID_H * GRID_W
-BATCH_SIZE = 32
+BATCH_SIZE = 64 # 128
 
 # Encoder dims
 # Shape is controlled by DEFAULT_ENCODER_FINAL_DIM / DEFAULT_ENCODER_TOTAL_LAYERS /
@@ -789,6 +790,39 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.q_network.train()
         self.q_target.eval()
 
+    def _capture_training_modes(self) -> list[tuple[nn.Module, bool]]:
+        snapshot: list[tuple[nn.Module, bool]] = []
+        seen: set[int] = set()
+        for root in (self.backbone, self.q_network, self.q_target):
+            for module in root.modules():
+                module_id = id(module)
+                if module_id in seen:
+                    continue
+                seen.add(module_id)
+                snapshot.append((module, module.training))
+        return snapshot
+
+    def _restore_training_modes(self, snapshot: list[tuple[nn.Module, bool]]) -> None:
+        for module, was_training in snapshot:
+            module.train(was_training)
+        self.backbone.set_bn_eval()
+
+    @contextmanager
+    def fixed_policy_mode(self):
+        """Temporarily disable exploration and stochastic model layers for eval."""
+        mode_snapshot = self._capture_training_modes()
+        previous_epsilon = self.epsilon
+        self.epsilon = 0.0
+        self.backbone.eval()
+        self.backbone.set_bn_eval()
+        self.q_network.eval()
+        self.q_target.eval()
+        try:
+            yield
+        finally:
+            self.epsilon = previous_epsilon
+            self._restore_training_modes(mode_snapshot)
+
     @property
     def episode_count_public(self) -> int:
         return self.training_history.total_episodes
@@ -859,25 +893,28 @@ class VisualAgentV3(VisualAgentCommonMixin):
                 "blocked_actions": sorted(blocked),
             }
 
+        mode_snapshot = self._capture_training_modes()
         self.backbone.eval()
         self.backbone.set_bn_eval()
         self.q_network.eval()
         self.q_target.eval()
         screenshot_batch = state.unsqueeze(0).to(device)
-        with torch.no_grad():
-            features  = self.backbone.get_features(screenshot_batch)
-            q_2d = self.q_network(features)["q_values"].squeeze(0)
-            q_flat = q_2d.view(-1)
+        try:
+            with torch.no_grad():
+                features  = self.backbone.get_features(screenshot_batch)
+                q_2d = self.q_network(features)["q_values"].squeeze(0)
+                q_flat = q_2d.view(-1)
 
-            masked_q = q_flat.clone()
-            if blocked:
-                blocked_idx = torch.tensor(sorted(blocked), dtype=torch.long, device=masked_q.device)
-                masked_q[blocked_idx] = float("-inf")
+                masked_q = q_flat.clone()
+                if blocked:
+                    blocked_idx = torch.tensor(sorted(blocked), dtype=torch.long, device=masked_q.device)
+                    masked_q[blocked_idx] = float("-inf")
 
-            action_id = int(masked_q.argmax().item())
-            topk = min(5, len(available))
-            top_vals, top_idx = torch.topk(masked_q, k=topk)
-        self._set_runtime_modes()
+                action_id = int(masked_q.argmax().item())
+                topk = min(5, len(available))
+                top_vals, top_idx = torch.topk(masked_q, k=topk)
+        finally:
+            self._restore_training_modes(mode_snapshot)
 
         row, col = self.action_to_grid(action_id)
         top_actions = [
