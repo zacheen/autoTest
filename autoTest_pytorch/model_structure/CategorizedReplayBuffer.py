@@ -1,15 +1,135 @@
 import random
 import shutil
 from pathlib import Path
-from collections import defaultdict
+from collections import defaultdict, deque
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any
 import numpy as np
 import torch
 
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 
 
-class CategorizedReplayBuffer:
-    """A generic Categorized Replay Buffer.
+class RewardType(StrEnum):
+    WIN = "win"
+    LOSE = "lose"
+    INVALID = "invalid"
+    PROGRESS = "progress"
+
+    @classmethod
+    def all(cls) -> tuple["RewardType", ...]:
+        return tuple(cls)
+
+    @classmethod
+    def values(cls) -> tuple[str, ...]:
+        return tuple(reward_type.value for reward_type in cls)
+
+    @classmethod
+    def coerce(cls, value, default=None):
+        if value is None:
+            return default
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(str(value))
+        except ValueError:
+            return default
+
+
+@dataclass(frozen=True)
+class ReplayBalanceConfig:
+    """Shared reward bucketing and class-balance settings."""
+
+    win_threshold: float = MINESWEEPER_REWARD_CONFIG.replay_win_threshold
+    lose_threshold: float = MINESWEEPER_REWARD_CONFIG.replay_lose_threshold
+    invalid_threshold: float = MINESWEEPER_REWARD_CONFIG.replay_invalid_threshold
+    balanced_ratio: float = 1.0
+    quota_check_class: RewardType | str | None = None
+
+    def __post_init__(self) -> None:
+        quota_check_class = RewardType.coerce(self.quota_check_class)
+        if self.quota_check_class is not None and quota_check_class is None:
+            raise ValueError(
+                f"quota_check_class must be one of {RewardType.values()} or None, "
+                f"got {self.quota_check_class!r}"
+            )
+        if not 0.0 <= self.balanced_ratio <= 1.0:
+            raise ValueError(f"balanced_ratio must be in [0, 1], got {self.balanced_ratio}")
+        object.__setattr__(self, "quota_check_class", quota_check_class)
+        object.__setattr__(self, "balanced_ratio", float(self.balanced_ratio))
+
+
+class _ReplayStoreBase:
+    """Shared reward bucketing and capacity helpers for replay stores."""
+
+    REWARD_TYPES = RewardType.all()
+
+    def __init__(self, *, config: ReplayBalanceConfig) -> None:
+        self.config = config
+        self.win_threshold = config.win_threshold
+        self.lose_threshold = config.lose_threshold
+        self.invalid_threshold = config.invalid_threshold
+        self.quota_check_class = config.quota_check_class
+        self.balanced_ratio = config.balanced_ratio
+
+    def _reward_type(self, reward, done):
+        """Categorize the reward into one of: win, lose, invalid, progress."""
+        reward = float(reward)
+        if done and reward >= self.win_threshold:
+            return RewardType.WIN
+        if done and reward <= self.lose_threshold:
+            return RewardType.LOSE
+        if reward < self.invalid_threshold:
+            return RewardType.INVALID
+        return RewardType.PROGRESS
+
+    def reward_type_for(self, reward, done):
+        """Public wrapper around reward bucketing for companion stores."""
+        return self._reward_type(reward, done)
+
+    @staticmethod
+    def _coerce_reward_type(value, default=None):
+        return RewardType.coerce(value, default=default)
+
+    def class_capacities_for_size(self, size: int) -> dict[RewardType, int]:
+        """Return hard per-class capacities using this store's balance settings."""
+        size = max(0, int(size))
+        capacities = {reward_type: 0 for reward_type in self.REWARD_TYPES}
+        if size <= 0:
+            return capacities
+
+        balanced_share = int(size * self.balanced_ratio)
+        base = balanced_share // len(self.REWARD_TYPES)
+        remainder = balanced_share % len(self.REWARD_TYPES)
+        for idx, reward_type in enumerate(self.REWARD_TYPES):
+            capacities[reward_type] = base + (1 if idx < remainder else 0)
+
+        slack = size - sum(capacities.values())
+        if slack > 0:
+            slack_base, slack_remainder = divmod(slack, len(self.REWARD_TYPES))
+            for idx, reward_type in enumerate(self.REWARD_TYPES):
+                capacities[reward_type] += slack_base + (1 if idx < slack_remainder else 0)
+        return capacities
+
+    @staticmethod
+    def _to_cpu_state(value):
+        if value is None:
+            return None
+        if torch.is_tensor(value):
+            return value.detach().cpu()
+        return value
+
+    @staticmethod
+    def _to_float_list(values) -> list[float]:
+        if torch.is_tensor(values):
+            return values.detach().float().view(-1).cpu().tolist()
+        return [float(value) for value in values]
+
+
+
+class _PrioritizedReplayStore(_ReplayStoreBase):
+    """A generic prioritized categorized replay store.
 
     Supports:
     1. Categorized Bucketing based on reward thresholds (win / lose / invalid / progress).
@@ -28,8 +148,6 @@ class CategorizedReplayBuffer:
        - PER half: pure priority-weighted, cross-class. Slack from empty/starved
          classes flows here automatically.
     """
-
-    REWARD_TYPES = ("win", "lose", "invalid", "progress")
 
     def __init__(
         self,
@@ -51,9 +169,10 @@ class CategorizedReplayBuffer:
         sample_decay: float = 0.05,
         enable_spread_decay: bool = False,
         spread_decay: float = 2.0,
-        quota_check_class: str | None = None,
+        quota_check_class: RewardType | str | None = None,
         beta_start: float = 0.4,
         balanced_ratio: float = 1.0,
+        config: ReplayBalanceConfig | None = None,
     ):
         """
         Args:
@@ -120,6 +239,16 @@ class CategorizedReplayBuffer:
                   class and Phase 2 globally competes for the remaining 50%.
                 - 0.0: no stratification, pure global PER dominated by high priority classes.
         """
+        if config is None:
+            config = ReplayBalanceConfig(
+                win_threshold=win_threshold,
+                lose_threshold=lose_threshold,
+                invalid_threshold=invalid_threshold,
+                balanced_ratio=balanced_ratio,
+                quota_check_class=quota_check_class,
+            )
+        super().__init__(config=config)
+
         self.max_size = max_size
         self.storage_mode = storage_mode.lower()
         if self.storage_mode == "disk":
@@ -130,10 +259,6 @@ class CategorizedReplayBuffer:
         else:
             self.save_dir = None
 
-        self.win_threshold = win_threshold
-        self.lose_threshold = lose_threshold
-        self.invalid_threshold = invalid_threshold
-        
         self.overflow_margin = overflow_margin
         self.alpha = alpha
         self.uniform_mix = uniform_mix
@@ -147,37 +272,13 @@ class CategorizedReplayBuffer:
         self.sample_decay = float(sample_decay)
         self.enable_spread_decay = bool(enable_spread_decay)
         self.spread_decay = float(spread_decay)
-        if quota_check_class is not None and quota_check_class not in self.REWARD_TYPES:
-            raise ValueError(
-                f"quota_check_class must be one of {self.REWARD_TYPES} or None, "
-                f"got {quota_check_class!r}"
-            )
-        self.quota_check_class = quota_check_class
         self.beta = beta_start
-        if not 0.0 <= balanced_ratio <= 1.0:
-            raise ValueError(f"balanced_ratio must be in [0, 1], got {balanced_ratio}")
-        self.balanced_ratio = float(balanced_ratio)
 
         self.size_count = 0
         self.index = []
         self.next_storage_id = 0
         self.insert_counter = 0
 
-
-    def _reward_type(self, reward, done):
-        """Categorize the reward into one of: win, lose, invalid, progress.
-
-        Boundary case ``reward == invalid_threshold`` is folded into ``progress``
-        (it's a "no penalty" reward — closer to a valid step than to an invalid one).
-        """
-        reward = float(reward)
-        if done and reward >= self.win_threshold:
-            return "win"
-        if done and reward <= self.lose_threshold:
-            return "lose"
-        if reward < self.invalid_threshold:
-            return "invalid"
-        return "progress"
 
     def _save_tensor(self, tensor, root_name, storage_id):
         """Save a tensor either to disk or keep it in memory based on storage mode."""
@@ -316,12 +417,12 @@ class CategorizedReplayBuffer:
 
         grouped_entries = {reward_type: [] for reward_type in self.REWARD_TYPES}
         for entry in self.index:
-            rt = entry.get("reward_type")
+            rt = self._coerce_reward_type(entry.get("reward_type"))
             if rt in grouped_entries:
                 grouped_entries[rt].append(entry)
             else:
                 # Legacy entries with unknown / dropped "other" reward_type → treat as progress
-                grouped_entries["progress"].append(entry)
+                grouped_entries[RewardType.PROGRESS].append(entry)
 
         survivors = []
         leftovers = []
@@ -388,8 +489,8 @@ class CategorizedReplayBuffer:
                     shutil.copy2(str(next_src), str(next_state_dst))
 
             tail_reward = float(old_entry.get("tail_reward", old_entry["reward"]))
-            legacy_rt = old_entry.get("reward_type")
-            if legacy_rt not in self.REWARD_TYPES:
+            legacy_rt = self._coerce_reward_type(old_entry.get("reward_type"))
+            if legacy_rt is None:
                 # Legacy "other" or missing → re-categorize against the 4-class scheme
                 legacy_rt = self._reward_type(tail_reward, bool(old_entry["done"]))
             exported.append({
@@ -403,7 +504,7 @@ class CategorizedReplayBuffer:
                 "discount": float(old_entry.get("discount", 1.0)),
                 "n_steps": int(old_entry.get("n_steps", 1)),
                 "priority": float(old_entry.get("priority", self.priority_min)),
-                "reward_type": legacy_rt,
+                "reward_type": legacy_rt.value,
                 "insert_order": save_idx + 1,
                 "sample_count": int(old_entry.get("sample_count", 0)),
                 "quantile_spread": float(old_entry.get("quantile_spread", 0.0)),
@@ -498,6 +599,8 @@ class CategorizedReplayBuffer:
         discount=1.0,
         n_steps=1,
         tail_reward=None,
+        initial_priority=None,
+        quantile_spread=0.0,
     ):
         """Store a transition."""
         self.insert_counter += 1
@@ -510,6 +613,7 @@ class CategorizedReplayBuffer:
             next_state_ref = self._save_tensor(next_state, "next_state", storage_id)
 
         bucket_reward = float(reward if tail_reward is None else tail_reward)
+        priority_value = abs(float(reward)) + 1.0 if initial_priority is None else float(initial_priority)
         entry = {
             "storage_id": storage_id,
             "state": state_ref,
@@ -520,16 +624,45 @@ class CategorizedReplayBuffer:
             "done": bool(done),
             "discount": float(discount),
             "n_steps": int(max(1, n_steps)),
-            "reward_type": self._reward_type(bucket_reward, done),
-            "priority": float(np.clip(abs(float(reward)) + 1.0, self.priority_min, self.priority_max)),
+            "reward_type": self._reward_type(bucket_reward, done).value,
+            "priority": float(np.clip(priority_value, self.priority_min, self.priority_max)),
             "insert_order": self.insert_counter,
             "sample_count": 0,  # incremented on every batch entry; Method B decay uses it
-            "quantile_spread": 0.0,  # FQF quantile std — updated by update_priorities when sampled
+            "quantile_spread": float(quantile_spread),
         }
 
         self.index.append(entry)
         self.size_count = len(self.index)
         self._prune_if_needed()
+        return entry
+
+    def store_prioritized(
+        self,
+        state,
+        action,
+        next_state,
+        reward,
+        done,
+        *,
+        priority,
+        discount=1.0,
+        n_steps=1,
+        tail_reward=None,
+        quantile_spread=0.0,
+    ):
+        """Store data whose PER priority is already known."""
+        return self.store(
+            state,
+            action,
+            next_state,
+            reward,
+            done,
+            discount=discount,
+            n_steps=n_steps,
+            tail_reward=tail_reward,
+            initial_priority=priority,
+            quantile_spread=quantile_spread,
+        )
 
     def update_priorities(self, sample_indices, td_errors, quantile_spreads=None):
         """Update priorities (and optional quantile_spread) from training-time signals.
@@ -560,6 +693,11 @@ class CategorizedReplayBuffer:
         else:
             spread_values = list(quantile_spreads)
 
+        self._update_replay_priorities(sample_indices, td_values, spread_values)
+
+    def _update_replay_priorities(self, sample_indices, td_values, spread_values):
+        """Update priorities for entries already in the main PER replay."""
+
         for idx, td_error, spread in zip(sample_indices, td_values, spread_values):
             if not (0 <= int(idx) < len(self.index)):
                 continue
@@ -568,6 +706,71 @@ class CategorizedReplayBuffer:
             entry["priority"] = float(np.clip(priority, self.priority_min, self.priority_max))
             if spread is not None:
                 entry["quantile_spread"] = float(spread)
+
+    def build_batch_from_entries(
+        self,
+        selected_entries,
+        sample_indices=None,
+        beta=None,
+        device="cpu",
+        include_extra=False,
+        is_weights=None,
+        population_size=None,
+    ):
+        """Convert replay-format entries into the tensors consumed by agents."""
+        if not selected_entries:
+            raise RuntimeError("Cannot build a batch from zero entries")
+
+        states, actions, next_states, rewards, dones, discounts, n_steps = [], [], [], [], [], [], []
+
+        for entry in selected_entries:
+            states.append(self._load_tensor(entry["state"]))
+            actions.append(entry["action"])
+
+            if entry["next_state"] is not None:
+                next_states.append(self._load_tensor(entry["next_state"]))
+            else:
+                dummy = states[-1].clone()
+                dummy.fill_(0)
+                next_states.append(dummy)
+
+            rewards.append(entry["reward"])
+            dones.append(float(entry["done"]))
+            discounts.append(float(entry.get("discount", 1.0)))
+            n_steps.append(int(entry.get("n_steps", 1)))
+
+        if is_weights is None:
+            use_beta = beta if beta is not None else self.beta
+            priorities_arr = self._selection_priorities(selected_entries)
+            prob_sum = priorities_arr.sum()
+            probabilities = priorities_arr / (prob_sum + 1e-10)
+            N = int(population_size or self.size_count or len(selected_entries))
+            weights_arr = (N * probabilities + 1e-10) ** (-use_beta)
+            weights_arr = weights_arr / weights_arr.max()
+            weights = torch.tensor(weights_arr, dtype=torch.float32).unsqueeze(1).to(device)
+        else:
+            weights = torch.as_tensor(is_weights, dtype=torch.float32, device=device).view(-1, 1)
+
+        tensor_states = torch.stack(states).to(device) if torch.is_tensor(states[0]) else states
+        tensor_next_states = torch.stack(next_states).to(device) if torch.is_tensor(next_states[0]) else next_states
+        tensor_actions = torch.tensor(np.array(actions), dtype=torch.long, device=device)
+        tensor_rewards = torch.tensor(rewards, dtype=torch.float32, device=device).unsqueeze(1)
+        tensor_dones = torch.tensor(dones, dtype=torch.float32, device=device).unsqueeze(1)
+        tensor_discounts = torch.tensor(discounts, dtype=torch.float32, device=device).unsqueeze(1)
+        tensor_n_steps = torch.tensor(n_steps, dtype=torch.long, device=device).unsqueeze(1)
+
+        result = (
+            tensor_states,
+            tensor_actions,
+            tensor_next_states,
+            tensor_rewards,
+            tensor_dones,
+            list(sample_indices or []),
+            weights,
+        )
+        if include_extra:
+            result = result + (tensor_discounts, tensor_n_steps)
+        return result
 
     def sample(self, batch_size, beta=None, device="cpu", include_extra=False):
         """Sample a batch via stratified balanced + PER fallback.
@@ -605,12 +808,12 @@ class CategorizedReplayBuffer:
 
         grouped_indices = {reward_type: [] for reward_type in self.REWARD_TYPES}
         for idx, entry in enumerate(self.index):
-            rt = entry.get("reward_type")
+            rt = self._coerce_reward_type(entry.get("reward_type"))
             if rt in grouped_indices:
                 grouped_indices[rt].append(idx)
             else:
                 # Legacy "other" / unknown reward_type → fold into progress
-                grouped_indices["progress"].append(idx)
+                grouped_indices[RewardType.PROGRESS].append(idx)
 
         selected_indices = []
         selected_storage_ids = set()
@@ -652,71 +855,15 @@ class CategorizedReplayBuffer:
 
         selected_indices = selected_indices[:batch_size]
 
-        # Pull selected entries once, then vectorize selection priorities for IS.
-        # Other per-entry fields still need loop unpacking. sample_count is already
-        # bumped at the end of `_sample_from_bucket` for uniform / PER / padding.
         selected_entries = [self.index[idx] for idx in selected_indices]
-        priorities_arr = self._selection_priorities(selected_entries)
-
-        states, actions, next_states, rewards, dones, discounts, n_steps = [], [], [], [], [], [], []
-
-        for entry in selected_entries:
-            states.append(self._load_tensor(entry["state"]))
-            actions.append(entry["action"])
-
-            if entry["next_state"] is not None:
-                next_states.append(self._load_tensor(entry["next_state"]))
-            else:
-                # create a dummy state of correct device and shape if done
-                dummy = states[-1].clone()
-                dummy.fill_(0)
-                next_states.append(dummy)
-
-            rewards.append(entry["reward"])
-            dones.append(float(entry["done"]))
-            discounts.append(float(entry.get("discount", 1.0)))
-            n_steps.append(int(entry.get("n_steps", 1)))
-
-        # Importance Sampling: priorities_arr was computed once for selected_entries
-        # with _selection_priorities, matching _sample_from_bucket distribution
-        # (alpha power + priority_min floor).
-        #
-        # Simplification: standard PER sums p_k^alpha over the whole buffer, but
-        # max-normalization below absorbs the batch-shared constant. After element
-        # normalization, only ratios inside priorities_arr matter, so summing the
-        # batch is enough. If normalization changes, restore full-buffer sum.
-        N = self.size_count
-        prob_sum = priorities_arr.sum()
-        probabilities = priorities_arr / (prob_sum + 1e-10)
-        
-        # weights formulation: (1/N * 1/P_i) ^ beta
-        weights = (N * probabilities + 1e-10) ** (-use_beta)
-        weights = weights / weights.max()
-        weights = torch.tensor(weights, dtype=torch.float32).unsqueeze(1).to(device)
-
-        # Stacking tensors manually depends heavily on the model requirements:
-        # Returning lists or direct tensors:
-        tensor_states = torch.stack(states).to(device) if torch.is_tensor(states[0]) else states
-        tensor_next_states = torch.stack(next_states).to(device) if torch.is_tensor(next_states[0]) else next_states
-
-        tensor_actions = torch.tensor(np.array(actions), dtype=torch.long, device=device)
-        tensor_rewards = torch.tensor(rewards, dtype=torch.float32, device=device).unsqueeze(1)
-        tensor_dones = torch.tensor(dones, dtype=torch.float32, device=device).unsqueeze(1)
-        tensor_discounts = torch.tensor(discounts, dtype=torch.float32, device=device).unsqueeze(1)
-        tensor_n_steps = torch.tensor(n_steps, dtype=torch.long, device=device).unsqueeze(1)
-
-        result = (
-            tensor_states,
-            tensor_actions,
-            tensor_next_states,
-            tensor_rewards,
-            tensor_dones,
-            selected_indices,
-            weights,
+        return self.build_batch_from_entries(
+            selected_entries,
+            sample_indices=selected_indices,
+            beta=use_beta,
+            device=device,
+            include_extra=include_extra,
+            population_size=self.size_count,
         )
-        if include_extra:
-            result = result + (tensor_discounts, tensor_n_steps)
-        return result
 
     def size(self):
         """Return the current total number of entries in the buffer."""
@@ -730,13 +877,13 @@ class CategorizedReplayBuffer:
         """
         counts = {reward_type: 0 for reward_type in self.REWARD_TYPES}
         for entry in self.index:
-            rt = entry.get("reward_type")
+            rt = self._coerce_reward_type(entry.get("reward_type"))
             if rt in counts:
                 counts[rt] += 1
             else:
                 # Legacy / unknown reward_type — count under progress to avoid silent loss
-                counts["progress"] = counts.get("progress", 0) + 1
-        return counts
+                counts[RewardType.PROGRESS] = counts.get(RewardType.PROGRESS, 0) + 1
+        return {reward_type.value: count for reward_type, count in counts.items()}
 
     def mean_sample_count(self) -> float:
         """Average sample_count per entry across the whole buffer.
@@ -807,11 +954,13 @@ class CategorizedReplayBuffer:
             if normalized_entry.get("next_state") is not None:
                 normalized_entry["next_state"] = self._load_tensor(normalized_entry["next_state"])
             # Migrate legacy reward_type ("other" / missing) to the 4-class scheme
-            if normalized_entry.get("reward_type") not in self.REWARD_TYPES:
+            reward_type = self._coerce_reward_type(normalized_entry.get("reward_type"))
+            if reward_type is None:
                 tail_reward = float(normalized_entry.get("tail_reward", normalized_entry.get("reward", 0.0)))
-                normalized_entry["reward_type"] = self._reward_type(
+                reward_type = self._reward_type(
                     tail_reward, bool(normalized_entry.get("done", False))
                 )
+            normalized_entry["reward_type"] = reward_type.value
             # Default sample_count + quantile_spread for legacy entries
             normalized_entry.setdefault("sample_count", 0)
             normalized_entry.setdefault("quantile_spread", 0.0)
@@ -820,3 +969,557 @@ class CategorizedReplayBuffer:
         self.size_count = len(self.index)
         self.next_storage_id = max([e["storage_id"] for e in self.index], default=-1) + 1
         self.insert_counter = max([e["insert_order"] for e in self.index], default=0)
+
+
+@dataclass
+class MixedReplayBatch:
+    state: torch.Tensor
+    action: torch.Tensor
+    next_state: torch.Tensor
+    reward: torch.Tensor
+    done: torch.Tensor
+    replay_indices: list[int]
+    is_weights: torch.Tensor
+    discounts: torch.Tensor
+    n_steps: torch.Tensor
+    replay_count: int
+    pending_entries: list[dict[str, Any]]
+
+
+class _PendingReplayStore(_ReplayStoreBase):
+    """Temporary eval-data buffer consumed by normal optimizer steps."""
+
+    def __init__(
+        self,
+        config: ReplayBalanceConfig,
+        *,
+        extra_capacity: int = 500,
+        sample_ratio: float = 0.10,
+    ) -> None:
+        if extra_capacity < 0:
+            raise ValueError(f"extra_capacity must be >= 0, got {extra_capacity}")
+        if not 0.0 <= sample_ratio <= 1.0:
+            raise ValueError(f"sample_ratio must be in [0, 1], got {sample_ratio}")
+
+        super().__init__(config=config)
+        self.extra_capacity = int(extra_capacity)
+        self.sample_ratio = float(sample_ratio)
+        self._reward_types = tuple(self.REWARD_TYPES)
+        self._buckets = {reward_type: deque() for reward_type in self._reward_types}
+        self._seen_counts = {reward_type: 0 for reward_type in self._reward_types}
+        self._next_pending_id = 0
+
+    def size(self) -> int:
+        return sum(len(bucket) for bucket in self._buckets.values())
+
+    def total_capacity(self, *, replay_size: int, replay_max_size: int) -> int:
+        replay_slack = max(0, int(replay_max_size) - int(replay_size))
+        return replay_slack + self.extra_capacity
+
+    def class_capacities(self, *, replay_size: int, replay_max_size: int) -> dict[RewardType, int]:
+        return self.class_capacities_for_size(
+            self.total_capacity(replay_size=replay_size, replay_max_size=replay_max_size)
+        )
+
+    def bucket_sizes(self) -> dict[str, int]:
+        return {
+            reward_type.value: len(self._buckets[reward_type])
+            for reward_type in self._reward_types
+        }
+
+    def prune_to_capacity(self, *, replay_size: int, replay_max_size: int) -> None:
+        total_capacity = self.total_capacity(replay_size=replay_size, replay_max_size=replay_max_size)
+        if total_capacity <= 0:
+            for bucket in self._buckets.values():
+                bucket.clear()
+            return
+
+        capacities = self.class_capacities(replay_size=replay_size, replay_max_size=replay_max_size)
+        while self.size() > total_capacity:
+            victim_type = self._oldest_over_quota_type(capacities)
+            if victim_type is None:
+                victim_type = self._largest_non_empty_type()
+            if victim_type is None:
+                return
+            self._buckets[victim_type].popleft()
+
+    def store(
+        self,
+        state,
+        action,
+        next_state,
+        reward,
+        done,
+        *,
+        replay_size: int,
+        replay_max_size: int,
+        discount: float = 1.0,
+        n_steps: int = 1,
+        tail_reward=None,
+    ) -> bool:
+        bucket_reward = float(reward if tail_reward is None else tail_reward)
+        reward_type = self.reward_type_for(bucket_reward, done)
+        self._seen_counts[reward_type] += 1
+        self.prune_to_capacity(replay_size=replay_size, replay_max_size=replay_max_size)
+
+        total_capacity = self.total_capacity(replay_size=replay_size, replay_max_size=replay_max_size)
+        if total_capacity <= 0:
+            return False
+
+        bucket = self._buckets[reward_type]
+        entry = {
+            "pending_id": self._next_pending_id,
+            "state": self._to_cpu_state(state),
+            "action": action.copy() if isinstance(action, np.ndarray) else np.array(action),
+            "next_state": self._to_cpu_state(next_state),
+            "reward": float(reward),
+            "tail_reward": bucket_reward,
+            "done": bool(done),
+            "discount": float(discount),
+            "n_steps": int(max(1, n_steps)),
+            "reward_type": reward_type.value,
+        }
+        self._next_pending_id += 1
+
+        if self.size() < total_capacity:
+            bucket.append(entry)
+            return True
+
+        capacities = self.class_capacities(replay_size=replay_size, replay_max_size=replay_max_size)
+        class_capacity = max(1, int(capacities.get(reward_type, 0)))
+        if len(bucket) < class_capacity:
+            victim_type = self._oldest_over_quota_type(capacities, exclude=reward_type)
+            if victim_type is not None:
+                self._buckets[victim_type].popleft()
+                bucket.append(entry)
+                return True
+
+        keep_probability = class_capacity / max(1, self._seen_counts[reward_type])
+        if random.random() > keep_probability:
+            return False
+
+        bucket.append(entry)
+        bucket.popleft()
+        return True
+
+    def sample_entries(self, count: int, *, replay_size: int, replay_max_size: int) -> list[dict[str, Any]]:
+        self.prune_to_capacity(replay_size=replay_size, replay_max_size=replay_max_size)
+        count = min(max(0, int(count)), self.size())
+        if count <= 0:
+            return []
+
+        balanced_total = int(count * self.balanced_ratio)
+        per_class_count = balanced_total // len(self._reward_types)
+        selected = []
+        selected_ids = set()
+
+        for reward_type in self._reward_types:
+            bucket_entries = list(self._buckets[reward_type])
+            if not bucket_entries:
+                continue
+            take = min(per_class_count, len(bucket_entries))
+            if take <= 0:
+                continue
+            picked = random.sample(bucket_entries, k=take)
+            selected.extend(picked)
+            selected_ids.update(entry["pending_id"] for entry in picked)
+
+        remaining = count - len(selected)
+        if remaining > 0:
+            leftovers = [
+                entry
+                for reward_type in self._reward_types
+                for entry in self._buckets[reward_type]
+                if entry["pending_id"] not in selected_ids
+            ]
+            if leftovers:
+                selected.extend(random.sample(leftovers, k=min(remaining, len(leftovers))))
+
+        return selected[:count]
+
+    def remove_entries(self, committed_ids: set[int]) -> None:
+        if not committed_ids:
+            return
+        for reward_type in self._reward_types:
+            self._buckets[reward_type] = deque(
+                entry
+                for entry in self._buckets[reward_type]
+                if entry["pending_id"] not in committed_ids
+            )
+
+    def _oldest_over_quota_type(
+        self,
+        capacities: dict[RewardType, int],
+        exclude: RewardType | None = None,
+    ) -> RewardType | None:
+        candidates = []
+        for reward_type in self._reward_types:
+            if reward_type == exclude:
+                continue
+            bucket = self._buckets[reward_type]
+            if len(bucket) <= max(0, int(capacities.get(reward_type, 0))):
+                continue
+            if bucket:
+                candidates.append((bucket[0]["pending_id"], reward_type))
+        if not candidates:
+            return None
+        return min(candidates)[1]
+
+    def _largest_non_empty_type(self) -> RewardType | None:
+        reward_type = max(self._reward_types, key=lambda item: len(self._buckets[item]))
+        return reward_type if self._buckets[reward_type] else None
+
+
+class CategorizedReplayBuffer:
+    """Public replay-buffer facade controlling main PER and pending eval stores."""
+
+    REWARD_TYPES = _ReplayStoreBase.REWARD_TYPES
+
+    def __init__(
+        self,
+        max_size: int,
+        storage_mode: str = "ram",
+        save_dir: str = None,
+        win_threshold: float = MINESWEEPER_REWARD_CONFIG.replay_win_threshold,
+        lose_threshold: float = MINESWEEPER_REWARD_CONFIG.replay_lose_threshold,
+        invalid_threshold: float = MINESWEEPER_REWARD_CONFIG.replay_invalid_threshold,
+        overflow_margin: int = 256,
+        alpha: float = 0.6,
+        uniform_mix: float = 0.2,
+        priority_min: float = 0.05,
+        priority_max: float = 5.0,
+        priority_eps: float = 1e-3,
+        age_decay: float = 0.002,
+        max_age: int = 2000,
+        enable_sample_decay: bool = False,
+        sample_decay: float = 0.05,
+        enable_spread_decay: bool = False,
+        spread_decay: float = 2.0,
+        quota_check_class: RewardType | str | None = None,
+        beta_start: float = 0.4,
+        balanced_ratio: float = 1.0,
+        pending_extra_capacity: int = 0,
+        pending_sample_ratio: float = 0.0,
+    ) -> None:
+        balance_config = ReplayBalanceConfig(
+            win_threshold=win_threshold,
+            lose_threshold=lose_threshold,
+            invalid_threshold=invalid_threshold,
+            balanced_ratio=balanced_ratio,
+            quota_check_class=quota_check_class,
+        )
+        main_store = _PrioritizedReplayStore(
+            max_size=max_size,
+            storage_mode=storage_mode,
+            save_dir=save_dir,
+            overflow_margin=overflow_margin,
+            alpha=alpha,
+            uniform_mix=uniform_mix,
+            priority_min=priority_min,
+            priority_max=priority_max,
+            priority_eps=priority_eps,
+            age_decay=age_decay,
+            max_age=max_age,
+            enable_sample_decay=enable_sample_decay,
+            sample_decay=sample_decay,
+            enable_spread_decay=enable_spread_decay,
+            spread_decay=spread_decay,
+            beta_start=beta_start,
+            config=balance_config,
+        )
+        self._main = main_store
+        self._pending = (
+            _PendingReplayStore(
+                balance_config,
+                extra_capacity=pending_extra_capacity,
+                sample_ratio=pending_sample_ratio,
+            )
+            if pending_extra_capacity > 0 or pending_sample_ratio > 0
+            else None
+        )
+
+    @property
+    def max_size(self) -> int:
+        return self._main.max_size
+
+    @property
+    def enable_spread_decay(self) -> bool:
+        return self._main.enable_spread_decay
+
+    @enable_spread_decay.setter
+    def enable_spread_decay(self, value: bool) -> None:
+        self._main.enable_spread_decay = bool(value)
+
+    def store(self, *args, **kwargs):
+        return self._main.store(*args, **kwargs)
+
+    def store_pending(self, *args, **kwargs):
+        if self._pending is None:
+            raise RuntimeError("Pending eval store is not configured")
+        return self._pending.store(
+            *args,
+            replay_size=self._main.size(),
+            replay_max_size=self._main.max_size,
+            **kwargs,
+        )
+
+    def store_prioritized(self, *args, **kwargs):
+        return self._main.store_prioritized(*args, **kwargs)
+
+    def sample(self, *args, **kwargs):
+        return self._main.sample(*args, **kwargs)
+
+    def size(self) -> int:
+        return self._main.size()
+
+    def bucket_sizes(self) -> dict:
+        return self._main.bucket_sizes()
+
+    def mean_sample_count(self) -> float:
+        return self._main.mean_sample_count()
+
+    def reward_type_for(self, reward, done):
+        return self._main.reward_type_for(reward, done)
+
+    def get_all_entries(self):
+        return self._main.get_all_entries()
+
+    def load_from_entries(self, entries):
+        return self._main.load_from_entries(entries)
+
+    def replace_entries(self, entries, *, next_storage_id=None, insert_counter=None) -> None:
+        entries = list(entries)
+        self._main.index = entries
+        self._main.size_count = len(entries)
+        self._main.next_storage_id = (
+            len(entries) if next_storage_id is None else int(next_storage_id)
+        )
+        self._main.insert_counter = (
+            len(entries) if insert_counter is None else int(insert_counter)
+        )
+
+    def export_top_k(self, k, persistent_dir=None):
+        return self._main.export_top_k(k, persistent_dir=persistent_dir)
+
+    def top_k_balanced(self, k):
+        return self._main.top_k_balanced(k)
+
+    def sample_training_batch(self, batch_size, beta=None, device="cpu") -> MixedReplayBatch:
+        if self._pending is not None:
+            return self._sample_mixed_batch(batch_size, beta=beta, device=device)
+        return self._wrap_main_sample(
+            self._main.sample(batch_size, beta=beta, device=device, include_extra=True)
+        )
+
+    def update_priorities(self, sample_indices, td_errors, quantile_spreads=None):
+        if not isinstance(sample_indices, MixedReplayBatch):
+            return self._main.update_priorities(sample_indices, td_errors, quantile_spreads)
+
+        if td_errors is None:
+            return
+        td_values = _ReplayStoreBase._to_float_list(td_errors)
+        spread_values = (
+            None
+            if quantile_spreads is None
+            else _ReplayStoreBase._to_float_list(quantile_spreads)
+        )
+
+        replay_count = sample_indices.replay_count
+        if replay_count > 0:
+            self._main.update_priorities(
+                sample_indices.replay_indices,
+                td_values[:replay_count],
+                None if spread_values is None else spread_values[:replay_count],
+            )
+
+        if sample_indices.pending_entries:
+            if self._pending is None:
+                raise RuntimeError("Pending eval store is not configured")
+            self._commit_pending_entries(
+                sample_indices.pending_entries,
+                td_values[replay_count:],
+                quantile_spreads=None if spread_values is None else spread_values[replay_count:],
+            )
+
+    def pending_size(self) -> int:
+        return 0 if self._pending is None else self._pending.size()
+
+    def training_size(self) -> int:
+        return self._main.size() + self.pending_size()
+
+    def combined_bucket_sizes(self) -> dict[str, int]:
+        counts = self._main.bucket_sizes()
+        if self._pending is None:
+            return counts
+
+        for reward_type, pending_count in self._pending.bucket_sizes().items():
+            counts[reward_type] = counts.get(reward_type, 0) + pending_count
+        return counts
+
+    def is_training_class_quota_filled(self) -> bool:
+        if self._pending is None:
+            return self._main.is_class_quota_filled()
+
+        quota = self._main.class_quota
+        counts = self.combined_bucket_sizes()
+        quota_check_class = self._main.quota_check_class
+        if quota_check_class is not None:
+            return counts.get(quota_check_class, 0) >= quota
+        return all(counts.get(reward_type, 0) >= quota for reward_type in self.REWARD_TYPES)
+
+    def _pending_sample_count(self, batch_size: int) -> int:
+        if self._pending is None:
+            return 0
+
+        pending_size = self._pending.size()
+        if pending_size <= 0:
+            return 0
+
+        batch_size = int(batch_size)
+        default_count = int(round(batch_size * self._pending.sample_ratio))
+        if self._pending.sample_ratio > 0 and default_count <= 0:
+            default_count = 1
+        target_pending = min(pending_size, default_count)
+
+        replay_size = int(self._main.size())
+        replay_count = min(replay_size, batch_size - target_pending)
+        return min(pending_size, batch_size - replay_count)
+
+    def _sample_mixed_batch(self, batch_size: int, *, beta=None, device="cpu") -> MixedReplayBatch:
+        if self._pending is None:
+            raise RuntimeError("Pending eval store is not configured")
+
+        pending_count = self._pending_sample_count(batch_size)
+        replay_count = min(int(self._main.size()), int(batch_size) - pending_count)
+        pending_count = min(self._pending.size(), int(batch_size) - replay_count)
+
+        if replay_count + pending_count < batch_size:
+            raise RuntimeError(
+                f"Not enough replay data for batch: replay={self._main.size()}, "
+                f"pending={self._pending.size()}, batch={batch_size}"
+            )
+
+        replay_batch = None
+        if replay_count > 0:
+            replay_batch = self._main.sample(
+                replay_count,
+                beta=beta,
+                device=device,
+                include_extra=True,
+            )
+
+        pending_entries = self._pending.sample_entries(
+            pending_count,
+            replay_size=self._main.size(),
+            replay_max_size=self._main.max_size,
+        )
+        pending_batch = None
+        if pending_entries:
+            pending_batch = self._main.build_batch_from_entries(
+                pending_entries,
+                beta=beta,
+                device=device,
+                include_extra=True,
+                is_weights=torch.ones(len(pending_entries), 1),
+            )
+
+        if replay_batch is None:
+            state, action, next_state, reward, done, _, is_weights, discounts, n_steps = pending_batch
+            return MixedReplayBatch(
+                state=state,
+                action=action,
+                next_state=next_state,
+                reward=reward,
+                done=done,
+                replay_indices=[],
+                is_weights=is_weights,
+                discounts=discounts,
+                n_steps=n_steps,
+                replay_count=0,
+                pending_entries=pending_entries,
+            )
+
+        state, action, next_state, reward, done, replay_indices, is_weights, discounts, n_steps = replay_batch
+        if pending_batch is None:
+            return MixedReplayBatch(
+                state=state,
+                action=action,
+                next_state=next_state,
+                reward=reward,
+                done=done,
+                replay_indices=replay_indices,
+                is_weights=is_weights,
+                discounts=discounts,
+                n_steps=n_steps,
+                replay_count=replay_count,
+                pending_entries=[],
+            )
+
+        p_state, p_action, p_next_state, p_reward, p_done, _, p_weights, p_discounts, p_n_steps = pending_batch
+        return MixedReplayBatch(
+            state=torch.cat([state, p_state], dim=0),
+            action=torch.cat([action, p_action], dim=0),
+            next_state=torch.cat([next_state, p_next_state], dim=0),
+            reward=torch.cat([reward, p_reward], dim=0),
+            done=torch.cat([done, p_done], dim=0),
+            replay_indices=replay_indices,
+            is_weights=torch.cat([is_weights, p_weights], dim=0),
+            discounts=torch.cat([discounts, p_discounts], dim=0),
+            n_steps=torch.cat([n_steps, p_n_steps], dim=0),
+            replay_count=replay_count,
+            pending_entries=pending_entries,
+        )
+
+    def _commit_pending_entries(self, entries, td_errors, quantile_spreads=None) -> int:
+        if self._pending is None:
+            raise RuntimeError("Pending eval store is not configured")
+        if not entries:
+            return 0
+
+        td_values = _ReplayStoreBase._to_float_list(td_errors)
+        if quantile_spreads is None:
+            spread_values = [0.0] * len(td_values)
+        else:
+            spread_values = _ReplayStoreBase._to_float_list(quantile_spreads)
+
+        committed_ids = set()
+        for entry, td_error, spread in zip(entries, td_values, spread_values):
+            priority = abs(float(td_error)) + self._main.priority_eps
+            self._main.store_prioritized(
+                entry["state"],
+                entry["action"],
+                entry["next_state"],
+                entry["reward"],
+                entry["done"],
+                priority=priority,
+                discount=entry.get("discount", 1.0),
+                n_steps=entry.get("n_steps", 1),
+                tail_reward=entry.get("tail_reward", entry["reward"]),
+                quantile_spread=spread,
+            )
+            committed_ids.add(entry["pending_id"])
+
+        self._pending.remove_entries(committed_ids)
+        self._pending.prune_to_capacity(
+            replay_size=self._main.size(),
+            replay_max_size=self._main.max_size,
+        )
+        return len(committed_ids)
+
+    @staticmethod
+    def _wrap_main_sample(batch) -> MixedReplayBatch:
+        state, action, next_state, reward, done, sample_indices, is_weights, discounts, n_steps = batch
+        replay_count = state.size(0) if torch.is_tensor(state) else len(state)
+        return MixedReplayBatch(
+            state=state,
+            action=action,
+            next_state=next_state,
+            reward=reward,
+            done=done,
+            replay_indices=sample_indices,
+            is_weights=is_weights,
+            discounts=discounts,
+            n_steps=n_steps,
+            replay_count=replay_count,
+            pending_entries=[],
+        )

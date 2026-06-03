@@ -57,7 +57,7 @@ from transformer_discrete_agent import (
 )
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from model_structure.transformer_shared import FQFQNetwork
-from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
+from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer, RewardType
 from model_structure.visual_agent_common import VisualAgentCommonMixin
 from model_structure.yolo_encoder_base import (
     YOLOEncoderBase,
@@ -216,6 +216,8 @@ LR_RESUME_WARMUP_STEPS  = 2000  # Extra warmup on every restart, including first
 BUFFER_CAPACITY = 2048
 SAVE_CAPACITY   = 512
 MINIMUM_DATA_SIZE = min(BUFFER_CAPACITY, SAVE_CAPACITY*4)-1  # below this amount, won't start training
+PENDING_EVAL_SAMPLE_RATIO = 0.10
+PENDING_EVAL_EXTRA_CAPACITY = 500
 BUFFER_OVERFLOW = 256
 PER_ALPHA       = 0.6
 PER_UNIFORM_MIX = 0.2
@@ -446,7 +448,9 @@ class VisualAgentV3(VisualAgentCommonMixin):
             age_decay=AGE_DECAY,
             beta_start=PER_BETA_START,
             spread_decay=SPREAD_DECAY,
-            quota_check_class="win",  # Minesweeper: win is the rare-event bottleneck class
+            quota_check_class=RewardType.WIN,  # Minesweeper: win is the rare-event bottleneck class
+            pending_extra_capacity=PENDING_EVAL_EXTRA_CAPACITY,
+            pending_sample_ratio=PENDING_EVAL_SAMPLE_RATIO,
         )
 
         # ── image preprocessing ──
@@ -965,8 +969,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
     # ──────────────────────────── training step ────────────────────────
 
     def train_step(self):
-        buf_size = self.replay_buffer.size()
-        if buf_size < MINIMUM_DATA_SIZE:
+        if self.replay_buffer.training_size() < MINIMUM_DATA_SIZE:
             return None
 
         # Capture-once class_quota gate decision based on loaded training_history.
@@ -974,7 +977,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # performing well (win_rate > 50%); fresh / weak runs proceed without this gate.
         if self._class_quota_gate_enabled is None:
             self._class_quota_gate_enabled = self.training_history.win_rate(window=100) > 0.5
-        if self._class_quota_gate_enabled and not self.replay_buffer.is_class_quota_filled():
+        if self._class_quota_gate_enabled and not self.replay_buffer.is_training_class_quota_filled():
             return None
 
         self.total_it += 1
@@ -1007,14 +1010,19 @@ class VisualAgentV3(VisualAgentCommonMixin):
         per_beta = PER_BETA_START + (PER_BETA_END - PER_BETA_START) * min(
             self.episode_count / PER_BETA_EP, 1.0
         )
-        state, action, next_state, reward, done, sample_indices, is_weights, discounts, n_steps = (
-            self.replay_buffer.sample(
-                BATCH_SIZE,
-                beta=per_beta,
-                device=device,
-                include_extra=True,
-            )
+        replay_batch = self.replay_buffer.sample_training_batch(
+            BATCH_SIZE,
+            beta=per_beta,
+            device=device,
         )
+        state = replay_batch.state
+        action = replay_batch.action
+        next_state = replay_batch.next_state
+        reward = replay_batch.reward
+        done = replay_batch.done
+        is_weights = replay_batch.is_weights
+        discounts = replay_batch.discounts
+        n_steps = replay_batch.n_steps
         batch_size = state.size(0)
         self._set_runtime_modes()
 
@@ -1123,7 +1131,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # all succeed. If backward fails, leave old priorities intact. Always write
         # quantile_spreads so spread_decay latch can use accumulated real spread.
         self.replay_buffer.update_priorities(
-            sample_indices,
+            replay_batch,
             td_error.squeeze(-1).cpu().numpy(),
             quantile_spreads=chosen_q_spread.cpu().numpy(),
         )

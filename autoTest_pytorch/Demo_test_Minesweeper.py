@@ -331,21 +331,23 @@ class Game_test_case(unittest.TestCase) :
 
         if agent.total_it > 0 and not Game_test_case._resume_eval_checked:
             Game_test_case._resume_eval_checked = True
+            training_data_size = agent.replay_buffer.training_size()
             eval_episodes = (
                 RESUME_PREFILL_EVAL_EPISODES
-                if agent.replay_buffer.size() < MINIMUM_DATA_SIZE
+                if training_data_size < MINIMUM_DATA_SIZE
                 else EVAL_EPISODES
             )
             print(
                 f"[V3 EVAL] Resume eval: replay "
-                f"{agent.replay_buffer.size()}/{MINIMUM_DATA_SIZE}, "
+                f"{agent.replay_buffer.size()} + pending {agent.replay_buffer.pending_size()}"
+                f"/{MINIMUM_DATA_SIZE}, "
                 f"episodes={eval_episodes}"
             )
         elif should_run_eval(
             episode,
             offset=EVAL_OFFSET,
             interval=EVAL_INTERVAL,
-            training_started=agent.total_it > 0 and agent.replay_buffer.size() >= MINIMUM_DATA_SIZE,
+            training_started=agent.total_it > 0 and agent.replay_buffer.training_size() >= MINIMUM_DATA_SIZE,
         ):
             eval_episodes = EVAL_EPISODES
             print(
@@ -436,6 +438,7 @@ class Game_test_case(unittest.TestCase) :
                         current_screenshot,
                         game_status.reward,
                         False,
+                        source="eval",
                     )
                 game_status.step_count += 1
                 time.sleep(EVAL_STEP_WAIT_SECONDS)
@@ -477,6 +480,7 @@ class Game_test_case(unittest.TestCase) :
                     game_status.next_state,
                     game_status.reward,
                     bool(game_status.game_over),
+                    source="eval",
                 )
             game_status.step_count += 1
             time.sleep(EVAL_STEP_WAIT_SECONDS)

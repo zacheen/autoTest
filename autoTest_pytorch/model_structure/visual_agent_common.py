@@ -72,7 +72,11 @@ class VisualAgentCommonMixin:
         next_state: torch.Tensor | None,
         reward: float,
         done: bool,
+        *,
+        source: str = "train",
     ) -> None:
+        if source not in ("train", "eval"):
+            raise ValueError(f"source must be 'train' or 'eval', got {source!r}")
         # Record raw rewards into training_history.step_rewards for the
         # train/real_reward_mean rolling metric. v2 / v3 share this mixin, so
         # neither agent keeps its own recent_real_rewards deque.
@@ -83,6 +87,7 @@ class VisualAgentCommonMixin:
             "next_state": self._to_storage_state(next_state),
             "reward": float(reward),
             "done": bool(done),
+            "source": source,
         }
         self.n_step_buffer.append(transition)
 
@@ -108,7 +113,12 @@ class VisualAgentCommonMixin:
 
         first_transition = self.n_step_buffer[0]
         discount = self.n_step_gamma ** horizon
-        self.replay_buffer.store(
+        store_fn = (
+            self.replay_buffer.store_pending
+            if first_transition.get("source") == "eval"
+            else self.replay_buffer.store
+        )
+        store_fn(
             first_transition["state"],
             first_transition["action"],
             last_transition["next_state"],
@@ -242,10 +252,11 @@ class VisualAgentCommonMixin:
 
     def save_persistent(self) -> None:
         buf = self.replay_buffer
-        if buf.size_count == 0:
+        total = buf.size()
+        if total == 0:
             return
 
-        target = min(self.save_capacity, buf.size_count)
+        target = min(self.save_capacity, total)
         persistent_entries = buf.export_top_k(target, persistent_dir=self.replay_persistent_path)
 
         torch.save(
@@ -295,7 +306,7 @@ class VisualAgentCommonMixin:
         skipped_missing = 0
         skipped_shape_mismatch = 0
         skipped_load_error = 0
-        self.replay_buffer.index = []
+        runtime_entries = []
         for entry in persistent_entries[: self.replay_buffer.max_size]:
             state_src_str = entry.get("state", entry.get("state_path"))
             if state_src_str is None:
@@ -352,7 +363,7 @@ class VisualAgentCommonMixin:
                 "done": bool(entry["done"]),
                 "discount": float(entry.get("discount", 1.0)),
                 "n_steps": int(entry.get("n_steps", 1)),
-                "reward_type": self.replay_buffer._reward_type(
+                "reward_type": self.replay_buffer.reward_type_for(
                     float(entry.get("tail_reward", entry["reward"])),
                     bool(entry["done"]),
                 ),
@@ -372,12 +383,14 @@ class VisualAgentCommonMixin:
             }
             if "reward_type" in entry:
                 runtime_entry["reward_type"] = entry["reward_type"]
-            self.replay_buffer.index.append(runtime_entry)
+            runtime_entries.append(runtime_entry)
             loaded_count += 1
 
-        self.replay_buffer.size_count = loaded_count
-        self.replay_buffer.next_storage_id = loaded_count
-        self.replay_buffer.insert_counter = loaded_count
+        self.replay_buffer.replace_entries(
+            runtime_entries,
+            next_storage_id=loaded_count,
+            insert_counter=loaded_count,
+        )
         # Show skip reasons so expected_shape changes do not just print "Loaded 0".
         # Example: V3 screenshot entries became cached features, making old entries mismatch.
         skipped_total = skipped_missing + skipped_shape_mismatch + skipped_load_error

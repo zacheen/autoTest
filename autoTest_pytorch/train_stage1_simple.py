@@ -226,7 +226,14 @@ def run_episode(logic, agent, add_noise=True, *, store_data=None, train=True):
         if store_data:
             # Training keeps the old skip-first-click rule; eval data stores every step.
             if not train or episode_steps > 0:
-                agent.store_transition(state, (row, col), next_state, reward, done)
+                agent.store_transition(
+                    state,
+                    (row, col),
+                    next_state,
+                    reward,
+                    done,
+                    source="train" if train else "eval",
+                )
                 if train:
                     train_info = agent.train_step()
                     if train_info is not None:
@@ -364,14 +371,16 @@ def main():
             # 300-episode sample; otherwise use the normal eval size.
             if agent.is_resume_training and agent.total_it > 0 and not resume_eval_checked:
                 resume_eval_checked = True
+                training_data_size = agent.replay_buffer.training_size()
                 eval_episodes = (
                     RESUME_PREFILL_EVAL_EPISODES
-                    if agent.replay_buffer.size() < MINIMUM_DATA_SIZE
+                    if training_data_size < MINIMUM_DATA_SIZE
                     else EVAL_EPISODES
                 )
                 print(
                     f"[EVAL] Resume eval: replay "
-                    f"{agent.replay_buffer.size()}/{MINIMUM_DATA_SIZE}, "
+                    f"{agent.replay_buffer.size()} + pending {agent.replay_buffer.pending_size()}"
+                    f"/{MINIMUM_DATA_SIZE}, "
                     f"episodes={eval_episodes}"
                 )
 
@@ -380,7 +389,7 @@ def main():
                 episode,
                 offset=EVAL_OFFSET,
                 interval=EVAL_INTERVAL,
-                training_started=agent.total_it > 0 and agent.replay_buffer.size() >= MINIMUM_DATA_SIZE,
+                training_started=agent.total_it > 0 and agent.replay_buffer.training_size() >= MINIMUM_DATA_SIZE,
             ):
                 eval_episodes = EVAL_EPISODES
                 print(

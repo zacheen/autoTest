@@ -680,7 +680,7 @@ class VisualAgentV2(VisualAgentCommonMixin):
             file_path.unlink()
 
         loaded_count = 0
-        self.replay_buffer.index = []
+        runtime_entries = []
         for entry in persistent_index[: self.replay_buffer.max_size]:
             state_src_str = entry.get("state", entry.get("state_path"))
             if state_src_str is None:
@@ -719,7 +719,7 @@ class VisualAgentV2(VisualAgentCommonMixin):
                 "done": bool(entry["done"]),
                 "discount": float(entry.get("discount", 1.0)),
                 "n_steps": int(entry.get("n_steps", 1)),
-                "reward_type": self.replay_buffer._reward_type(
+                "reward_type": self.replay_buffer.reward_type_for(
                     float(entry.get("tail_reward", entry["reward"])),
                     bool(entry["done"]),
                 ),
@@ -734,12 +734,14 @@ class VisualAgentV2(VisualAgentCommonMixin):
             }
             if "reward_type" in entry:
                 runtime_entry["reward_type"] = entry["reward_type"]
-            self.replay_buffer.index.append(runtime_entry)
+            runtime_entries.append(runtime_entry)
             loaded_count += 1
 
-        self.replay_buffer.size_count = loaded_count
-        self.replay_buffer.next_storage_id = loaded_count
-        self.replay_buffer.insert_counter = loaded_count
+        self.replay_buffer.replace_entries(
+            runtime_entries,
+            next_storage_id=loaded_count,
+            insert_counter=loaded_count,
+        )
         print(f"[V2] Loaded {loaded_count} replay buffer entries")
 
     # ──────────────────────────── diagnostics ──────────────────────────

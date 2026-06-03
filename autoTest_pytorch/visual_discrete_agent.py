@@ -737,14 +737,16 @@ class VisualDiscreteAgent:
 
     def save_persistent(self):
         buf = self.replay_buffer
-        if buf.size_count == 0:
+        entries = buf.get_all_entries()
+        total = buf.size()
+        if total == 0:
             return
 
         reward_groups = defaultdict(list)
-        for idx in range(buf.size_count):
-            reward_groups[buf.index[idx].get("tail_reward", buf.index[idx]["reward"])].append(idx)
+        for idx, entry in enumerate(entries):
+            reward_groups[entry.get("tail_reward", entry["reward"])].append(idx)
 
-        target = min(VISUAL_SAVE_CAPACITY, buf.size_count)
+        target = min(VISUAL_SAVE_CAPACITY, total)
         selected_indices = []
         remaining = target
         groups = sorted(reward_groups.items(), key=lambda item: len(item[1]))
@@ -752,7 +754,7 @@ class VisualDiscreteAgent:
             if group_idx == len(groups) - 1:
                 count = remaining
             else:
-                count = round(len(indices) / buf.size_count * target)
+                count = round(len(indices) / total * target)
             count = min(count, len(indices), remaining)
             selected_indices.extend(random.sample(indices, count))
             remaining -= count
@@ -766,7 +768,7 @@ class VisualDiscreteAgent:
         persistent_index = []
         save_idx = 0
         for old_idx in selected_indices:
-            old_entry = buf.index[old_idx]
+            old_entry = entries[old_idx]
 
             state_src = Path(old_entry["state"])
             if not state_src.exists():
@@ -796,7 +798,7 @@ class VisualDiscreteAgent:
                     "priority": float(old_entry.get("priority", VISUAL_PRIORITY_MIN)),
                     "reward_type": old_entry.get(
                         "reward_type",
-                        buf._reward_type(
+                        buf.reward_type_for(
                             float(old_entry.get("tail_reward", old_entry["reward"])),
                             bool(old_entry["done"]),
                         ),
@@ -901,7 +903,7 @@ class VisualDiscreteAgent:
             file_path.unlink()
 
         loaded_count = 0
-        self.replay_buffer.index = []
+        runtime_entries = []
         for entry in persistent_index[: self.replay_buffer.max_size]:
             state_src_str = entry.get("state", entry.get("state_path"))
             if state_src_str is None:
@@ -932,7 +934,7 @@ class VisualDiscreteAgent:
                 "done": bool(entry["done"]),
                 "discount": float(entry.get("discount", 1.0)),
                 "n_steps": int(entry.get("n_steps", 1)),
-                "reward_type": self.replay_buffer._reward_type(
+                "reward_type": self.replay_buffer.reward_type_for(
                     float(entry.get("tail_reward", entry["reward"])),
                     bool(entry["done"]),
                 ),
@@ -947,12 +949,14 @@ class VisualDiscreteAgent:
             }
             if "reward_type" in entry:
                 runtime_entry["reward_type"] = entry["reward_type"]
-            self.replay_buffer.index.append(runtime_entry)
+            runtime_entries.append(runtime_entry)
             loaded_count += 1
 
-        self.replay_buffer.size_count = loaded_count
-        self.replay_buffer.next_storage_id = loaded_count
-        self.replay_buffer.insert_counter = loaded_count
+        self.replay_buffer.replace_entries(
+            runtime_entries,
+            next_storage_id=loaded_count,
+            insert_counter=loaded_count,
+        )
         print(f"[VisualFQF] Loaded {loaded_count} replay buffer entries")
 
     def _close_io_log(self):
@@ -1151,4 +1155,3 @@ def get_agent(screen_region=None):
     if _agent is None:
         _agent = VisualDiscreteAgent(screen_region)
     return _agent
-

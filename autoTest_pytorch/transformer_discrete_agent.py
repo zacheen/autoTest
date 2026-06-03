@@ -26,6 +26,7 @@ from model_structure.archive_manager import (
     RolloverTextLog,
 )
 from model_structure.training_logger import TrainingLogger
+from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer, RewardType
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -52,6 +53,8 @@ PER_BETA_END = 1.0
 # Phase 1 stratified-balanced ratio inside each batch. 1.0 = all per-class
 # stratified, with PER only filling shortages. 0.5 = original 50/50. 0.0 = pure global PER.
 PER_BALANCED_RATIO = 1.0
+PENDING_EVAL_SAMPLE_RATIO = 0.10
+PENDING_EVAL_EXTRA_CAPACITY = 500
 # Resume-only replay quota gate. If the loaded rolling win rate is already above
 # this threshold, require class quota to be filled before optimizer updates resume.
 CLASS_QUOTA_GATE_WR_THRESHOLD = 0.5
@@ -248,8 +251,6 @@ class TransformerDiscreteAgent:
         self.q_target.load_state_dict(self.q_network.state_dict())
         self.q_target.eval()
 
-        from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
-
         self.optimizer = build_fqf_optimizer(self.backbone, self.q_network)
         # Record each param group's base LR; warmup scales by total_it / steps_since_resume.
         self._base_lrs = [group["lr"] for group in self.optimizer.param_groups]
@@ -263,7 +264,9 @@ class TransformerDiscreteAgent:
             alpha=PER_ALPHA,
             beta_start=PER_BETA_START,
             balanced_ratio=PER_BALANCED_RATIO,
-            quota_check_class="win",  # Minesweeper: win is the rare-event bottleneck class
+            quota_check_class=RewardType.WIN,  # Minesweeper: win is the rare-event bottleneck class
+            pending_extra_capacity=PENDING_EVAL_EXTRA_CAPACITY,
+            pending_sample_ratio=PENDING_EVAL_SAMPLE_RATIO,
             # Spread-decay calibrated from observed inference quantile spreads (median ~0.115,
             # p90 ~0.378). Starts disabled — latched ON by train_step once win_rate(100) > 0.4.
             spread_decay=2.0,
@@ -459,7 +462,9 @@ class TransformerDiscreteAgent:
 
         return (action_id // self.grid_w, action_id % self.grid_w)
 
-    def store_transition(self, state, action, next_state, reward, done):
+    def store_transition(self, state, action, next_state, reward, done, *, source="train"):
+        if source not in ("train", "eval"):
+            raise ValueError(f"source must be 'train' or 'eval', got {source!r}")
         # Feed train/real_reward_mean with the raw reward rolling mean before
         # reward_squash. Uses the same record_step_reward path as v2 / v3.
         self.training_history.record_step_reward(float(reward))
@@ -469,6 +474,7 @@ class TransformerDiscreteAgent:
             "next_state": next_state.detach().cpu() if next_state is not None else None,
             "reward": float(reward),
             "done": bool(done),
+            "source": source,
         }
         self.n_step_buffer.append(transition)
 
@@ -495,7 +501,12 @@ class TransformerDiscreteAgent:
 
         first_transition = self.n_step_buffer[0]
         discount = self.n_step_gamma ** horizon
-        self.replay_buffer.store(
+        store_fn = (
+            self.replay_buffer.store_pending
+            if first_transition.get("source") == "eval"
+            else self.replay_buffer.store
+        )
+        store_fn(
             first_transition["state"],
             first_transition["action"],
             last_transition["next_state"],
@@ -522,13 +533,12 @@ class TransformerDiscreteAgent:
         extra_params_to_clip : optional iterable of extra parameters to include in the
                                gradient-norm clip (e.g. YOLO parameters).
         """
-        buf_size = self.replay_buffer.size()
-        if buf_size < MINIMUM_DATA_SIZE:
+        if self.replay_buffer.training_size() < MINIMUM_DATA_SIZE:
             return None
 
         # Startup-history quota gate. Fresh live win-rate changes do not flip this
         # mid-session; resumed high-win-rate sessions must refill class quota first.
-        if self._class_quota_gate_enabled and not self.replay_buffer.is_class_quota_filled():
+        if self._class_quota_gate_enabled and not self.replay_buffer.is_training_class_quota_filled():
             return None
 
         # Spread-decay latch — independent of class_quota gate. Live-checked every train_step
@@ -547,12 +557,19 @@ class TransformerDiscreteAgent:
         # archive dir through SessionArchiveManager on_rollover callbacks.
         self.archive.maybe_rollover()
 
-        state, action, next_state, reward, done, per_indices, is_weights, discounts, n_steps = self.replay_buffer.sample(
+        replay_batch = self.replay_buffer.sample_training_batch(
             BATCH_SIZE,
             beta=PER_BETA_START + (PER_BETA_END - PER_BETA_START) * min(self.episode_count / 5000.0, 1.0),
             device=device,
-            include_extra=True,
         )
+        state = replay_batch.state
+        action = replay_batch.action
+        next_state = replay_batch.next_state
+        reward = replay_batch.reward
+        done = replay_batch.done
+        is_weights = replay_batch.is_weights
+        discounts = replay_batch.discounts
+        n_steps = replay_batch.n_steps
 
             # Stage 0: buffer sample. A hit means replay data is corrupt
             # in the load or store path.
@@ -772,7 +789,7 @@ class TransformerDiscreteAgent:
                 )
 
         self.replay_buffer.update_priorities(
-            per_indices,
+            replay_batch,
             td_error.squeeze(-1).cpu().numpy(),
             quantile_spreads=chosen_q_spread.cpu().numpy(),
         )
