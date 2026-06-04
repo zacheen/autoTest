@@ -65,13 +65,33 @@ class _ReplayStoreBase:
 
     REWARD_TYPES = RewardType.all()
 
-    def __init__(self, *, config: ReplayBalanceConfig) -> None:
+    def __init__(
+        self,
+        *,
+        config: ReplayBalanceConfig,
+        storage_mode: str = "ram",
+        save_dir=None,
+    ) -> None:
         self.config = config
         self.win_threshold = config.win_threshold
         self.lose_threshold = config.lose_threshold
         self.invalid_threshold = config.invalid_threshold
         self.quota_check_class = config.quota_check_class
         self.balanced_ratio = config.balanced_ratio
+
+        # Storage backend shared by all replay stores (main PER + pending). "ram"
+        # keeps tensors in memory; "disk" persists uint8 .pt files under save_dir and
+        # keeps only path strings in the index. The _save_tensor / _load_tensor /
+        # _delete_entry_files helpers below are storage-mode aware so every subclass
+        # gets identical persistence semantics.
+        self.storage_mode = storage_mode.lower()
+        if self.storage_mode == "disk":
+            if not save_dir:
+                raise ValueError("save_dir must be provided if storage_mode is 'disk'")
+            self.save_dir = Path(save_dir)
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self.save_dir = None
 
     def _reward_type(self, reward, done):
         """Categorize the reward into one of: win, lose, invalid, progress."""
@@ -113,18 +133,69 @@ class _ReplayStoreBase:
         return capacities
 
     @staticmethod
-    def _to_cpu_state(value):
-        if value is None:
-            return None
-        if torch.is_tensor(value):
-            return value.detach().cpu()
-        return value
-
-    @staticmethod
     def _to_float_list(values) -> list[float]:
         if torch.is_tensor(values):
             return values.detach().float().view(-1).cpu().tolist()
         return [float(value) for value in values]
+
+    def _save_tensor(self, tensor, root_name, storage_id):
+        """Save a tensor either to disk or keep it in memory based on storage mode."""
+        if self.storage_mode == "disk":
+            path = self.save_dir / f"{root_name}_{storage_id}.pt"
+            # If it looks like a visual image, store as uint8 to save space
+            if len(tensor.shape) == 3 and tensor.shape[0] == 3 and tensor.shape[1] >= 64:
+                uint8_tensor = tensor.detach().cpu().clamp(0, 1).mul(255).to(torch.uint8)
+                torch.save(uint8_tensor, path)
+            else:
+                torch.save(tensor.cpu(), path)
+            return str(path)
+        else:
+            return tensor.cpu().clone() if torch.is_tensor(tensor) else tensor
+
+    def _load_tensor(self, reference, *, copy: bool = True):
+        """Load and return a tensor from disk, or return the in-memory reference.
+
+        Args:
+            copy: Only relevant when the stored reference is already a tensor (RAM mode,
+                or a rehydrated entry). Controls ownership of the returned tensor:
+                - ``copy=True`` (default, safe): return an independent ``.clone()`` so the
+                  caller fully owns it and may mutate or store it long-term without
+                  touching buffer state. Used by ``load_from_entries`` (the result is
+                  kept in ``self.index``) and by any caller that has not been audited.
+                - ``copy=False`` (borrow): return a detached CPU tensor that SHARES
+                  storage with the buffer's stored tensor. The caller MUST treat it as
+                  read-only and consume it before the buffer slot can change. Used only
+                  by the hot sampling path (``build_batch_from_entries``), whose very next
+                  step is ``torch.stack`` — that allocates a fresh batch tensor and copies
+                  each element in, so the borrow never escapes the function. This skips a
+                  redundant per-entry clone (megabytes per visual state) on every
+                  ``sample()`` call; the store-time clone in ``_save_tensor`` is what
+                  already guarantees the buffer owns a private copy.
+        """
+        if torch.is_tensor(reference):
+            tensor = reference.detach().cpu()  # detach = view (no copy); cpu = no-op when already on CPU
+            return tensor.clone() if copy else tensor
+
+        if self.storage_mode == "disk":
+            tensor = torch.load(reference, map_location="cpu")
+            if tensor.dtype == torch.uint8:
+                return tensor.float() / 255.0
+            return tensor.cpu()
+        return reference
+
+    def _safe_unlink(self, path_str):
+        """Safely delete a file from disk if its path is provided and exists."""
+        if not path_str:
+            return
+        path = Path(path_str)
+        if path.exists():
+            path.unlink()
+
+    def _delete_entry_files(self, entry):
+        """Clean up and delete disk files associated with a removed buffer entry."""
+        if self.storage_mode == "disk":
+            self._safe_unlink(entry.get("state"))
+            self._safe_unlink(entry.get("next_state"))
 
 
 
@@ -247,17 +318,9 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
                 balanced_ratio=balanced_ratio,
                 quota_check_class=quota_check_class,
             )
-        super().__init__(config=config)
+        super().__init__(config=config, storage_mode=storage_mode, save_dir=save_dir)
 
         self.max_size = max_size
-        self.storage_mode = storage_mode.lower()
-        if self.storage_mode == "disk":
-            if not save_dir:
-                raise ValueError("save_dir must be provided if storage_mode is 'disk'")
-            self.save_dir = Path(save_dir)
-            self.save_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            self.save_dir = None
 
         self.overflow_margin = overflow_margin
         self.alpha = alpha
@@ -279,65 +342,6 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         self.next_storage_id = 0
         self.insert_counter = 0
 
-
-    def _save_tensor(self, tensor, root_name, storage_id):
-        """Save a tensor either to disk or keep it in memory based on storage mode."""
-        if self.storage_mode == "disk":
-            path = self.save_dir / f"{root_name}_{storage_id}.pt"
-            # If it looks like a visual image, store as uint8 to save space
-            if len(tensor.shape) == 3 and tensor.shape[0] == 3 and tensor.shape[1] >= 64:
-                uint8_tensor = tensor.detach().cpu().clamp(0, 1).mul(255).to(torch.uint8)
-                torch.save(uint8_tensor, path)
-            else:
-                torch.save(tensor.cpu(), path)
-            return str(path)
-        else:
-            return tensor.cpu().clone() if torch.is_tensor(tensor) else tensor
-
-    def _load_tensor(self, reference, *, copy: bool = True):
-        """Load and return a tensor from disk, or return the in-memory reference.
-
-        Args:
-            copy: Only relevant when the stored reference is already a tensor (RAM mode,
-                or a rehydrated entry). Controls ownership of the returned tensor:
-                - ``copy=True`` (default, safe): return an independent ``.clone()`` so the
-                  caller fully owns it and may mutate or store it long-term without
-                  touching buffer state. Used by ``load_from_entries`` (the result is
-                  kept in ``self.index``) and by any caller that has not been audited.
-                - ``copy=False`` (borrow): return a detached CPU tensor that SHARES
-                  storage with the buffer's stored tensor. The caller MUST treat it as
-                  read-only and consume it before the buffer slot can change. Used only
-                  by the hot sampling path (``build_batch_from_entries``), whose very next
-                  step is ``torch.stack`` — that allocates a fresh batch tensor and copies
-                  each element in, so the borrow never escapes the function. This skips a
-                  redundant per-entry clone (megabytes per visual state) on every
-                  ``sample()`` call; the store-time clone in ``_save_tensor`` is what
-                  already guarantees the buffer owns a private copy.
-        """
-        if torch.is_tensor(reference):
-            tensor = reference.detach().cpu()  # detach = view (no copy); cpu = no-op when already on CPU
-            return tensor.clone() if copy else tensor
-
-        if self.storage_mode == "disk":
-            tensor = torch.load(reference, map_location="cpu")
-            if tensor.dtype == torch.uint8:
-                return tensor.float() / 255.0
-            return tensor.cpu()
-        return reference
-
-    def _safe_unlink(self, path_str):
-        """Safely delete a file from disk if its path is provided and exists."""
-        if not path_str:
-            return
-        path = Path(path_str)
-        if path.exists():
-            path.unlink()
-
-    def _delete_entry_files(self, entry):
-        """Clean up and delete disk files associated with a removed buffer entry."""
-        if self.storage_mode == "disk":
-            self._safe_unlink(entry.get("state"))
-            self._safe_unlink(entry.get("next_state"))
 
     def _effective_priority(self, entry):
         """Calculate the current priority of an entry after applying age (and optional)
@@ -620,15 +624,26 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         tail_reward=None,
         initial_priority=None,
         quantile_spread=0.0,
+        state_ref=None,
+        next_state_ref=None,
     ):
-        """Store a transition."""
+        """Store a transition.
+
+        When ``state_ref`` / ``next_state_ref`` are supplied, they are adopted into
+        the index directly and ``_save_tensor`` is skipped. A ref is whatever
+        ``_save_tensor`` previously returned for the same storage mode: a path string
+        in disk mode, or an in-memory tensor in RAM mode. This lets the pending store
+        hand its already-written file (or already-cloned tensor) to the main store on
+        commit without re-serializing, moving, or re-cloning it. ``state`` /
+        ``next_state`` are ignored for whichever ref is provided.
+        """
         self.insert_counter += 1
         storage_id = self.next_storage_id
         self.next_storage_id += 1
 
-        state_ref = self._save_tensor(state, "state", storage_id)
-        next_state_ref = None
-        if next_state is not None:
+        if state_ref is None:
+            state_ref = self._save_tensor(state, "state", storage_id)
+        if next_state_ref is None and next_state is not None:
             next_state_ref = self._save_tensor(next_state, "next_state", storage_id)
 
         bucket_reward = float(reward if tail_reward is None else tail_reward)
@@ -668,8 +683,15 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         n_steps=1,
         tail_reward=None,
         quantile_spread=0.0,
+        state_ref=None,
+        next_state_ref=None,
     ):
-        """Store data whose PER priority is already known."""
+        """Store data whose PER priority is already known.
+
+        ``state_ref`` / ``next_state_ref`` are forwarded to ``store`` so an
+        already-saved reference can be adopted without re-serialization (see
+        ``store``).
+        """
         return self.store(
             state,
             action,
@@ -681,6 +703,8 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
             tail_reward=tail_reward,
             initial_priority=priority,
             quantile_spread=quantile_spread,
+            state_ref=state_ref,
+            next_state_ref=next_state_ref,
         )
 
     def update_priorities(self, sample_indices, td_errors, quantile_spreads=None):
@@ -1024,19 +1048,31 @@ class _PendingReplayStore(_ReplayStoreBase):
         *,
         extra_capacity: int = 500,
         sample_ratio: float = 0.10,
+        storage_mode: str = "ram",
+        save_dir=None,
     ) -> None:
         if extra_capacity < 0:
             raise ValueError(f"extra_capacity must be >= 0, got {extra_capacity}")
         if not 0.0 <= sample_ratio <= 1.0:
             raise ValueError(f"sample_ratio must be in [0, 1], got {sample_ratio}")
 
-        super().__init__(config=config)
+        super().__init__(config=config, storage_mode=storage_mode, save_dir=save_dir)
         self.extra_capacity = int(extra_capacity)
         self.sample_ratio = float(sample_ratio)
         self._reward_types = tuple(self.REWARD_TYPES)
         self._buckets = {reward_type: deque() for reward_type in self._reward_types}
         self._seen_counts = {reward_type: 0 for reward_type in self._reward_types}
         self._next_pending_id = 0
+
+        # Pending is a transient staging area: it is never serialized or restored
+        # (save_persistent / export_top_k / _load_persistent_buffer touch the main
+        # store only). It shares the main store's save_dir, so on startup clear any
+        # pending_*.pt left behind by a crashed run. The "pending_" prefix scopes this
+        # glob to pending files only — it never matches the main store's state_*.pt.
+        # The base __init__ already created save_dir in disk mode, so this is safe.
+        if self.storage_mode == "disk":
+            for stale_path in self.save_dir.glob("pending_*.pt"):
+                stale_path.unlink()
 
     def size(self) -> int:
         return sum(len(bucket) for bucket in self._buckets.values())
@@ -1060,7 +1096,8 @@ class _PendingReplayStore(_ReplayStoreBase):
         total_capacity = self.total_capacity(replay_size=replay_size, replay_max_size=replay_max_size)
         if total_capacity <= 0:
             for bucket in self._buckets.values():
-                bucket.clear()
+                while bucket:
+                    self._delete_entry_files(bucket.popleft())
             return
 
         capacities = self.class_capacities(replay_size=replay_size, replay_max_size=replay_max_size)
@@ -1070,7 +1107,7 @@ class _PendingReplayStore(_ReplayStoreBase):
                 victim_type = self._largest_non_empty_type()
             if victim_type is None:
                 return
-            self._buckets[victim_type].popleft()
+            self._delete_entry_files(self._buckets[victim_type].popleft())
 
     def store(
         self,
@@ -1096,11 +1133,15 @@ class _PendingReplayStore(_ReplayStoreBase):
             return False
 
         bucket = self._buckets[reward_type]
+        pending_id = self._next_pending_id
+        self._next_pending_id += 1  # always advance, even on reject, so ids never repeat
+
+        # Build metadata only. The (multi-MB) state tensors are written lazily by
+        # _materialize() — and ONLY on a branch that actually keeps the entry — so a
+        # rejected transition never writes a .pt file that would then leak on disk.
         entry = {
-            "pending_id": self._next_pending_id,
-            "state": self._to_cpu_state(state),
+            "pending_id": pending_id,
             "action": action.copy() if isinstance(action, np.ndarray) else np.array(action),
-            "next_state": self._to_cpu_state(next_state),
             "reward": float(reward),
             "tail_reward": bucket_reward,
             "done": bool(done),
@@ -1108,10 +1149,22 @@ class _PendingReplayStore(_ReplayStoreBase):
             "n_steps": int(max(1, n_steps)),
             "reward_type": reward_type.value,
         }
-        self._next_pending_id += 1
+
+        def _materialize() -> None:
+            # Reuse the shared storage backend: disk mode writes a uint8 pending_*.pt
+            # and stores its path; RAM mode stores a cloned tensor. The "pending_"
+            # filename prefix keeps these files from colliding with the main store's
+            # state_*.pt in the shared save_dir.
+            entry["state"] = self._save_tensor(state, "pending_state", pending_id)
+            entry["next_state"] = (
+                self._save_tensor(next_state, "pending_next_state", pending_id)
+                if next_state is not None
+                else None
+            )
+            bucket.append(entry)
 
         if self.size() < total_capacity:
-            bucket.append(entry)
+            _materialize()
             return True
 
         capacities = self.class_capacities(replay_size=replay_size, replay_max_size=replay_max_size)
@@ -1119,16 +1172,16 @@ class _PendingReplayStore(_ReplayStoreBase):
         if len(bucket) < class_capacity:
             victim_type = self._oldest_over_quota_type(capacities, exclude=reward_type)
             if victim_type is not None:
-                self._buckets[victim_type].popleft()
-                bucket.append(entry)
+                self._delete_entry_files(self._buckets[victim_type].popleft())
+                _materialize()
                 return True
 
         keep_probability = class_capacity / max(1, self._seen_counts[reward_type])
         if random.random() > keep_probability:
             return False
 
-        bucket.append(entry)
-        bucket.popleft()
+        _materialize()
+        self._delete_entry_files(bucket.popleft())
         return True
 
     def sample_entries(self, count: int, *, replay_size: int, replay_max_size: int) -> list[dict[str, Any]]:
@@ -1257,11 +1310,22 @@ class CategorizedReplayBuffer:
             config=balance_config,
         )
         self._main = main_store
+        # Pending shares the main store's save_dir — it does not need its own folder.
+        # Ownership of every .pt is tracked purely by which in-memory list holds the
+        # entry (_pending._buckets vs _main.index), never by location; on commit the
+        # file is adopted into _main.index by reference with its path unchanged. The
+        # "pending_" filename prefix is all that keeps pending_*.pt from colliding
+        # with the main store's state_*.pt / next_state_*.pt in the shared dir.
+        pending_save_dir = (
+            save_dir if storage_mode.lower() == "disk" and save_dir else None
+        )
         self._pending = (
             _PendingReplayStore(
                 balance_config,
                 extra_capacity=pending_extra_capacity,
                 sample_ratio=pending_sample_ratio,
+                storage_mode=storage_mode,
+                save_dir=pending_save_dir,
             )
             if pending_extra_capacity > 0 or pending_sample_ratio > 0
             else None
@@ -1518,27 +1582,39 @@ class CategorizedReplayBuffer:
             spread_values = _ReplayStoreBase._to_float_list(quantile_spreads)
 
         committed_ids = set()
-        for entry, td_error, spread in zip(entries, td_values, spread_values):
-            priority = abs(float(td_error)) + self._main.priority_eps
-            self._main.store_prioritized(
-                entry["state"],
-                entry["action"],
-                entry["next_state"],
-                entry["reward"],
-                entry["done"],
-                priority=priority,
-                discount=entry.get("discount", 1.0),
-                n_steps=entry.get("n_steps", 1),
-                tail_reward=entry.get("tail_reward", entry["reward"]),
-                quantile_spread=spread,
+        try:
+            for entry, td_error, spread in zip(entries, td_values, spread_values):
+                priority = abs(float(td_error)) + self._main.priority_eps
+                # Zero-copy adoption: the pending store already wrote (disk mode) or
+                # cloned (RAM mode) the state, so hand that reference to the main store
+                # via state_ref/next_state_ref instead of re-serializing or moving it.
+                self._main.store_prioritized(
+                    None,
+                    entry["action"],
+                    None,
+                    entry["reward"],
+                    entry["done"],
+                    priority=priority,
+                    discount=entry.get("discount", 1.0),
+                    n_steps=entry.get("n_steps", 1),
+                    tail_reward=entry.get("tail_reward", entry["reward"]),
+                    quantile_spread=spread,
+                    state_ref=entry["state"],
+                    next_state_ref=entry["next_state"],
+                )
+                committed_ids.add(entry["pending_id"])
+        finally:
+            # Ownership of each adopted pending_*.pt has transferred to main, whose
+            # _prune_if_needed will unlink it later. Drop those entries from pending
+            # bookkeeping WITHOUT deleting the file — in a `finally` so that even if an
+            # iteration above raised, pending can never later prune (and delete) a file
+            # that main now references. prune_to_capacity only touches entries STILL in
+            # pending (committed ones are already gone), so it is safe here too.
+            self._pending.remove_entries(committed_ids)
+            self._pending.prune_to_capacity(
+                replay_size=self._main.size(),
+                replay_max_size=self._main.max_size,
             )
-            committed_ids.add(entry["pending_id"])
-
-        self._pending.remove_entries(committed_ids)
-        self._pending.prune_to_capacity(
-            replay_size=self._main.size(),
-            replay_max_size=self._main.max_size,
-        )
         return len(committed_ids)
 
     @staticmethod
