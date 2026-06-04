@@ -945,6 +945,9 @@ class TransformerDiscreteAgent:
         for bucket_name, count in self.replay_buffer.bucket_sizes().items():
             self.training_logger.log(f"buffer/bucket_{bucket_name}", count, step=step, csv=False)
         self.training_logger.log("buffer/total_size", self.replay_buffer.size(), step=step, csv=False)
+        for bucket_name, count in self.replay_buffer.pending_bucket_sizes().items():
+            self.training_logger.log(f"pending/bucket_{bucket_name}", count, step=step, csv=False)
+        self.training_logger.log("pending/total_size", self.replay_buffer.pending_size(), step=step, csv=False)
 
         return {
             "Q_loss": loss_value,

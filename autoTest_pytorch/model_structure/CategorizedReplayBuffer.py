@@ -296,15 +296,15 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
 
     def _load_tensor(self, reference):
         """Load and return a tensor from disk, or return the memory reference directly."""
+        if torch.is_tensor(reference):
+            return reference.detach().cpu().clone()
+
         if self.storage_mode == "disk":
             tensor = torch.load(reference, map_location="cpu")
             if tensor.dtype == torch.uint8:
                 return tensor.float() / 255.0
             return tensor.cpu()
-        else:
-            if torch.is_tensor(reference):
-                return reference.detach().cpu().clone()
-            return reference
+        return reference
 
     def _safe_unlink(self, path_str):
         """Safely delete a file from disk if its path is provided and exists."""
@@ -1343,6 +1343,11 @@ class CategorizedReplayBuffer:
 
     def pending_size(self) -> int:
         return 0 if self._pending is None else self._pending.size()
+
+    def pending_bucket_sizes(self) -> dict[str, int]:
+        if self._pending is None:
+            return {reward_type.value: 0 for reward_type in self.REWARD_TYPES}
+        return self._pending.bucket_sizes()
 
     def training_size(self) -> int:
         return self._main.size() + self.pending_size()
