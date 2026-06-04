@@ -113,12 +113,7 @@ class VisualAgentCommonMixin:
 
         first_transition = self.n_step_buffer[0]
         discount = self.n_step_gamma ** horizon
-        store_fn = (
-            self.replay_buffer.store_pending
-            if first_transition.get("source") == "eval"
-            else self.replay_buffer.store
-        )
-        store_fn(
+        self.replay_buffer.store_unscored(
             first_transition["state"],
             first_transition["action"],
             last_transition["next_state"],

@@ -1282,9 +1282,10 @@ class CategorizedReplayBuffer:
     def store(self, *args, **kwargs):
         return self._main.store(*args, **kwargs)
 
-    def store_pending(self, *args, **kwargs):
+    def store_unscored(self, *args, **kwargs):
+        """Store new data before TD-error priority is available."""
         if self._pending is None:
-            raise RuntimeError("Pending eval store is not configured")
+            raise RuntimeError("Unscored store requires pending buffer")
         return self._pending.store(
             *args,
             replay_size=self._main.size(),

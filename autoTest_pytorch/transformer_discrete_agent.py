@@ -53,8 +53,8 @@ PER_BETA_END = 1.0
 # Phase 1 stratified-balanced ratio inside each batch. 1.0 = all per-class
 # stratified, with PER only filling shortages. 0.5 = original 50/50. 0.0 = pure global PER.
 PER_BALANCED_RATIO = 1.0
-PENDING_EVAL_SAMPLE_RATIO = 0.10
-PENDING_EVAL_EXTRA_CAPACITY = 500
+PENDING_SAMPLE_RATIO = 0.10
+PENDING_EXTRA_CAPACITY = 500
 # Resume-only replay quota gate. If the loaded rolling win rate is already above
 # this threshold, require class quota to be filled before optimizer updates resume.
 CLASS_QUOTA_GATE_WR_THRESHOLD = 0.5
@@ -265,8 +265,8 @@ class TransformerDiscreteAgent:
             beta_start=PER_BETA_START,
             balanced_ratio=PER_BALANCED_RATIO,
             quota_check_class=RewardType.WIN,  # Minesweeper: win is the rare-event bottleneck class
-            pending_extra_capacity=PENDING_EVAL_EXTRA_CAPACITY,
-            pending_sample_ratio=PENDING_EVAL_SAMPLE_RATIO,
+            pending_extra_capacity=PENDING_EXTRA_CAPACITY,
+            pending_sample_ratio=PENDING_SAMPLE_RATIO,
             # Spread-decay calibrated from observed inference quantile spreads (median ~0.115,
             # p90 ~0.378). Starts disabled — latched ON by train_step once win_rate(100) > 0.4.
             spread_decay=2.0,
@@ -501,12 +501,7 @@ class TransformerDiscreteAgent:
 
         first_transition = self.n_step_buffer[0]
         discount = self.n_step_gamma ** horizon
-        store_fn = (
-            self.replay_buffer.store_pending
-            if first_transition.get("source") == "eval"
-            else self.replay_buffer.store
-        )
-        store_fn(
+        self.replay_buffer.store_unscored(
             first_transition["state"],
             first_transition["action"],
             last_transition["next_state"],

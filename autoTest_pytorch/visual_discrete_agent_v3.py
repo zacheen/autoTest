@@ -216,8 +216,8 @@ LR_RESUME_WARMUP_STEPS  = 2000  # Extra warmup on every restart, including first
 BUFFER_CAPACITY = 2048
 SAVE_CAPACITY   = 512
 MINIMUM_DATA_SIZE = min(BUFFER_CAPACITY, SAVE_CAPACITY*4)-1  # below this amount, won't start training
-PENDING_EVAL_SAMPLE_RATIO = 0.10
-PENDING_EVAL_EXTRA_CAPACITY = 500
+PENDING_SAMPLE_RATIO = 0.10
+PENDING_EXTRA_CAPACITY = 500
 BUFFER_OVERFLOW = 256
 PER_ALPHA       = 0.6
 PER_UNIFORM_MIX = 0.2
@@ -449,8 +449,8 @@ class VisualAgentV3(VisualAgentCommonMixin):
             beta_start=PER_BETA_START,
             spread_decay=SPREAD_DECAY,
             quota_check_class=RewardType.WIN,  # Minesweeper: win is the rare-event bottleneck class
-            pending_extra_capacity=PENDING_EVAL_EXTRA_CAPACITY,
-            pending_sample_ratio=PENDING_EVAL_SAMPLE_RATIO,
+            pending_extra_capacity=PENDING_EXTRA_CAPACITY,
+            pending_sample_ratio=PENDING_SAMPLE_RATIO,
         )
 
         # ── image preprocessing ──
