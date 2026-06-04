@@ -56,10 +56,9 @@ class VisualAgentCommonMixin:
     def _to_storage_state(self, state: torch.Tensor | None) -> torch.Tensor | None:
         """Hook: convert a raw env state into what should live in the replay buffer.
 
-        Default: detach + move to CPU (used by v1/v2 which store raw screenshots).
-        V3 overrides this to run the frozen YOLO backbone once and store the
-        (128, h, w) feature tensor instead of the (3, H, W) screenshot, cutting
-        per-entry size and skipping the YOLO forward at every gradient step.
+        Default: detach + move to CPU. v1/v2/v3 all store raw screenshots this way;
+        CategorizedReplayBuffer._save_tensor compresses (3, H>=64, W) tensors to uint8
+        on disk and _load_tensor restores them to float [0,1] at sample time.
         """
         if state is None:
             return None
@@ -292,9 +291,9 @@ class VisualAgentCommonMixin:
         for file_path in self.replay_path.glob("*.pt"):
             file_path.unlink()
 
-        # Agents can declare a non-screenshot state shape via `replay_state_shape`
-        # (V3 stores YOLO backbone features (128, h, w) instead of raw screenshots).
-        # Default = (3, *image_size) so v1/v2 keep their screenshot validation.
+        # Agents can declare a non-screenshot state shape via `replay_state_shape`.
+        # Default = (3, *image_size); v1/v2/v3 all store screenshots and use the
+        # default. (Kept as a hook for any future agent caching a non-screenshot state.)
         expected_shape = tuple(getattr(self, "replay_state_shape", (3, *self.image_size)))
 
         loaded_count = 0

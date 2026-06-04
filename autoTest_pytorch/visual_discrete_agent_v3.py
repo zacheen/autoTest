@@ -2,9 +2,9 @@
 
 Pipeline (dims/layers come from yolo_encoder_base and DECODER_* constants):
     screenshot (3, 640, 640)
-        ↓ YOLOEncoderBase split:
-        ↓   [frozen] YOLO11n backbone → (128, 40, 40)
-        ↓   ───────────── REPLAY BUFFER stores (128, 40, 40) fp32 features here ─────────────
+        ↓ YOLOEncoderBase (full forward runs live every train step, with gradients):
+        ↓   [trainable] YOLO11n backbone → (128, 40, 40)
+        ↓   ───────────── no caching here — the replay buffer stores the (3,640,640) uint8 screenshot ─────────────
         ↓   [trainable] token_adapter + 2D sinusoidal pos enc → (1600, encoder_dims[0])
         ↓   [trainable] HierarchicalEncoder → (1600, final_dim)
     encoded memory (B, 1600, final_dim)
@@ -19,12 +19,14 @@ Architecture notes:
       handles YOLO 128->64 compression.
     - Attempts to load encoder + decoder + query_tokens + FQF from Stage 1
       checkpoint as all-or-nothing. Missing files use warning + random init.
-    - YOLO11n loads from yolo11n.pt and is frozen in BN eval mode. token_adapter,
-      encoder, decoder, query_tokens, and FQF head are trainable.
-    - Replay buffer stores YOLO backbone output instead of raw screenshots:
-        - each transition drops from ~1.17 MB uint8 screenshot to ~0.78 MB fp32 features
-        - training skips YOLO11n forward and runs token_adapter + encoder + decoder
-        - because YOLO is frozen, cached features are equivalent to recomputing
+    - YOLO11n loads from yolo11n.pt and is trainable, held in BN eval mode (conv
+      weights update, BN running stats fixed). token_adapter, encoder, decoder,
+      query_tokens, and FQF head are all trainable.
+    - Replay buffer stores the raw uint8 screenshot (~1.17 MB/transition); the full
+      YOLO11n forward runs live on every gradient step so YOLO can be fine-tuned.
+      No post-YOLO features are cached.
+    - YOLO updates use the win-rate latch: grads flow + log from step 0 but are only
+      applied to YOLO once win_rate(window=100) > YOLO_UNFREEZE_WR_THRESHOLD.
     - Dropout starts off and latches on after win_rate(window=100) > 0.4, aligned
       with PER spread_decay.
 """
@@ -61,7 +63,6 @@ from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer, Rew
 from model_structure.visual_agent_common import VisualAgentCommonMixin
 from model_structure.yolo_encoder_base import (
     YOLOEncoderBase,
-    YOLO_FEATURE_CHANNELS,
     DEFAULT_ENCODER_DIMS,
     DEFAULT_ENCODER_FF_MULT,
 )
@@ -206,6 +207,11 @@ USE_AMP = False
 #   - encoder weight delta stagnant too long -> raise LR_BACKBONE_PRETRAINED
 #   - encoder RMS changes > 50% in first 1000 steps -> lower it
 LR_BACKBONE_PRETRAINED = 5e-6  # Stage 1-loaded encoder + decoder + query_tokens: 0.1x fresh LR.
+# YOLO11n backbone fine-tune LR. Dedicated "backbone_yolo" optimizer group (see
+# build_fqf_optimizer yolo_prefixes). Kept low — YOLO is a pretrained vision backbone and
+# noisy RL gradients can damage it. Stage 1 fine-tuned YOLO at 1e-5; tune via TB
+# grad_pre/yolo + weights/yolo_delta_from_init.
+LR_YOLO = 1e-5
 # Linear LR warmup over the first N optimizer steps for early transformer stability.
 # Increase from base_lr * LR_WARMUP_START_FACTOR to base_lr.
 LR_WARMUP_STEPS         = 2000  # Initial from-scratch warmup length.
@@ -239,6 +245,10 @@ PER_BETA_EP     = 5000
 # permanently. Same threshold and monotone design as dropout latch.
 SPREAD_DECAY             = 2.0
 SPREAD_DECAY_LATCH_WR_THRESHOLD = DROPOUT_LATCH_WR_THRESHOLD
+# YOLO update latch: YOLO grads are computed + logged every step, but only applied to
+# YOLO weights once win_rate(100) crosses this threshold. Same monotone one-way latch
+# design as dropout / spread_decay; protects the early RL bootstrap from YOLO drift.
+YOLO_UNFREEZE_WR_THRESHOLD = DROPOUT_LATCH_WR_THRESHOLD
 
 LOG_ACTIONS = True
 
@@ -293,23 +303,13 @@ class VisualBackboneV3(YOLOEncoderBase):
     def get_features(self, screenshot: torch.Tensor) -> torch.Tensor:
         """screenshot (B, 3, H, W) → cell features (B, num_queries, out_dim).
 
-        Live-inference path (select_action). Runs the full pipeline including the
-        frozen YOLO backbone forward.
+        The only feature path: runs the full pipeline (YOLO11n backbone +
+        token_adapter + encoder + decoder). Used by select_action (no_grad) and by
+        train_step (with gradients, so YOLO11n is fine-tuned).
         """
         memory  = self.encode(screenshot)                        # (B, 1600, out_dim)
         queries = self._build_queries(memory.size(0))            # (B, num_queries, out_dim)
         return self.decoder(queries, memory)                     # (B, num_queries, out_dim)
-
-    def get_features_from_cached(self, backbone_features: torch.Tensor) -> torch.Tensor:
-        """Cached YOLO features (B, 128, h, w) → cell features (B, num_queries, out_dim).
-
-        Training-time path. Skips the frozen YOLO backbone forward — the features
-        were precomputed once at storage time. token_adapter + encoder + decoder
-        all run here with gradients (encoder is trainable in this configuration).
-        """
-        memory  = self.encode_from_backbone_features(backbone_features)
-        queries = self._build_queries(memory.size(0))
-        return self.decoder(queries, memory)
 
     def forward(self, screenshot: torch.Tensor) -> torch.Tensor:
         return self.get_features(screenshot)
@@ -345,12 +345,11 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # the YOLO11n load can also record its source path.
         self.checkpoint_logger = CheckpointLogger("[V3 CHECKPOINT]")
 
-        # Backbone: YOLO11n is frozen; the rest is trainable. Encoder / decoder /
-        # queries are loaded from Stage 1 below when possible.
-        # Replay stores YOLO backbone output (128, h, w), not raw screenshots, so
-        # YOLO must stay frozen or cached features would mismatch updated weights.
-        # token_adapter + encoder + decoder + query_tokens are RL fine-tune targets.
-        # token_adapter is always random init because Stage 1 has no Linear(128->64).
+        # Backbone: YOLO11n + token_adapter + encoder + decoder + query_tokens are all
+        # trainable RL fine-tune targets. Encoder / decoder / queries are loaded from
+        # Stage 1 below when possible; token_adapter is always random init (Stage 1 has
+        # no Linear(128->64)). Replay stores raw uint8 screenshots — no YOLO output is
+        # cached — so YOLO can be fine-tuned with live gradients every step.
         self.backbone = VisualBackboneV3(grid_h=grid_h, grid_w=grid_w).to(device)
         # Record which yolo11n.pt the ultralytics loader actually resolved — the
         # default "yolo11n.pt" string can map to cwd / cache / site-packages and
@@ -360,25 +359,20 @@ class VisualAgentV3(VisualAgentCommonMixin):
             self.backbone.feature_extractor.yolo_source,
             f"Loaded YOLO11n backbone: {self.backbone.feature_extractor.yolo_source}",
         )
-        self.backbone.freeze_feature_extractor()
-        # BN must be eval before dummy forward, or zero-input batch stats with
-        # momentum=0.1 will contaminate checkpoint-loaded running_mean/running_var.
-        # torch.no_grad does not stop BN running_stats updates; module.training does.
+        # YOLO11n conv weights stay trainable (no freeze_feature_extractor), but BN is
+        # fully frozen ("BN 凍結"): set_bn_eval() fixes running stats (torch.no_grad does
+        # not stop BN running_stats updates; module.training does), and freezing the
+        # affine gamma/beta below stops RL gradients from moving BN at all — only conv
+        # weights update. build_fqf_optimizer filters requires_grad, so the BN affine
+        # params are excluded from the optimizer automatically.
         self.backbone.set_bn_eval()
+        for _m in self.backbone.feature_extractor.modules():
+            if isinstance(_m, nn.modules.batchnorm._BatchNorm):
+                for _p in _m.parameters(recurse=False):
+                    _p.requires_grad_(False)
 
-        # Infer backbone spatial output size for replay-buffer shape checks.
-        # YOLO11n stride=16, so 640x640 -> 40x40; dummy forward also handles other sizes.
-        with torch.no_grad():
-            dummy = torch.zeros(1, 3, *IMAGE_SIZE, device=device)
-            dummy_feat = self.backbone.extract_backbone_features(dummy)
-            _, feat_c, feat_h, feat_w = dummy_feat.shape
-            assert feat_c == YOLO_FEATURE_CHANNELS, (
-                f"YOLO feature channels ({feat_c}) ≠ YOLO_FEATURE_CHANNELS "
-                f"({YOLO_FEATURE_CHANNELS}); update yolo_encoder_base."
-            )
-        self.backbone_feature_shape: tuple[int, int, int] = (feat_c, feat_h, feat_w)
-        # Shape check for mixin._load_persistent_buffer; V3 uses cached feature shape.
-        self.replay_state_shape: tuple[int, ...] = self.backbone_feature_shape
+        # Replay stores raw uint8 screenshots (3, H, W), so V3 uses the mixin default
+        # replay_state_shape = (3, *image_size). No YOLO features are cached anymore.
 
         # ── FQF heads (random init) ──
         self.q_network = FQFQNetwork(
@@ -406,24 +400,29 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self._stage1_loaded = self._load_stage1_weights(STAGE1_CKPT_DIR)
 
         # ── Optimizer ───────────────────────────────────────────────────────
-        # Only YOLO11n (feature_extractor) is frozen. token_adapter + encoder +
-        # decoder + query_tokens + FQF head all update.
+        # Everything trains: YOLO11n (feature_extractor), token_adapter, encoder,
+        # decoder, query_tokens, and the FQF head.
         #
-        # Dynamic pretrained_prefixes:
-        #   - Stage 1 loaded: encoder/decoder/query_tokens use LR_BACKBONE_PRETRAINED
-        #     to protect pretrained attention patterns from noisy RL gradients.
-        #   - Stage 1 missing: all backbone params are random init, prefixes empty.
+        # Param groups (build_fqf_optimizer):
+        #   - yolo_prefixes=("feature_extractor.",): YOLO11n -> backbone_yolo group at
+        #     LR_YOLO. The group + LR exist from the start; the win-rate latch in
+        #     train_step only gates whether the YOLO update is applied (grads always log).
+        #   - pretrained_prefixes (Stage 1 loaded): encoder/decoder/query_tokens use
+        #     LR_BACKBONE_PRETRAINED to protect pretrained attention from noisy RL grads.
+        #   - Stage 1 missing: those params are random init, pretrained_prefixes empty.
         # token_adapter is always random init and uses the fresh LR group.
-        #
-        # build_fqf_optimizer filters requires_grad=False, so frozen YOLO is excluded.
         pretrained_prefixes: tuple[str, ...] = (
             ("encoder.", "decoder.", "query_tokens") if self._stage1_loaded else ()
         )
         self.optimizer = build_fqf_optimizer(
             self.backbone,
             self.q_network,
-            config=FQFOptimizerConfig(lr_backbone_pretrained=LR_BACKBONE_PRETRAINED),
+            config=FQFOptimizerConfig(
+                lr_backbone_pretrained=LR_BACKBONE_PRETRAINED,
+                lr_yolo=LR_YOLO,
+            ),
             pretrained_prefixes=pretrained_prefixes,
+            yolo_prefixes=("feature_extractor.",),
         )
         # Record each param group's base LR; warmup scales them dynamically by total_it.
         self._base_lrs = [group["lr"] for group in self.optimizer.param_groups]
@@ -553,8 +552,8 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
         # Remove replay buffer .pt files from older architectures or corrupt files.
         # Must run before try_load_model(), or _load_persistent_training_state may
-        # load missing/mismatched entries and print many warnings. replay_state_shape
-        # was set after dummy forward above.
+        # load missing/mismatched entries and print many warnings. V3 stores raw
+        # screenshots, so replay_state_shape uses the mixin default (3, *image_size).
         self._purge_stale_replay_files()
         self.try_load_model()
 
@@ -591,6 +590,13 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self._init_weight_reference = self._capture_trainable_weight_snapshot()
         self._rolling_weight_reference = self._capture_trainable_weight_snapshot()
         self._rolling_weight_reference_step = self.total_it
+        # YOLO-only init snapshot for weights/yolo_delta_from_init. Captured here (after
+        # try_load_model) so "init" means the start of this session, matching
+        # _init_weight_reference. feature_extractor params only.
+        self._yolo_init_reference = {
+            name: p.detach().float().cpu().clone()
+            for name, p in self.backbone.feature_extractor.named_parameters()
+        }
 
         # ── Dropout latch ───────────────────────────────────────────────────
         # Start at p=0. train_step checks win_rate(100) against the threshold; the
@@ -600,6 +606,17 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self._set_backbone_dropout_p(0.0)
         if self.training_history.win_rate(window=100) > DROPOUT_LATCH_WR_THRESHOLD:
             self._latch_dropout_on(reason="resume: training_history win_rate already above threshold")
+
+        # ── YOLO update latch ───────────────────────────────────────────────
+        # YOLO grads flow + log every step, but are zeroed before optimizer.step()
+        # until win_rate(100) crosses the threshold. Same not-saved, re-evaluated-on-
+        # resume design as the dropout latch above.
+        self._yolo_update_latched = False
+        if self.training_history.win_rate(window=100) > YOLO_UNFREEZE_WR_THRESHOLD:
+            self._yolo_update_latched = True
+            self.checkpoint_logger.warn(
+                "YOLO update latch ON (resume: training_history win_rate already above threshold)"
+            )
 
         self._set_runtime_modes()
         # atexit order is LIFO: close registered first runs last; save registered
@@ -935,36 +952,15 @@ class VisualAgentV3(VisualAgentCommonMixin):
         }
 
     # ──────────────────────────── transition storage ───────────────────
-
-    def _to_storage_state(self, state: torch.Tensor | None) -> torch.Tensor | None:
-        """Override: run frozen YOLO backbone once and store its (128, h, w) output.
-
-        Replaces the default (3, H, W) screenshot storage. The YOLO11n backbone is
-        frozen via freeze_feature_extractor(), so for a given screenshot the cached
-        feature tensor is stable across training steps and equivalent to recomputing
-        it. This trades a one-time forward at storage time for skipping the YOLO
-        forward on every replayed batch.
-
-        Called via VisualAgentCommonMixin.store_transition for both state and
-        next_state (next_state may be None at episode end, which we forward verbatim).
-        """
-        if state is None:
-            return None
-        screenshot = state.detach()
-        # _set_runtime_modes puts feature_extractor in eval and freezes BN running
-        # stats; we still wrap in no_grad to avoid building autograd graph through
-        # this storage-time forward.
-        self.backbone.feature_extractor.eval()
-        self.backbone.set_bn_eval()
-        with torch.no_grad():
-            features = self.backbone.extract_backbone_features(
-                screenshot.unsqueeze(0).to(self.device)
-            )
-        return features.squeeze(0).detach().cpu()
-
+    # V3 does NOT override _to_storage_state: it uses the mixin default, which stores
+    # the raw float [0,1] screenshot (3, H, W). CategorizedReplayBuffer._save_tensor
+    # auto-compresses any (3, H>=64, W) tensor to uint8 on disk (~1.17 MB) and
+    # _load_tensor restores it to float [0,1] at sample time, so train_step receives a
+    # ready-to-use float screenshot. No YOLO output is cached, and there is no manual
+    # uint8 round-trip here (doing one would double-apply the buffer's clamp/scale).
+    #
     # store_transition / _commit_n_step_transition / _flush_n_step_buffer come from
-    # VisualAgentCommonMixin. Its store_transition calls _to_storage_state above, so
-    # V3 stores (128, h, w) features.
+    # VisualAgentCommonMixin and call the inherited _to_storage_state.
 
     # ──────────────────────────── training step ────────────────────────
 
@@ -992,6 +988,17 @@ class VisualAgentV3(VisualAgentCommonMixin):
             if self.training_history.win_rate(window=100) > DROPOUT_LATCH_WR_THRESHOLD:
                 self._latch_dropout_on(
                     reason=f"train_step total_it={self.total_it}: win_rate(100) crossed threshold"
+                )
+
+        # YOLO update latch: same monotone one-way design as dropout. Until this
+        # latches ON, YOLO grads are computed + logged but zeroed before optimizer.step
+        # (see grad section), so YOLO weights stay put while head/encoder bootstrap.
+        if not self._yolo_update_latched:
+            if self.training_history.win_rate(window=100) > YOLO_UNFREEZE_WR_THRESHOLD:
+                self._yolo_update_latched = True
+                self.checkpoint_logger.warn(
+                    f"YOLO update latch ON — train_step total_it={self.total_it}: "
+                    f"win_rate(100) crossed {YOLO_UNFREEZE_WR_THRESHOLD}"
                 )
 
         # Spread-decay latch: FQF quantile spread master switch for priority modifier.
@@ -1026,15 +1033,16 @@ class VisualAgentV3(VisualAgentCommonMixin):
         batch_size = state.size(0)
         self._set_runtime_modes()
 
+        # state/next_state are float [0,1] screenshots (B, 3, H, W): the replay buffer
+        # stores them uint8 on disk and restores them to float at sample time, so no
+        # manual conversion is needed here. The full pipeline (incl. YOLO11n) runs live.
+
         # Target branch (no gradients).
-        # state/next_state are cached YOLO backbone features (B, 128, h, w), not screenshots.
-        # YOLO11n forward already happened in store_transition; run only trainable parts here.
-        # token_adapter + encoder + decoder only.
-        #
         # Target branch must set token_adapter/encoder/decoder to eval, otherwise
         # dropout fires during target Q computation and adds TD target noise. no_grad
         # blocks backward only, not dropout. q_network is also set eval here so
         # double-Q argmax logic matches q_target; restore train mode afterward.
+        # feature_extractor (YOLO) is already eval (BN frozen) via _set_runtime_modes.
         self.backbone.token_adapter.eval()
         self.backbone.encoder.eval()
         self.backbone.decoder.eval()
@@ -1042,7 +1050,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         with torch.no_grad():
             with torch.autocast(device_type=device.type, dtype=torch.float16,
                                 enabled=(USE_AMP and device.type == "cuda")):
-                next_features  = self.backbone.get_features_from_cached(next_state)
+                next_features  = self.backbone.get_features(next_state)
                 next_online    = self.q_network(next_features)
                 next_online_q_flat = next_online["q_values"].view(batch_size, -1)
                 next_best_flat = next_online_q_flat.argmax(dim=1)
@@ -1054,11 +1062,12 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # Restore training mode for current branch dropout / BN behavior.
         self._set_runtime_modes()
 
-        # Current branch: gradients flow through token_adapter + encoder + decoder + FQF.
-        # YOLO11n is frozen and its forward already ran in store_transition.
+        # Current branch: gradients flow through YOLO11n + token_adapter + encoder +
+        # decoder + FQF. The YOLO forward runs live here (with grad); whether YOLO
+        # actually updates is gated by the latch (grad-zeroing in the grad section).
         with torch.autocast(device_type=device.type, dtype=torch.float16,
                             enabled=(USE_AMP and device.type == "cuda")):
-            features  = self.backbone.get_features_from_cached(state)
+            features  = self.backbone.get_features(state)
             q_output  = self.q_network(features)
             q_2d           = q_output["q_values"]
             q_quantiles    = q_output["quantiles"]
@@ -1099,14 +1108,29 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
 
-        # Pre-clip gradient norms (diagnostic).
-        backbone_pre = self._module_grad_norm(self.backbone)
-        head_pre     = self._module_grad_norm(self.q_network)
+        # Pre-clip gradient norms (diagnostic). backbone = yolo + transformer; split out
+        # yolo (feature_extractor) vs transformer (token_adapter+encoder+decoder) so
+        # YOLO's contribution is visible separately in TB.
+        backbone_pre    = self._module_grad_norm(self.backbone)
+        yolo_pre        = self._module_grad_norm(self.backbone.feature_extractor)
+        transformer_pre = self._transformer_grad_norm()
+        head_pre        = self._module_grad_norm(self.q_network)
+        # YOLO grad finiteness guard (deep backbone + noisy RL grads). Counted pre-clip.
+        yolo_nan_grad_count = self._module_nan_grad_count(self.backbone.feature_extractor)
 
         # Per-layer grad/weight norms must be logged BEFORE clip_grad_norm_.
         # Otherwise grads are clipped in-place and the exploding layer is hidden.
         if self.total_it % HISTOGRAM_EVERY == 0:
             self._log_backbone_weight_norms(self.total_it)
+            self._log_yolo_batchnorm_stats(self.total_it)
+
+        # YOLO update latch: until it fires, zero YOLO grads so optimizer.step() leaves
+        # YOLO weights unchanged. Done AFTER the pre-clip norms above (so grad_pre/yolo
+        # reflects the real gradient) and BEFORE clipping/stepping.
+        if not self._yolo_update_latched:
+            for p in self.backbone.feature_extractor.parameters():
+                if p.grad is not None:
+                    p.grad.zero_()
 
         params_to_clip = (
             list(self.backbone.parameters())
@@ -1120,8 +1144,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
         grad_clip_excess_norm = max(0.0, grad_norm_total_value - grad_clip_threshold)
         grad_clip_excess_ratio = grad_clip_excess_norm / (grad_clip_threshold + 1e-12)
 
-        backbone_post = self._module_grad_norm(self.backbone)
-        head_post     = self._module_grad_norm(self.q_network)
+        backbone_post    = self._module_grad_norm(self.backbone)
+        yolo_post        = self._module_grad_norm(self.backbone.feature_extractor)
+        transformer_post = self._transformer_grad_norm()
+        head_post        = self._module_grad_norm(self.q_network)
         grad_post_total = (backbone_post ** 2 + head_post ** 2) ** 0.5
 
         self.scaler.step(self.optimizer)
@@ -1146,11 +1172,19 @@ class VisualAgentV3(VisualAgentCommonMixin):
             init_distance = self._snapshot_distance(current_snapshot, self._init_weight_reference)
             rolling_distance = self._snapshot_distance(current_snapshot, self._rolling_weight_reference)
             rolling_step_gap = self.total_it - self._rolling_weight_reference_step
+            # YOLO-only relative drift from session start (separate reference, since the
+            # combined snapshot above folds YOLO into the whole-backbone number).
+            yolo_snapshot = {
+                name: p.detach().float().cpu()
+                for name, p in self.backbone.feature_extractor.named_parameters()
+            }
+            yolo_from_init = self._snapshot_distance(yolo_snapshot, self._yolo_init_reference)
             weight_distance_log = {
                 "from_init": init_distance,
                 "from_prev_window": rolling_distance,
                 "prev_window_step": self._rolling_weight_reference_step,
                 "window_size": rolling_step_gap,
+                "yolo_from_init": yolo_from_init,
             }
             self._rolling_weight_reference = current_snapshot
             self._rolling_weight_reference_step = self.total_it
@@ -1209,7 +1243,8 @@ class VisualAgentV3(VisualAgentCommonMixin):
             f"  fpn_norm_entropy={fpn_norm_entropy:.4f} | fpn_tau_std={fpn_tau_std:.4f}\n"
             f"  grad_total_pre={grad_norm_total_value:.6f} | grad_total_post={grad_post_total:.6f} | "
             f"clip_scale={grad_clip_scale:.6f} clip_percent={grad_clip_percent:.2%}\n"
-            f"  backbone_pre={backbone_pre:.6f} head_pre={head_pre:.6f}\n"
+            f"  backbone_pre={backbone_pre:.6f} (yolo={yolo_pre:.6f} tfm={transformer_pre:.6f}) head_pre={head_pre:.6f}\n"
+            f"  yolo_update={'ON' if self._yolo_update_latched else 'off'} | yolo_nan_grad={yolo_nan_grad_count}\n"
             f"{weight_delta_line}"
             f"---\n"
         )
@@ -1235,12 +1270,22 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.training_logger.log("grad/clip_excess_norm",   grad_clip_excess_norm,                         step=step, csv=False)
         self.training_logger.log("grad/clip_excess_ratio",  grad_clip_excess_ratio,                        step=step, csv=False)
         self.training_logger.log("grad_pre/backbone",       backbone_pre,                                  step=step, csv=False)
+        self.training_logger.log("grad_pre/transformer",    transformer_pre,                               step=step, csv=False)
+        self.training_logger.log("grad_pre/yolo",           yolo_pre,                                      step=step, csv=False)
         self.training_logger.log("grad_pre/head",           head_pre,                                      step=step, csv=False)
         self.training_logger.log("grad_post/backbone",      backbone_post,                                 step=step, csv=False)
+        self.training_logger.log("grad_post/transformer",   transformer_post,                              step=step, csv=False)
+        self.training_logger.log("grad_post/yolo",          yolo_post,                                     step=step, csv=False)
         self.training_logger.log("grad_post/head",          head_post,                                     step=step, csv=False)
+        # YOLO latch state (0/1) marks exactly when YOLO weights start updating;
+        # grad_post/yolo jumps from ~0 to >0 at the same step. yolo_nan_grad_count
+        # guards the deep backbone against NaN/Inf grads under noisy RL signal.
+        self.training_logger.log("train/yolo_update_active",  float(self._yolo_update_latched),            step=step, csv=False)
+        self.training_logger.log("debug/yolo_nan_grad_count", yolo_nan_grad_count,                         step=step, csv=False)
         if weight_distance_log is not None:
             self.training_logger.log("weights/delta_from_init",        weight_distance_log["from_init"],        step=step, csv=False)
             self.training_logger.log("weights/delta_from_prev_window", weight_distance_log["from_prev_window"], step=step, csv=False)
+            self.training_logger.log("weights/yolo_delta_from_init",   weight_distance_log["yolo_from_init"],   step=step, csv=False)
 
         if self.scaler.is_enabled():
             self.training_logger.log("train/scaler_scale", self.scaler.get_scale(), step=step, csv=False)
@@ -1566,8 +1611,8 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self._load_persistent_training_state()
 
     # _load_persistent_buffer comes from VisualAgentCommonMixin via rebinding below.
-    # It validates disk .pt shape using self.replay_state_shape, so old screenshot
-    # entries (3, 640, 640) are skipped automatically.
+    # It validates disk .pt shape against (3, *image_size) screenshots, so any old
+    # cached-feature entries (128, 40, 40) from before YOLO training are skipped.
 
     # ──────────────────────────── lr warmup ────────────────────────────
 
@@ -1601,6 +1646,30 @@ class VisualAgentV3(VisualAgentCommonMixin):
                 continue
             grad_sq_sum += float(param.grad.detach().float().pow(2).sum().item())
         return grad_sq_sum ** 0.5
+
+    def _transformer_grad_norm(self) -> float:
+        """Grad norm of the backbone minus YOLO (token_adapter + pos enc + encoder +
+        decoder). With yolo = feature_extractor, sqrt(yolo^2 + transformer^2) equals
+        the whole-backbone grad norm, so TB separates YOLO fine-tuning from the rest.
+        """
+        feat_ids = {id(p) for p in self.backbone.feature_extractor.parameters()}
+        grad_sq_sum = 0.0
+        for param in self.backbone.parameters():
+            if param.grad is None or id(param) in feat_ids:
+                continue
+            grad_sq_sum += float(param.grad.detach().float().pow(2).sum().item())
+        return grad_sq_sum ** 0.5
+
+    def _module_nan_grad_count(self, module) -> int:
+        """Number of params in `module` whose grad has any NaN/Inf (0 = healthy)."""
+        count = 0
+        for param in module.parameters():
+            grad = param.grad
+            if grad is None:
+                continue
+            if not torch.isfinite(grad).all():
+                count += 1
+        return count
 
     def _trainable_module_groups(self) -> dict[str, nn.Module]:
         return {
@@ -1673,6 +1742,32 @@ class VisualAgentV3(VisualAgentCommonMixin):
             self._log_param_weight_and_grad_norm(f"{prefix}/cross_attn_out_proj", layer.multihead_attn.out_proj.weight, global_step)
             self._log_param_weight_and_grad_norm(f"{prefix}/ffn_linear1", layer.linear1.weight, global_step)
             self._log_param_weight_and_grad_norm(f"{prefix}/ffn_linear2", layer.linear2.weight, global_step)
+
+        # Per-layer YOLO11n conv norms: weight_norm shows scale drift, grad_norm
+        # locates exploding/dead layers once the YOLO latch is ON (grad is None while
+        # latch OFF, so grad_norm is simply skipped then).
+        for name, module in self.backbone.feature_extractor.named_modules():
+            if isinstance(module, nn.Conv2d):
+                self._log_param_weight_and_grad_norm(f"yolo/{name}", module.weight, global_step)
+
+    def _log_yolo_batchnorm_stats(self, global_step: int) -> None:
+        """Track YOLO BN running stats. BN is frozen (eval + affine requires_grad=False),
+        so these should stay flat — any drift means BN was accidentally updated."""
+        means, variances = [], []
+        for m in self.backbone.feature_extractor.modules():
+            if isinstance(m, nn.modules.batchnorm._BatchNorm):
+                if m.running_mean is not None:
+                    means.append(m.running_mean.detach().float().cpu())
+                if m.running_var is not None:
+                    variances.append(m.running_var.detach().float().cpu())
+        if means:
+            means_cat = torch.cat(means)
+            self.training_logger.log("bn/running_mean_avg", means_cat.mean().item(), step=global_step, csv=False)
+            self.training_logger.log("bn/running_mean_std", means_cat.std().item(),  step=global_step, csv=False)
+        if variances:
+            vars_cat = torch.cat(variances)
+            self.training_logger.log("bn/running_var_avg",  vars_cat.mean().item(),  step=global_step, csv=False)
+            self.training_logger.log("bn/running_var_std",  vars_cat.std().item(),   step=global_step, csv=False)
 
     # ──────────────────────────── archive / hour rollover ─────────────
     # Directory management lives in SessionArchiveManager, shared with stage1.

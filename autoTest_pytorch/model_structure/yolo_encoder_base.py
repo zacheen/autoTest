@@ -3,7 +3,7 @@
 Both YOLOGridStatePredictor and VisualAgentV3 inherit from YOLOEncoderBase.
 Subclasses add their own decoder on top of encode().
 
-Pipeline (split into two halves so V3 can cache the backbone output in replay):
+Pipeline (extract_backbone_features + encode_from_backbone_features compose into encode()):
     screenshot (B, 3, H, W)
       ↓ YOLO11n backbone                            ← extract_backbone_features()
     (B, 128, 40, 40)                                ← V3 stores this in replay buffer
@@ -12,13 +12,14 @@ Pipeline (split into two halves so V3 can cache the backbone output in replay):
       ↓ HierarchicalEncoder (dims built by build_encoder_dims(final_dim, total_layers))
     (B, 1600, final_dim)                             ← encode() output
 
-`encode()` is the high-level wrapper (screenshot → encoded memory). V3 calls the two
-halves separately so the frozen YOLO forward only runs once at storage time, and the
-trainable token_adapter + encoder run every gradient step on cached features.
+`encode()` is the high-level wrapper (screenshot → encoded memory). The two halves are kept
+separate for clarity; V3 runs the full encode() live every gradient step (it stores raw
+screenshots in replay, not backbone features) so the YOLO11n backbone can be fine-tuned.
 
 Freezing API:
     freeze()                  — legacy: freezes feature_extractor + token_adapter + encoder
-    freeze_feature_extractor() — V3 path: only freezes YOLO11n; lets encoder train
+    freeze_feature_extractor() — only freezes YOLO11n; lets encoder/decoder train
+                                 (V3 no longer calls this — YOLO is trainable there)
     unfreeze() / set_bn_eval() — unchanged
 
 Encoder shape is controlled by DEFAULT_ENCODER_FINAL_DIM / DEFAULT_ENCODER_TOTAL_LAYERS /
@@ -178,9 +179,9 @@ class YOLOEncoderBase(nn.Module):
     def extract_backbone_features(self, screenshot: torch.Tensor) -> torch.Tensor:
         """screenshot (B, 3, H, W) → raw YOLO11n features (B, 128, h, w).
 
-        This is the half that V3 caches in the replay buffer. The YOLO11n backbone
-        is typically frozen (freeze_feature_extractor()) so this forward is
-        deterministic across training steps for a given screenshot.
+        First half of encode(). V3 runs this live every step (it stores raw
+        screenshots, not features) so the YOLO11n backbone can be fine-tuned with
+        gradients; YOLOGridStatePredictor also reaches it via encode().
         """
         return self.feature_extractor(screenshot)
 
@@ -188,8 +189,8 @@ class YOLOEncoderBase(nn.Module):
         """YOLO features (B, 128, h, w) → encoded memory tokens (B, h*w, out_dim).
 
         Runs the trainable half: token_adapter (LayerNorm + Linear) + fixed
-        sinusoidal positional encoding + HierarchicalEncoder. V3 calls this every
-        gradient step on cached features pulled from the replay buffer.
+        sinusoidal positional encoding + HierarchicalEncoder. Called by encode()
+        right after extract_backbone_features; no longer fed from a replay cache.
         """
         B, _, h, w = features.shape
         tokens = features.permute(0, 2, 3, 1).reshape(B, h * w, YOLO_FEATURE_CHANNELS)
@@ -212,8 +213,8 @@ class YOLOEncoderBase(nn.Module):
     def freeze(self) -> None:
         """Freeze feature_extractor + token_adapter + encoder (legacy full freeze).
 
-        Used by callers that want the whole pretrained stack frozen. V3 instead
-        calls freeze_feature_extractor() so the encoder can fine-tune on RL signal.
+        Used by callers that want the whole pretrained stack frozen. (V3 trains the
+        whole stack including YOLO11n, so it calls neither freeze method.)
         """
         for p in self.feature_extractor.parameters():
             p.requires_grad_(False)
