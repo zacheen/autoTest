@@ -26,7 +26,7 @@ from model_structure.archive_manager import (
     RolloverTextLog,
 )
 from model_structure.training_logger import TrainingLogger
-from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer, RewardType
+from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -55,9 +55,6 @@ PER_BETA_END = 1.0
 PER_BALANCED_RATIO = 1.0
 PENDING_SAMPLE_RATIO = 0.10
 PENDING_EXTRA_CAPACITY = 500
-# Resume-only replay quota gate. If the loaded rolling win rate is already above
-# this threshold, require class quota to be filled before optimizer updates resume.
-CLASS_QUOTA_GATE_WR_THRESHOLD = 0.5
 TARGET_UPDATE_FREQ = 50
 N_STEP = 1
 NUM_FQF_FRACTIONS = 8
@@ -264,7 +261,6 @@ class TransformerDiscreteAgent:
             alpha=PER_ALPHA,
             beta_start=PER_BETA_START,
             balanced_ratio=PER_BALANCED_RATIO,
-            quota_check_class=RewardType.WIN,  # Minesweeper: win is the rare-event bottleneck class
             pending_extra_capacity=PENDING_EXTRA_CAPACITY,
             pending_sample_ratio=PENDING_SAMPLE_RATIO,
             # Spread-decay calibrated from observed inference quantile spreads (median ~0.115,
@@ -289,10 +285,6 @@ class TransformerDiscreteAgent:
         self.epsilon_controller = AdaptiveEpsilonController()
         self.training_history = TrainingHistory()
         self.deque_cls = deque  # used by training_history.load_state_dict()
-
-        # Captured after checkpoint loading from startup history only.
-        # Fresh runs start empty; live win-rate changes do not flip this gate.
-        self._class_quota_gate_enabled = False
 
         # Episode-scoped blocked actions: clicked cells are masked within this episode.
         self.blocked_actions: set[int] = set()
@@ -354,9 +346,6 @@ class TransformerDiscreteAgent:
         print(f"[FQF] CSV log: {csv_path}")
 
         self.try_load_model()
-        self._class_quota_gate_enabled = (
-            self.training_history.win_rate(window=100) > CLASS_QUOTA_GATE_WR_THRESHOLD
-        )
         if self.is_resume_training:
             self._handle_resume_metric_docs()
         else:
@@ -531,12 +520,7 @@ class TransformerDiscreteAgent:
         if self.replay_buffer.training_size() < MINIMUM_DATA_SIZE:
             return None
 
-        # Startup-history quota gate. Fresh live win-rate changes do not flip this
-        # mid-session; resumed high-win-rate sessions must refill class quota first.
-        if self._class_quota_gate_enabled and not self.replay_buffer.is_training_class_quota_filled():
-            return None
-
-        # Spread-decay latch — independent of class_quota gate. Live-checked every train_step
+        # Spread-decay latch. Live-checked every train_step
         # until it flips ON, then stays ON for the rest of the session (monotone). Activates
         # when win_rate crosses 40% on the assumption that by then the model has matured
         # enough that "wide quantile spread" mostly reflects environment stochasticity

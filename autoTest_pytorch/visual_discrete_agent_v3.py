@@ -59,7 +59,7 @@ from transformer_discrete_agent import (
 )
 from model_structure.reward_settings import MINESWEEPER_REWARD_CONFIG
 from model_structure.transformer_shared import FQFQNetwork
-from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer, RewardType
+from model_structure.CategorizedReplayBuffer import CategorizedReplayBuffer
 from model_structure.visual_agent_common import VisualAgentCommonMixin
 from model_structure.yolo_encoder_base import (
     YOLOEncoderBase,
@@ -221,7 +221,7 @@ LR_RESUME_WARMUP_STEPS  = 2000  # Extra warmup on every restart, including first
 # ── replay buffer ────────────────────────────────────────────────────
 BUFFER_CAPACITY = 2048
 SAVE_CAPACITY   = 512
-MINIMUM_DATA_SIZE = min(BUFFER_CAPACITY, SAVE_CAPACITY*4)-1  # below this amount, won't start training
+MINIMUM_DATA_SIZE = 200 # min(BUFFER_CAPACITY, SAVE_CAPACITY*4)-1  # below this amount, won't start training
 PENDING_SAMPLE_RATIO = 0.10
 PENDING_EXTRA_CAPACITY = 500
 BUFFER_OVERFLOW = 256
@@ -447,7 +447,6 @@ class VisualAgentV3(VisualAgentCommonMixin):
             age_decay=AGE_DECAY,
             beta_start=PER_BETA_START,
             spread_decay=SPREAD_DECAY,
-            quota_check_class=RewardType.WIN,  # Minesweeper: win is the rare-event bottleneck class
             pending_extra_capacity=PENDING_EXTRA_CAPACITY,
             pending_sample_ratio=PENDING_SAMPLE_RATIO,
         )
@@ -475,13 +474,6 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # TrainingHistory, and the controller only consumes win_rate.
         self.epsilon_controller = AdaptiveEpsilonController()
         self.training_history = TrainingHistory()
-
-        # Lazy-captured at first train_step: if the loaded TrainingHistory shows last
-        # win_rate(window=100) > 0.5, we additionally gate training on the replay buffer
-        # having all 4 classes filled to their 12.5% soft-floor quota. Fresh runs
-        # (history empty → win_rate=0) and weak resumes skip this gate.
-        # Captured once and frozen for the whole session.
-        self._class_quota_gate_enabled: bool | None = None
 
         # ── blocked-action tracking (episode-scoped) ──
         self.blocked_actions: set[int] = set()
@@ -966,14 +958,6 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
     def train_step(self):
         if self.replay_buffer.training_size() < MINIMUM_DATA_SIZE:
-            return None
-
-        # Capture-once class_quota gate decision based on loaded training_history.
-        # Only enforce balanced-data warmup when resuming from a session that was already
-        # performing well (win_rate > 50%); fresh / weak runs proceed without this gate.
-        if self._class_quota_gate_enabled is None:
-            self._class_quota_gate_enabled = self.training_history.win_rate(window=100) > 0.5
-        if self._class_quota_gate_enabled and not self.replay_buffer.is_training_class_quota_filled():
             return None
 
         self.total_it += 1

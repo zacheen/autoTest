@@ -45,18 +45,10 @@ class ReplayBalanceConfig:
     lose_threshold: float = MINESWEEPER_REWARD_CONFIG.replay_lose_threshold
     invalid_threshold: float = MINESWEEPER_REWARD_CONFIG.replay_invalid_threshold
     balanced_ratio: float = 1.0
-    quota_check_class: RewardType | str | None = None
 
     def __post_init__(self) -> None:
-        quota_check_class = RewardType.coerce(self.quota_check_class)
-        if self.quota_check_class is not None and quota_check_class is None:
-            raise ValueError(
-                f"quota_check_class must be one of {RewardType.values()} or None, "
-                f"got {self.quota_check_class!r}"
-            )
         if not 0.0 <= self.balanced_ratio <= 1.0:
             raise ValueError(f"balanced_ratio must be in [0, 1], got {self.balanced_ratio}")
-        object.__setattr__(self, "quota_check_class", quota_check_class)
         object.__setattr__(self, "balanced_ratio", float(self.balanced_ratio))
 
 
@@ -76,7 +68,6 @@ class _ReplayStoreBase:
         self.win_threshold = config.win_threshold
         self.lose_threshold = config.lose_threshold
         self.invalid_threshold = config.invalid_threshold
-        self.quota_check_class = config.quota_check_class
         self.balanced_ratio = config.balanced_ratio
 
         # Storage backend shared by all replay stores (main PER + pending). "ram"
@@ -265,7 +256,6 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         sample_decay: float = 0.05,
         enable_spread_decay: bool = False,
         spread_decay: float = 2.0,
-        quota_check_class: RewardType | str | None = None,
         beta_start: float = 0.4,
         balanced_ratio: float = 1.0,
         config: ReplayBalanceConfig | None = None,
@@ -319,12 +309,6 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
                 Narrow spread = model thinks deterministic = decay less (let PER keep learning).
                 Default 2.0 calibrated from observed inference spread distribution
                 (median ≈ 0.115, p90 ≈ 0.378), giving ~19% decay at typical and ~43% at p90.
-            quota_check_class: name of the reward_type that ``is_class_quota_filled`` should
-                gate on. If None (default), the gate requires EVERY class to reach the 12.5%
-                soft-floor quota. If set to e.g. ``"win"``, only that class is checked — useful
-                when one class is the known rare-event bottleneck (e.g. wins in Minesweeper)
-                and you don't want pruning equilibrium to artificially delay training.
-                Must be a member of ``REWARD_TYPES`` or None.
             beta_start: Initial Importance Sampling weight factor.
             balanced_ratio: 0.0~1.0 ratio of Phase 1 stratified-balanced samples
                 inside ``sample()``. The rest is Phase 2 cross-class pure-PER fallback.
@@ -341,7 +325,6 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
                 lose_threshold=lose_threshold,
                 invalid_threshold=invalid_threshold,
                 balanced_ratio=balanced_ratio,
-                quota_check_class=quota_check_class,
             )
         super().__init__(config=config, storage_mode=storage_mode, save_dir=save_dir)
 
@@ -961,35 +944,6 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
             return 0.0
         return sum(int(e.get("sample_count", 0)) for e in self.index) / len(self.index)
 
-    @property
-    def class_quota(self) -> int:
-        """Per-class soft-floor quota for top_k_balanced, sample, and gate checks.
-
-        Defined as ``(max_size × balanced_ratio) // len(REWARD_TYPES)``, at least 1.
-        - ``balanced_ratio = 1.0``: ``max_size / 4`` (25% per class)
-        - ``balanced_ratio = 0.5``: ``max_size / 8`` (12.5% per class, original design)
-        """
-        balanced_share = int(self.max_size * self.balanced_ratio)
-        return max(1, balanced_share // len(self.REWARD_TYPES))
-
-    def is_class_quota_filled(self) -> bool:
-        """True iff the gated class(es) have at least ``class_quota`` entries.
-
-        Behaviour depends on ``self.quota_check_class``:
-            - ``None`` (default): EVERY reward_type must reach quota — conservative,
-              but pruning equilibrium can drag the loosest class out by a lot.
-            - ``"<class_name>"``: ONLY that class is checked. Use this when you know
-              one rare class is the true bottleneck (e.g. ``"win"`` in Minesweeper)
-              and don't want other classes' pruning dynamics to delay training.
-
-        Used as a training-readiness gate on top of ``MINIMUM_DATA_SIZE``.
-        """
-        quota = self.class_quota
-        counts = self.bucket_sizes()
-        if self.quota_check_class is not None:
-            return counts.get(self.quota_check_class, 0) >= quota
-        return all(count >= quota for count in counts.values())
-
     def get_all_entries(self):
         """Returns internal objects suitable for RAM persistent saving. 
         Note this won't move disk files, just the internal state index."""
@@ -1290,7 +1244,6 @@ class CategorizedReplayBuffer:
         sample_decay: float = 0.05,
         enable_spread_decay: bool = False,
         spread_decay: float = 2.0,
-        quota_check_class: RewardType | str | None = None,
         beta_start: float = 0.4,
         balanced_ratio: float = 1.0,
         pending_extra_capacity: int = 0,
@@ -1301,7 +1254,6 @@ class CategorizedReplayBuffer:
             lose_threshold=lose_threshold,
             invalid_threshold=invalid_threshold,
             balanced_ratio=balanced_ratio,
-            quota_check_class=quota_check_class,
         )
         main_store = _PrioritizedReplayStore(
             max_size=max_size,
@@ -1458,26 +1410,6 @@ class CategorizedReplayBuffer:
 
     def training_size(self) -> int:
         return self._main.size() + self.pending_size()
-
-    def combined_bucket_sizes(self) -> dict[str, int]:
-        counts = self._main.bucket_sizes()
-        if self._pending is None:
-            return counts
-
-        for reward_type, pending_count in self._pending.bucket_sizes().items():
-            counts[reward_type] = counts.get(reward_type, 0) + pending_count
-        return counts
-
-    def is_training_class_quota_filled(self) -> bool:
-        if self._pending is None:
-            return self._main.is_class_quota_filled()
-
-        quota = self._main.class_quota
-        counts = self.combined_bucket_sizes()
-        quota_check_class = self._main.quota_check_class
-        if quota_check_class is not None:
-            return counts.get(quota_check_class, 0) >= quota
-        return all(counts.get(reward_type, 0) >= quota for reward_type in self.REWARD_TYPES)
 
     def _pending_sample_count(self, batch_size: int) -> int:
         if self._pending is None:
