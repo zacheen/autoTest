@@ -1252,6 +1252,20 @@ class VisualAgentV3(VisualAgentCommonMixin):
             tag = group.get("name") or f"group_{idx}"
             self.training_logger.log(f"lr/{tag}", group["lr"], step=step, csv=False)
 
+        # Replay buffer / pending composition — keyed by total_it (this whole
+        # block runs every DIAGNOSTIC_LOG_EVERY training steps), so fill / drain
+        # curves share the train/* x-axis. Each point is a fixed 10-train-step
+        # interval, unlike the old per-episode logging whose interval varied with
+        # episode length. bucket_sizes / pending_*_size are cheap dict/int reads
+        # (no GPU sync). Warmup is not captured here: train_step returns early
+        # until training_size >= MINIMUM_DATA_SIZE, so total_it stays 0.
+        for bucket_name, count in self.replay_buffer.bucket_sizes().items():
+            self.training_logger.log(f"buffer/bucket_{bucket_name}", count, step=step, csv=False)
+        self.training_logger.log("buffer/total_size", self.replay_buffer.size(), step=step, csv=False)
+        for bucket_name, count in self.replay_buffer.pending_bucket_sizes().items():
+            self.training_logger.log(f"pending/bucket_{bucket_name}", count, step=step, csv=False)
+        self.training_logger.log("pending/total_size", self.replay_buffer.pending_size(), step=step, csv=False)
+
         self.training_logger.flush()
         # Use batched scalar loss_value instead of loss.item(); it was already
         # synced above. Demo_test_Minesweeper checks `if loss_info`, so throttled
@@ -1314,15 +1328,6 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.training_logger.log("epsilon",                    next_eps,                  step=ep_idx, tb=False)  # TB side is written by on_episode_end.
         self.training_logger.log("timestamp",                  datetime.datetime.now().isoformat(), step=ep_idx, tb=False)
         self.training_logger.log("episode",                    ep_idx,                    step=ep_idx, tb=False)
-
-        # Replay buffer composition is logged at episode end so fill curves and
-        # bucket ratios are visible from episode 1. TB only via csv=False.
-        for bucket_name, count in self.replay_buffer.bucket_sizes().items():
-            self.training_logger.log(f"buffer/bucket_{bucket_name}", count, step=ep_idx, csv=False)
-        self.training_logger.log("buffer/total_size", self.replay_buffer.size(), step=ep_idx, csv=False)
-        for bucket_name, count in self.replay_buffer.pending_bucket_sizes().items():
-            self.training_logger.log(f"pending/bucket_{bucket_name}", count, step=ep_idx, csv=False)
-        self.training_logger.log("pending/total_size", self.replay_buffer.pending_size(), step=ep_idx, csv=False)
 
         self.training_logger.commit_csv_row()
         self.training_logger.flush()
