@@ -67,7 +67,7 @@ def log_eval_metrics(
     time_parts = []
     if seconds_since_last_eval is not None:
         logger.log(
-            "eval/seconds_since_last_eval",
+            "eval_dur/seconds_since_last_eval",
             seconds_since_last_eval,
             step=episode,
             csv_col="eval_seconds_since_last_eval",
@@ -75,7 +75,7 @@ def log_eval_metrics(
         time_parts.append(f"Since Last Eval: {seconds_since_last_eval:.1f}s")
     if duration_seconds is not None:
         logger.log(
-            "eval/duration_seconds",
+            "eval_dur/duration_seconds",
             duration_seconds,
             step=episode,
             csv_col="eval_duration_seconds",
