@@ -294,10 +294,29 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         else:
             return tensor.cpu().clone() if torch.is_tensor(tensor) else tensor
 
-    def _load_tensor(self, reference):
-        """Load and return a tensor from disk, or return the memory reference directly."""
+    def _load_tensor(self, reference, *, copy: bool = True):
+        """Load and return a tensor from disk, or return the in-memory reference.
+
+        Args:
+            copy: Only relevant when the stored reference is already a tensor (RAM mode,
+                or a rehydrated entry). Controls ownership of the returned tensor:
+                - ``copy=True`` (default, safe): return an independent ``.clone()`` so the
+                  caller fully owns it and may mutate or store it long-term without
+                  touching buffer state. Used by ``load_from_entries`` (the result is
+                  kept in ``self.index``) and by any caller that has not been audited.
+                - ``copy=False`` (borrow): return a detached CPU tensor that SHARES
+                  storage with the buffer's stored tensor. The caller MUST treat it as
+                  read-only and consume it before the buffer slot can change. Used only
+                  by the hot sampling path (``build_batch_from_entries``), whose very next
+                  step is ``torch.stack`` — that allocates a fresh batch tensor and copies
+                  each element in, so the borrow never escapes the function. This skips a
+                  redundant per-entry clone (megabytes per visual state) on every
+                  ``sample()`` call; the store-time clone in ``_save_tensor`` is what
+                  already guarantees the buffer owns a private copy.
+        """
         if torch.is_tensor(reference):
-            return reference.detach().cpu().clone()
+            tensor = reference.detach().cpu()  # detach = view (no copy); cpu = no-op when already on CPU
+            return tensor.clone() if copy else tensor
 
         if self.storage_mode == "disk":
             tensor = torch.load(reference, map_location="cpu")
@@ -724,12 +743,17 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         states, actions, next_states, rewards, dones, discounts, n_steps = [], [], [], [], [], [], []
 
         for entry in selected_entries:
-            states.append(self._load_tensor(entry["state"]))
+            # copy=False: borrow buffer storage read-only. The torch.stack below copies
+            # everything into a fresh batch tensor, so the borrow never escapes this loop.
+            states.append(self._load_tensor(entry["state"], copy=False))
             actions.append(entry["action"])
 
             if entry["next_state"] is not None:
-                next_states.append(self._load_tensor(entry["next_state"]))
+                next_states.append(self._load_tensor(entry["next_state"], copy=False))
             else:
+                # clone() here is load-bearing: states[-1] may be a borrowed view of a
+                # stored entry, so we must clone BEFORE the in-place fill_ to avoid
+                # zeroing the buffer's own tensor.
                 dummy = states[-1].clone()
                 dummy.fill_(0)
                 next_states.append(dummy)
@@ -751,6 +775,9 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         else:
             weights = torch.as_tensor(is_weights, dtype=torch.float32, device=device).view(-1, 1)
 
+        # torch.stack allocates a NEW contiguous tensor and copies each element in, so the
+        # batch is fully independent of buffer storage even though the per-entry loads above
+        # were borrowed (copy=False). This is what makes the borrow safe.
         tensor_states = torch.stack(states).to(device) if torch.is_tensor(states[0]) else states
         tensor_next_states = torch.stack(next_states).to(device) if torch.is_tensor(next_states[0]) else next_states
         tensor_actions = torch.tensor(np.array(actions), dtype=torch.long, device=device)
@@ -949,10 +976,12 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         normalized_entries = []
         for entry in entries:
             normalized_entry = dict(entry)
+            # copy=True (explicit): rehydrated tensors are stored long-term in self.index,
+            # so the buffer must own them and not alias the caller's input tensors.
             if "state" in normalized_entry:
-                normalized_entry["state"] = self._load_tensor(normalized_entry["state"])
+                normalized_entry["state"] = self._load_tensor(normalized_entry["state"], copy=True)
             if normalized_entry.get("next_state") is not None:
-                normalized_entry["next_state"] = self._load_tensor(normalized_entry["next_state"])
+                normalized_entry["next_state"] = self._load_tensor(normalized_entry["next_state"], copy=True)
             # Migrate legacy reward_type ("other" / missing) to the 4-class scheme
             reward_type = self._coerce_reward_type(normalized_entry.get("reward_type"))
             if reward_type is None:
