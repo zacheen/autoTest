@@ -57,8 +57,8 @@ class VisualAgentCommonMixin:
         """Hook: convert a raw env state into what should live in the replay buffer.
 
         Default: detach + move to CPU. v1/v2/v3 all store raw screenshots this way;
-        CategorizedReplayBuffer._save_tensor compresses (3, H>=64, W) tensors to uint8
-        on disk and _load_tensor restores them to float [0,1] at sample time.
+        CategorizedReplayBuffer._save_transition compresses (3, H>=64, W) tensors to
+        uint8 on disk and _load_transition restores them to float [0,1] at sample time.
         """
         if state is None:
             return None
@@ -302,56 +302,44 @@ class VisualAgentCommonMixin:
         skipped_load_error = 0
         runtime_entries = []
         for entry in persistent_entries[: self.replay_buffer.max_size]:
-            state_src_str = entry.get("state", entry.get("state_path"))
-            if state_src_str is None:
+            transition_src_str = entry.get("transition")
+            if transition_src_str is None:
                 skipped_missing += 1
                 continue
-            state_src = Path(state_src_str)
-            if not state_src.exists():
+            transition_src = Path(transition_src_str)
+            if not transition_src.exists():
                 skipped_missing += 1
                 continue
 
-            # weights_only=True ensures the peek result is a tensor and limits
-            # deserialization opcodes to reduce RCE risk from corrupt/malicious .pt files.
+            # weights_only=True limits deserialization opcodes (RCE hardening). The
+            # transition file is one dict {"state":..., "next_state":...}; validate the
+            # state shape (and next_state's shape when present) against expected_shape so
+            # stale-format data cannot crash train_step. A wrong shape drops the whole
+            # transition.
             try:
-                peek = torch.load(str(state_src), map_location="cpu", weights_only=True)
-                if not torch.is_tensor(peek) or tuple(peek.shape) != expected_shape:
+                peek = torch.load(str(transition_src), map_location="cpu", weights_only=True)
+                state_peek = peek.get("state") if isinstance(peek, dict) else None
+                if not torch.is_tensor(state_peek) or tuple(state_peek.shape) != expected_shape:
+                    skipped_shape_mismatch += 1
+                    continue
+                next_peek = peek.get("next_state")
+                if next_peek is not None and (
+                    not torch.is_tensor(next_peek) or tuple(next_peek.shape) != expected_shape
+                ):
                     skipped_shape_mismatch += 1
                     continue
             except Exception:
                 skipped_load_error += 1
                 continue
 
-            # Also peek and validate next_state shape so mixed-format entries from
-            # version switches cannot crash train_step with a wrong tensor shape.
-            next_state_dst_candidate = None
-            next_src_str = entry.get("next_state", entry.get("next_state_path"))
-            if next_src_str:
-                next_src = Path(next_src_str)
-                if next_src.exists():
-                    try:
-                        next_peek = torch.load(
-                            str(next_src), map_location="cpu", weights_only=True
-                        )
-                        if torch.is_tensor(next_peek) and tuple(next_peek.shape) == expected_shape:
-                            next_state_dst_candidate = next_src
-                    except Exception:
-                        next_state_dst_candidate = None
-
             storage_id = loaded_count
-            state_dst = self.replay_path / f"state_{storage_id}.pt"
-            shutil.copy2(str(state_src), str(state_dst))
-
-            next_state_dst = None
-            if next_state_dst_candidate is not None:
-                next_state_dst = self.replay_path / f"next_state_{storage_id}.pt"
-                shutil.copy2(str(next_state_dst_candidate), str(next_state_dst))
+            transition_dst = self.replay_path / f"transition_{storage_id}.pt"
+            shutil.copy2(str(transition_src), str(transition_dst))
 
             runtime_entry = {
                 "storage_id": storage_id,
-                "state": str(state_dst),
+                "transition": str(transition_dst),
                 "action": int(entry["action"]),
-                "next_state": str(next_state_dst) if next_state_dst else None,
                 "reward": float(entry["reward"]),
                 "tail_reward": float(entry.get("tail_reward", entry["reward"])),
                 "done": bool(entry["done"]),
@@ -431,7 +419,12 @@ class VisualAgentCommonMixin:
                     peek = torch.load(
                         str(pt_file), map_location="cpu", weights_only=True
                     )
-                    if torch.is_tensor(peek) and tuple(peek.shape) == expected_shape:
+                    # New format: each .pt is a dict {"state":..., "next_state":...}.
+                    # Old single-tensor files (peek is a bare tensor) fail the dict
+                    # check and are deleted — the intended clean break from the
+                    # two-file-per-transition format.
+                    state_peek = peek.get("state") if isinstance(peek, dict) else None
+                    if torch.is_tensor(state_peek) and tuple(state_peek.shape) == expected_shape:
                         keep = True
                 except Exception:
                     keep = False  # Read failure means corrupt, so delete it too.

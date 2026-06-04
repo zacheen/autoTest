@@ -81,7 +81,7 @@ class _ReplayStoreBase:
 
         # Storage backend shared by all replay stores (main PER + pending). "ram"
         # keeps tensors in memory; "disk" persists uint8 .pt files under save_dir and
-        # keeps only path strings in the index. The _save_tensor / _load_tensor /
+        # keeps only path strings in the index. The _save_transition / _load_transition /
         # _delete_entry_files helpers below are storage-mode aware so every subclass
         # gets identical persistence semantics.
         self.storage_mode = storage_mode.lower()
@@ -138,50 +138,76 @@ class _ReplayStoreBase:
             return values.detach().float().view(-1).cpu().tolist()
         return [float(value) for value in values]
 
-    def _save_tensor(self, tensor, root_name, storage_id):
-        """Save a tensor either to disk or keep it in memory based on storage mode."""
-        if self.storage_mode == "disk":
-            path = self.save_dir / f"{root_name}_{storage_id}.pt"
-            # If it looks like a visual image, store as uint8 to save space
-            if len(tensor.shape) == 3 and tensor.shape[0] == 3 and tensor.shape[1] >= 64:
-                uint8_tensor = tensor.detach().cpu().clamp(0, 1).mul(255).to(torch.uint8)
-                torch.save(uint8_tensor, path)
-            else:
-                torch.save(tensor.cpu(), path)
-            return str(path)
-        else:
-            return tensor.cpu().clone() if torch.is_tensor(tensor) else tensor
+    @staticmethod
+    def _compress_tensor(tensor):
+        """Quantize an image-like (3, H>=64, W) float tensor to uint8 to save space;
+        otherwise pass the tensor through on CPU. Reversed by ``_decompress_tensor``."""
+        if (
+            torch.is_tensor(tensor)
+            and len(tensor.shape) == 3
+            and tensor.shape[0] == 3
+            and tensor.shape[1] >= 64
+        ):
+            return tensor.detach().cpu().clamp(0, 1).mul(255).to(torch.uint8)
+        return tensor.cpu() if torch.is_tensor(tensor) else tensor
 
-    def _load_tensor(self, reference, *, copy: bool = True):
-        """Load and return a tensor from disk, or return the in-memory reference.
+    @staticmethod
+    def _decompress_tensor(tensor):
+        """Inverse of ``_compress_tensor``: uint8 → float in [0,1], else CPU passthrough."""
+        if torch.is_tensor(tensor) and tensor.dtype == torch.uint8:
+            return tensor.float() / 255.0
+        return tensor.cpu() if torch.is_tensor(tensor) else tensor
 
-        Args:
-            copy: Only relevant when the stored reference is already a tensor (RAM mode,
-                or a rehydrated entry). Controls ownership of the returned tensor:
-                - ``copy=True`` (default, safe): return an independent ``.clone()`` so the
-                  caller fully owns it and may mutate or store it long-term without
-                  touching buffer state. Used by ``load_from_entries`` (the result is
-                  kept in ``self.index``) and by any caller that has not been audited.
-                - ``copy=False`` (borrow): return a detached CPU tensor that SHARES
-                  storage with the buffer's stored tensor. The caller MUST treat it as
-                  read-only and consume it before the buffer slot can change. Used only
-                  by the hot sampling path (``build_batch_from_entries``), whose very next
-                  step is ``torch.stack`` — that allocates a fresh batch tensor and copies
-                  each element in, so the borrow never escapes the function. This skips a
-                  redundant per-entry clone (megabytes per visual state) on every
-                  ``sample()`` call; the store-time clone in ``_save_tensor`` is what
-                  already guarantees the buffer owns a private copy.
+    def _save_transition(self, state, next_state, storage_id, prefix):
+        """Persist a (state, next_state) pair as ONE record and return its reference.
+
+        A transition is the unit of storage, so both tensors live in a single file /
+        object: one write, one read, one delete, one existence check (no risk of a
+        half-present transition).
+
+        - disk mode → write ``{"state": ..., "next_state": ...}`` (each image-like
+          tensor uint8-compressed; ``next_state`` may be None) to
+          ``{prefix}_{storage_id}.pt`` and return the path string.
+        - ram mode  → return that dict holding detached CPU clones the buffer owns.
         """
-        if torch.is_tensor(reference):
-            tensor = reference.detach().cpu()  # detach = view (no copy); cpu = no-op when already on CPU
-            return tensor.clone() if copy else tensor
-
         if self.storage_mode == "disk":
-            tensor = torch.load(reference, map_location="cpu")
-            if tensor.dtype == torch.uint8:
-                return tensor.float() / 255.0
-            return tensor.cpu()
-        return reference
+            payload = {
+                "state": self._compress_tensor(state),
+                "next_state": self._compress_tensor(next_state) if next_state is not None else None,
+            }
+            path = self.save_dir / f"{prefix}_{storage_id}.pt"
+            torch.save(payload, path)
+            return str(path)
+        return {
+            "state": state.cpu().clone() if torch.is_tensor(state) else state,
+            "next_state": next_state.cpu().clone() if torch.is_tensor(next_state) else next_state,
+        }
+
+    def _load_transition(self, reference, *, copy: bool = True):
+        """Inverse of ``_save_transition``. Returns ``(state, next_state)`` (next_state
+        may be None).
+
+        ``copy`` only matters in RAM mode, where ``reference`` is a dict of tensors:
+        - ``copy=True`` (default, safe): return independent ``.clone()`` tensors the
+          caller fully owns (used by ``load_from_entries``, kept in ``self.index``).
+        - ``copy=False`` (borrow): return the stored tensors read-only for the hot
+          sampling path (``build_batch_from_entries``), whose very next step is a
+          ``torch.stack`` that copies each element into a fresh batch — the borrow never
+          escapes. Disk loads always return fresh tensors, so the borrow is moot there.
+        """
+        if isinstance(reference, dict):
+            state = reference.get("state")
+            next_state = reference.get("next_state")
+            if copy:
+                state = state.clone() if torch.is_tensor(state) else state
+                next_state = next_state.clone() if torch.is_tensor(next_state) else next_state
+            return state, next_state
+
+        payload = torch.load(reference, map_location="cpu")
+        state = self._decompress_tensor(payload["state"])
+        stored_next = payload.get("next_state")
+        next_state = self._decompress_tensor(stored_next) if stored_next is not None else None
+        return state, next_state
 
     def _safe_unlink(self, path_str):
         """Safely delete a file from disk if its path is provided and exists."""
@@ -192,10 +218,9 @@ class _ReplayStoreBase:
             path.unlink()
 
     def _delete_entry_files(self, entry):
-        """Clean up and delete disk files associated with a removed buffer entry."""
+        """Delete the single on-disk transition file associated with a removed entry."""
         if self.storage_mode == "disk":
-            self._safe_unlink(entry.get("state"))
-            self._safe_unlink(entry.get("next_state"))
+            self._safe_unlink(entry.get("transition"))
 
 
 
@@ -467,15 +492,14 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
 
         RAM mode (``storage_mode == "ram"``):
             ``persistent_dir`` must be ``None``. Returns the entry-dict
-            references directly — their ``state`` / ``next_state`` are
-            in-memory tensors.
+            references directly — their ``transition`` is an in-memory dict of tensors.
 
         Disk mode (``storage_mode == "disk"``):
             ``persistent_dir`` must be a path. The directory is created if
-            missing and cleared of stale ``.pt`` files, then each selected
-            entry's state / next_state file is copied in with fresh
-            ``storage_id`` numbering. Returns NEW entry dicts whose
-            ``state`` / ``next_state`` paths point inside ``persistent_dir``.
+            missing and cleared of stale ``.pt`` files, then each selected entry's
+            single ``transition`` file is copied in with fresh ``storage_id``
+            numbering. Returns NEW entry dicts whose ``transition`` path points
+            inside ``persistent_dir``.
 
         Raises:
             ValueError: if ``storage_mode`` and ``persistent_dir`` don't match.
@@ -497,19 +521,12 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         exported = []
         save_idx = 0
         for old_entry in selected:
-            state_src = Path(old_entry["state"])
-            if not state_src.exists():
+            transition_src = Path(old_entry["transition"])
+            if not transition_src.exists():
                 continue
 
-            state_dst = persistent_dir / f"state_{save_idx}.pt"
-            shutil.copy2(str(state_src), str(state_dst))
-
-            next_state_dst = None
-            if old_entry["next_state"]:
-                next_src = Path(old_entry["next_state"])
-                if next_src.exists():
-                    next_state_dst = persistent_dir / f"next_state_{save_idx}.pt"
-                    shutil.copy2(str(next_src), str(next_state_dst))
+            transition_dst = persistent_dir / f"transition_{save_idx}.pt"
+            shutil.copy2(str(transition_src), str(transition_dst))
 
             tail_reward = float(old_entry.get("tail_reward", old_entry["reward"]))
             legacy_rt = self._coerce_reward_type(old_entry.get("reward_type"))
@@ -518,9 +535,8 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
                 legacy_rt = self._reward_type(tail_reward, bool(old_entry["done"]))
             exported.append({
                 "storage_id": save_idx,
-                "state": str(state_dst),
+                "transition": str(transition_dst),
                 "action": old_entry["action"],
-                "next_state": str(next_state_dst) if next_state_dst else None,
                 "reward": old_entry["reward"],
                 "tail_reward": tail_reward,
                 "done": old_entry["done"],
@@ -624,35 +640,30 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         tail_reward=None,
         initial_priority=None,
         quantile_spread=0.0,
-        state_ref=None,
-        next_state_ref=None,
+        transition_ref=None,
     ):
         """Store a transition.
 
-        When ``state_ref`` / ``next_state_ref`` are supplied, they are adopted into
-        the index directly and ``_save_tensor`` is skipped. A ref is whatever
-        ``_save_tensor`` previously returned for the same storage mode: a path string
-        in disk mode, or an in-memory tensor in RAM mode. This lets the pending store
-        hand its already-written file (or already-cloned tensor) to the main store on
-        commit without re-serializing, moving, or re-cloning it. ``state`` /
-        ``next_state`` are ignored for whichever ref is provided.
+        When ``transition_ref`` is supplied it is adopted into the index directly and
+        ``_save_transition`` is skipped. A ref is whatever ``_save_transition`` returns
+        for the current storage mode: a path string in disk mode, or a dict of tensors
+        in RAM mode. This lets the pending store hand its already-written transition
+        file (or already-cloned dict) to the main store on commit without re-serializing,
+        moving, or re-cloning it. ``state`` / ``next_state`` are ignored when a ref is given.
         """
         self.insert_counter += 1
         storage_id = self.next_storage_id
         self.next_storage_id += 1
 
-        if state_ref is None:
-            state_ref = self._save_tensor(state, "state", storage_id)
-        if next_state_ref is None and next_state is not None:
-            next_state_ref = self._save_tensor(next_state, "next_state", storage_id)
+        if transition_ref is None:
+            transition_ref = self._save_transition(state, next_state, storage_id, "transition")
 
         bucket_reward = float(reward if tail_reward is None else tail_reward)
         priority_value = abs(float(reward)) + 1.0 if initial_priority is None else float(initial_priority)
         entry = {
             "storage_id": storage_id,
-            "state": state_ref,
+            "transition": transition_ref,
             "action": action.copy() if isinstance(action, np.ndarray) else np.array(action),
-            "next_state": next_state_ref,
             "reward": float(reward),
             "tail_reward": bucket_reward,
             "done": bool(done),
@@ -683,14 +694,12 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         n_steps=1,
         tail_reward=None,
         quantile_spread=0.0,
-        state_ref=None,
-        next_state_ref=None,
+        transition_ref=None,
     ):
         """Store data whose PER priority is already known.
 
-        ``state_ref`` / ``next_state_ref`` are forwarded to ``store`` so an
-        already-saved reference can be adopted without re-serialization (see
-        ``store``).
+        ``transition_ref`` is forwarded to ``store`` so an already-saved transition
+        reference can be adopted without re-serialization (see ``store``).
         """
         return self.store(
             state,
@@ -703,8 +712,7 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
             tail_reward=tail_reward,
             initial_priority=priority,
             quantile_spread=quantile_spread,
-            state_ref=state_ref,
-            next_state_ref=next_state_ref,
+            transition_ref=transition_ref,
         )
 
     def update_priorities(self, sample_indices, td_errors, quantile_spreads=None):
@@ -769,16 +777,17 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         for entry in selected_entries:
             # copy=False: borrow buffer storage read-only. The torch.stack below copies
             # everything into a fresh batch tensor, so the borrow never escapes this loop.
-            states.append(self._load_tensor(entry["state"], copy=False))
+            state, next_state = self._load_transition(entry["transition"], copy=False)
+            states.append(state)
             actions.append(entry["action"])
 
-            if entry["next_state"] is not None:
-                next_states.append(self._load_tensor(entry["next_state"], copy=False))
+            if next_state is not None:
+                next_states.append(next_state)
             else:
-                # clone() here is load-bearing: states[-1] may be a borrowed view of a
+                # clone() here is load-bearing: `state` may be a borrowed view of a
                 # stored entry, so we must clone BEFORE the in-place fill_ to avoid
                 # zeroing the buffer's own tensor.
-                dummy = states[-1].clone()
+                dummy = state.clone()
                 dummy.fill_(0)
                 next_states.append(dummy)
 
@@ -999,13 +1008,20 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         """
         normalized_entries = []
         for entry in entries:
+            # Clean break: entries from the old two-tensor format (separate "state" /
+            # "next_state" keys, no "transition") are dropped rather than crashing the
+            # sampler later. Very old raw-tensor entries without "storage_id" are handled
+            # by the caller's legacy store() path, not here.
+            if "transition" not in entry:
+                continue
             normalized_entry = dict(entry)
-            # copy=True (explicit): rehydrated tensors are stored long-term in self.index,
-            # so the buffer must own them and not alias the caller's input tensors.
-            if "state" in normalized_entry:
-                normalized_entry["state"] = self._load_tensor(normalized_entry["state"], copy=True)
-            if normalized_entry.get("next_state") is not None:
-                normalized_entry["next_state"] = self._load_tensor(normalized_entry["next_state"], copy=True)
+            # RAM-mode persistent entries carry ``transition`` as a dict of tensors;
+            # clone (copy=True) so the buffer owns them long-term in self.index and does
+            # not alias the caller's input. Disk-mode refs are path strings, kept as-is.
+            ref = normalized_entry.get("transition")
+            if isinstance(ref, dict):
+                state, next_state = self._load_transition(ref, copy=True)
+                normalized_entry["transition"] = {"state": state, "next_state": next_state}
             # Migrate legacy reward_type ("other" / missing) to the 4-class scheme
             reward_type = self._coerce_reward_type(normalized_entry.get("reward_type"))
             if reward_type is None:
@@ -1151,15 +1167,12 @@ class _PendingReplayStore(_ReplayStoreBase):
         }
 
         def _materialize() -> None:
-            # Reuse the shared storage backend: disk mode writes a uint8 pending_*.pt
-            # and stores its path; RAM mode stores a cloned tensor. The "pending_"
-            # filename prefix keeps these files from colliding with the main store's
-            # state_*.pt in the shared save_dir.
-            entry["state"] = self._save_tensor(state, "pending_state", pending_id)
-            entry["next_state"] = (
-                self._save_tensor(next_state, "pending_next_state", pending_id)
-                if next_state is not None
-                else None
+            # Reuse the shared storage backend: disk mode writes ONE uint8
+            # pending_transition_*.pt and stores its path; RAM mode stores a dict of
+            # cloned tensors. The "pending_transition_" prefix keeps these files from
+            # colliding with the main store's transition_*.pt in the shared save_dir.
+            entry["transition"] = self._save_transition(
+                state, next_state, pending_id, "pending_transition"
             )
             bucket.append(entry)
 
@@ -1586,8 +1599,8 @@ class CategorizedReplayBuffer:
             for entry, td_error, spread in zip(entries, td_values, spread_values):
                 priority = abs(float(td_error)) + self._main.priority_eps
                 # Zero-copy adoption: the pending store already wrote (disk mode) or
-                # cloned (RAM mode) the state, so hand that reference to the main store
-                # via state_ref/next_state_ref instead of re-serializing or moving it.
+                # cloned (RAM mode) the transition, so hand that single reference to the
+                # main store via transition_ref instead of re-serializing or moving it.
                 self._main.store_prioritized(
                     None,
                     entry["action"],
@@ -1599,8 +1612,7 @@ class CategorizedReplayBuffer:
                     n_steps=entry.get("n_steps", 1),
                     tail_reward=entry.get("tail_reward", entry["reward"]),
                     quantile_spread=spread,
-                    state_ref=entry["state"],
-                    next_state_ref=entry["next_state"],
+                    transition_ref=entry["transition"],
                 )
                 committed_ids.add(entry["pending_id"])
         finally:
