@@ -195,7 +195,11 @@ SAVE_EVERY_N_EPISODES = 500
 DIAGNOSTIC_LOG_EVERY = 10
 HISTOGRAM_EVERY = 200
 WEIGHT_DISTANCE_LOG_EVERY = 100
-USE_AMP = False
+# fp16 AMP (autocast + GradScaler, both already wired in train_step). Enabled to cut
+# the live-YOLO activation memory (~halves it) and speed up. The FQF quantile loss is
+# computed in fp32 (.float()), so the distributional math is unaffected; watch
+# train/scaler_scale in TB (frequent halving => instability) and win_rate.
+USE_AMP = True
 
 # learning rates
 # Most LR / weight_decay values use FQFOptimizerConfig defaults. V3 adds
@@ -211,7 +215,7 @@ LR_BACKBONE_PRETRAINED = 5e-6  # Stage 1-loaded encoder + decoder + query_tokens
 # build_fqf_optimizer yolo_prefixes). Kept low — YOLO is a pretrained vision backbone and
 # noisy RL gradients can damage it. Stage 1 fine-tuned YOLO at 1e-5; tune via TB
 # grad_pre/yolo + weights/yolo_delta_from_init.
-LR_YOLO = 1e-5
+LR_YOLO = 2e-6
 # Linear LR warmup over the first N optimizer steps for early transformer stability.
 # Increase from base_lr * LR_WARMUP_START_FACTOR to base_lr.
 LR_WARMUP_STEPS         = 2000  # Initial from-scratch warmup length.
