@@ -553,6 +553,21 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self._purge_stale_replay_files()
         self.try_load_model()
 
+        # ── Target backbone (full target feature extractor) ──────────────────
+        # The TD target must be computed by a STABLE full model, not the live online
+        # backbone — otherwise YOLO/encoder/decoder updates move the target features
+        # every step (moving-target instability that distributional RL is sensitive to).
+        # backbone_target mirrors self.backbone (YOLO + token_adapter + encoder +
+        # decoder) and is hard-synced every TARGET_UPDATE_FREQ steps alongside q_target.
+        # It never trains (requires_grad off + always eval) and is NOT passed to the
+        # optimizer. Built + synced here, after try_load_model, so it matches a resumed
+        # checkpoint; it is therefore not saved separately.
+        self.backbone_target = VisualBackboneV3(grid_h=grid_h, grid_w=grid_w).to(device)
+        for _p in self.backbone_target.parameters():
+            _p.requires_grad_(False)
+        self.backbone_target.load_state_dict(self.backbone.state_dict())
+        self.backbone_target.eval()
+
         self._init_weight_reference = self._capture_trainable_weight_snapshot()
         self._rolling_weight_reference = self._capture_trainable_weight_snapshot()
         self._rolling_weight_reference_step = self.total_it
@@ -1041,12 +1056,14 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # stores them uint8 on disk and restores them to float at sample time, so no
         # manual conversion is needed here. The full pipeline (incl. YOLO11n) runs live.
 
-        # Target branch (no gradients).
-        # Target branch must set token_adapter/encoder/decoder to eval, otherwise
-        # dropout fires during target Q computation and adds TD target noise. no_grad
-        # blocks backward only, not dropout. q_network is also set eval here so
-        # double-Q argmax logic matches q_target; restore train mode afterward.
-        # feature_extractor (YOLO) is already eval (BN frozen) via _set_runtime_modes.
+        # Target branch (no gradients). Double-DQN with a FULL target model:
+        #   - the ONLINE net (self.backbone + q_network) selects the next action
+        #     (argmax of online Q on online features),
+        #   - the TARGET net (self.backbone_target + q_target) evaluates that action.
+        # Using a separate target backbone keeps the TD target stable even though the
+        # online backbone/YOLO updates every step (otherwise the target features drift).
+        # Online submodules are set eval here so the argmax is deterministic (no
+        # dropout); backbone_target is always eval. Restore online train mode afterward.
         self.backbone.token_adapter.eval()
         self.backbone.encoder.eval()
         self.backbone.decoder.eval()
@@ -1054,11 +1071,12 @@ class VisualAgentV3(VisualAgentCommonMixin):
         with torch.no_grad():
             with torch.autocast(device_type=device.type, dtype=torch.float16,
                                 enabled=(USE_AMP and device.type == "cuda")):
-                next_features  = self.backbone.get_features(next_state)
-                next_online    = self.q_network(next_features)
+                next_features_online = self.backbone.get_features(next_state)
+                next_online    = self.q_network(next_features_online)
                 next_online_q_flat = next_online["q_values"].view(batch_size, -1)
                 next_best_flat = next_online_q_flat.argmax(dim=1)
-                next_target    = self.q_target(next_features)
+                next_features_target = self.backbone_target.get_features(next_state)
+                next_target    = self.q_target(next_features_target)
                 next_target_quantiles = next_target["quantiles"][
                     torch.arange(batch_size, device=device), next_best_flat
                 ]
@@ -1167,6 +1185,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
         )
 
         if self.total_it % TARGET_UPDATE_FREQ == 0:
+            # Hard-sync the FULL target model (backbone + head) so the TD target tracks
+            # the online net with a fixed lag, matching q_target's schedule.
+            self.backbone_target.load_state_dict(self.backbone.state_dict())
+            self.backbone_target.eval()
             self.q_target.load_state_dict(self.q_network.state_dict())
             self.q_target.eval()
 
