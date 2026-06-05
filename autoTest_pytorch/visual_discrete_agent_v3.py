@@ -682,8 +682,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
         Key remapping (Stage 1 → V3):
             query_tokens                              → query_tokens                       (1:1)
-            core.transformer.layers.{i}.attn.<...>    → encoder.layers.{i}.attn.<...>      (new-style, post-HierarchicalEncoder)
-            core.transformer.layers.{i}.<...>         → encoder.layers.{i}.attn.<...>      (old-style, pre-refactor — auto-insert .attn)
+            core.transformer.layers.{i}.attn.<...>    → encoder.layers.{i}.attn.<...>      (HierarchicalEncoder)
             core.decoder.layers.{i}.<...>             → decoder.layers.{i}.<...>           (1:1)
             token_embed / output_head / position → dropped
         FQF online/target load 1:1.
@@ -704,10 +703,9 @@ class VisualAgentV3(VisualAgentCommonMixin):
                 )
             return False
 
-        # backbone.pth: remap encoder/decoder/query_tokens.
-        # Handles both old (raw nn.TransformerEncoder) and new (HierarchicalEncoder)
-        # Stage 1 formats — the only difference is whether the `attn.` prefix is already
-        # present after the layer index.
+        # backbone.pth: remap encoder/decoder/query_tokens. Stage 1 uses
+        # HierarchicalEncoder, so encoder keys always carry the `.attn.` (inner block)
+        # or `.proj.` (optional dim-change) prefix after the layer index.
         sd = torch.load(backbone_pth, map_location="cpu", weights_only=False)
         remapped: dict[str, torch.Tensor] = {}
         for key, value in sd.items():
@@ -718,12 +716,9 @@ class VisualAgentV3(VisualAgentCommonMixin):
                 idx_str, _, rest = tail.partition(".")
                 if not rest:
                     continue
-                if rest.startswith(("attn.", "proj.", "proj")):
-                    # New-style: .attn / .proj prefix already there — strip outer `core.transformer.` only
-                    remapped[f"encoder.layers.{idx_str}.{rest}"] = value
-                else:
-                    # Old-style: insert .attn to align with HierarchicalEncoderLayer wrapping
-                    remapped[f"encoder.layers.{idx_str}.attn.{rest}"] = value
+                # Strip outer `core.transformer.`; the `.attn.` / `.proj.` prefix is
+                # already part of `rest` under HierarchicalEncoderLayer.
+                remapped[f"encoder.layers.{idx_str}.{rest}"] = value
             elif key.startswith("core.decoder."):
                 # core.decoder.X → decoder.X (1:1)
                 remapped[key[len("core."):]] = value
@@ -1275,11 +1270,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
             self.training_logger.log("train/scaler_scale", self.scaler.get_scale(), step=step, csv=False)
 
         # LR scalars: one per param group under lr/ in TB. build_fqf_optimizer adds
-        # a "name" key to each group; fallback to index for old checkpoints. During
-        # warmup group["lr"] is already the effective LR, so TB shows ramp + ratios.
-        for idx, group in enumerate(self.optimizer.param_groups):
-            tag = group.get("name") or f"group_{idx}"
-            self.training_logger.log(f"lr/{tag}", group["lr"], step=step, csv=False)
+        # a "name" key to each group. During warmup group["lr"] is already the
+        # effective LR, so TB shows ramp + ratios.
+        for group in self.optimizer.param_groups:
+            self.training_logger.log(f"lr/{group['name']}", group["lr"], step=step, csv=False)
 
         # Replay buffer / pending composition — keyed by total_it (this whole
         # block runs every DIAGNOSTIC_LOG_EVERY training steps), so fill / drain
@@ -1493,21 +1487,6 @@ class VisualAgentV3(VisualAgentCommonMixin):
             torch.save(qtarget_sd,  archive / "fqf_target.pth")
         except Exception as exc:
             print(f"[V3] WARN: archive snapshot write failed: {exc}")
-
-    def _log_checkpoint_message(self, message: str, *, warning: bool = False) -> None:
-        """Thin wrapper used by VisualAgentCommonMixin fallbacks.
-
-        The mixin checks ``hasattr(self, "_log_checkpoint_message")`` for old
-        v1/v2 agents that don't have a CheckpointLogger; this delegator keeps
-        that contract working while routing colored output through the shared
-        logger. Direct checkpoint sites in this file call ``self.checkpoint_logger``
-        methods directly because they need ``success`` / ``failure`` semantics
-        with area names, which this two-state wrapper cannot express.
-        """
-        if warning:
-            self.checkpoint_logger.warn(message)
-        else:
-            self.checkpoint_logger.info(message)
 
     def try_load_model(self) -> None:
         # V3 own checkpoints. These run AFTER Stage 1 warm-start; a success here

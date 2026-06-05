@@ -160,9 +160,8 @@ class VisualAgentCommonMixin:
             # AdaptiveEpsilonController now stores only epsilon.
             self.epsilon_controller.load_state_dict(state)
 
-            # TrainingHistory: prefer its independent file. For old checkpoints
-            # before the split, migrate legacy flat keys from optimizer state.
-            self._load_training_history(legacy_state=state)
+            # TrainingHistory uses its own independent file.
+            self._load_training_history()
 
             success_msg = (
                 f"Loaded optimizer ({opt_path}): total_it={self.total_it}, "
@@ -193,56 +192,32 @@ class VisualAgentCommonMixin:
             else:
                 print(f"{self.log_prefix} {message}")
 
-    def _load_training_history(self, legacy_state: dict | None = None) -> None:
-        """Load TrainingHistory, preferring the independent file.
-
-        legacy_state is the current optimizer state. If the new file is missing
-        but legacy_state contains old flat keys, migrate from it.
-        """
+    def _load_training_history(self) -> None:
+        """Load TrainingHistory from its independent file."""
         history_path = self._training_history_path()
-        if history_path.exists():
-            try:
-                hist_state = torch.load(
-                    history_path, map_location=self.device, weights_only=False
-                )
-                self.training_history.load_state_dict(
-                    hist_state, deque_cls=self.deque_cls
-                )
-                if hasattr(self, "checkpoint_logger"):
-                    self.checkpoint_logger.success(
-                        "training_history",
-                        history_path,
-                        f"Loaded training_history: {history_path}",
-                    )
-                return
-            except Exception as exc:
-                message = (
-                    f"Failed to load training_history.pth ({history_path}): {exc}"
-                )
-                if hasattr(self, "checkpoint_logger"):
-                    self.checkpoint_logger.failure("training_history", message)
-                else:
-                    print(f"{self.log_prefix} {message}")
-                # Fall through to legacy fallback below.
-        if legacy_state and any(
-            k in legacy_state for k in ("result_window", "total_episodes", "total_wins")
-        ):
-            legacy = {
-                "results": legacy_state.get("result_window", []),
-                "total_episodes": legacy_state.get("total_episodes", 0),
-                "total_wins": legacy_state.get("total_wins", 0),
-            }
-            self.training_history.load_state_dict(legacy, deque_cls=self.deque_cls)
+        if not history_path.exists():
+            return
+        try:
+            hist_state = torch.load(
+                history_path, map_location=self.device, weights_only=False
+            )
+            self.training_history.load_state_dict(
+                hist_state, deque_cls=self.deque_cls
+            )
             if hasattr(self, "checkpoint_logger"):
-                self.checkpoint_logger.mark_special(
+                self.checkpoint_logger.success(
                     "training_history",
-                    "<migrated from legacy optimizer_state.pth>",
-                    "Migrated legacy training history from optimizer state",
+                    history_path,
+                    f"Loaded training_history: {history_path}",
                 )
+        except Exception as exc:
+            message = (
+                f"Failed to load training_history.pth ({history_path}): {exc}"
+            )
+            if hasattr(self, "checkpoint_logger"):
+                self.checkpoint_logger.failure("training_history", message)
             else:
-                print(
-                    f"{self.log_prefix} Migrated legacy training history from optimizer state"
-                )
+                print(f"{self.log_prefix} {message}")
 
     def save_persistent(self) -> None:
         buf = self.replay_buffer
@@ -270,9 +245,7 @@ class VisualAgentCommonMixin:
             return
         try:
             state = torch.load(ts_path, map_location=self.device, weights_only=False)
-            # Read new unified key first; fall back to legacy "persistent_index"
-            # key so older save files keep loading.
-            persistent_entries = state.get("persistent_entries") or state.get("persistent_index", [])
+            persistent_entries = state.get("persistent_entries", [])
             if persistent_entries:
                 # _load_persistent_buffer prints the per-entry summary and
                 # records the source on the checkpoint_logger when present.
