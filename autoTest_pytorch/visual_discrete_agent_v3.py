@@ -595,10 +595,11 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
         # ── YOLO update latch ───────────────────────────────────────────────
         # YOLO grads flow + log every step, but are zeroed before optimizer.step()
-        # until win_rate(100) crosses the threshold. Same not-saved, re-evaluated-on-
-        # resume design as the dropout latch above.
+        # until _yolo_latch_should_engage() is satisfied (win_rate threshold + a full
+        # 100-episode window). Same not-saved, re-evaluated-on-resume design as the
+        # dropout latch above.
         self._yolo_update_latched = False
-        if start_win_rate > YOLO_UNFREEZE_WR_THRESHOLD:
+        if self._yolo_latch_should_engage(start_win_rate):
             self._yolo_update_latched = True
             self.checkpoint_logger.warn(
                 "YOLO update latch ON (resume: training_history win_rate already above threshold)"
@@ -826,6 +827,22 @@ class VisualAgentV3(VisualAgentCommonMixin):
             f" threshold={DROPOUT_LATCH_WR_THRESHOLD}) — {reason}"
         )
 
+    def _yolo_latch_should_engage(self, win_rate: float) -> bool:
+        """Whether the (monotone, one-way) YOLO update latch should turn ON.
+
+        Shared by the resume-time check (__init__) and the per-step check (train_step).
+        Requires a full 100-episode window before trusting win_rate: win_rate(100)
+        averages over however many episodes exist so far, so without this gate an early
+        lucky streak (e.g. 2/3 wins) would fire the latch prematurely and start
+        fine-tuning YOLO before the agent is genuinely competent. The literal 100 is the
+        win_rate window size, hard-coded on purpose so the gate always matches the
+        window — it is not a tunable knob.
+        """
+        return (
+            self.training_history.total_episodes >= 100
+            and win_rate > YOLO_UNFREEZE_WR_THRESHOLD
+        )
+
     # ──────────────────────────── runtime modes ──────────────────────────
 
     def _set_runtime_modes(self) -> None:
@@ -1012,8 +1029,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # YOLO update latch: same monotone one-way design as dropout. Until this
         # latches ON, YOLO grads are computed + logged but zeroed before optimizer.step
         # (see grad section), so YOLO weights stay put while head/encoder bootstrap.
+        # Gate logic (win_rate threshold + 100-episode minimum) lives in
+        # _yolo_latch_should_engage.
         if not self._yolo_update_latched:
-            if self.training_history.win_rate(window=100) > YOLO_UNFREEZE_WR_THRESHOLD:
+            if self._yolo_latch_should_engage(self.training_history.win_rate(window=100)):
                 self._yolo_update_latched = True
                 self.checkpoint_logger.warn(
                     f"YOLO update latch ON — train_step total_it={self.total_it}: "
