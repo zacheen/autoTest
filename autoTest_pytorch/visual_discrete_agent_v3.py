@@ -549,10 +549,51 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self._purge_stale_replay_files()
         self.try_load_model()
 
-        # Hyperparameters dump runs AFTER try_load_model so the
-        # [loaded_checkpoints] section reflects the final effective weight
-        # source per area (Stage 1 warm-start, V3 own checkpoint, random
-        # init, or YOLO11n weights actually resolved by ultralytics).
+        self._init_weight_reference = self._capture_trainable_weight_snapshot()
+        self._rolling_weight_reference = self._capture_trainable_weight_snapshot()
+        self._rolling_weight_reference_step = self.total_it
+        # YOLO-only init snapshot for weights/yolo_delta_from_init. Captured here (after
+        # try_load_model) so "init" means the start of this session, matching
+        # _init_weight_reference. feature_extractor params only.
+        self._yolo_init_reference = {
+            name: p.detach().float().cpu().clone()
+            for name, p in self.backbone.feature_extractor.named_parameters()
+        }
+
+        # Session-start win_rate(100) drives every resume-time latch below. It is a
+        # rolling value recorded only on episode end, so reading it once here is
+        # stable and avoids recomputing the same number for each latch + the dump.
+        start_win_rate = self.training_history.win_rate(window=100)
+
+        # ── Dropout latch ───────────────────────────────────────────────────
+        # Start at p=0. train_step checks win_rate(100) against the threshold; the
+        # first crossing latches ON permanently, matching PER spread_decay. The
+        # latch flag is not saved, so re-evaluate after loading training_history.
+        self._dropout_latched = False
+        self._set_backbone_dropout_p(0.0)
+        if start_win_rate > DROPOUT_LATCH_WR_THRESHOLD:
+            self._latch_dropout_on(reason="resume: training_history win_rate already above threshold")
+
+        # ── YOLO update latch ───────────────────────────────────────────────
+        # YOLO grads flow + log every step, but are zeroed before optimizer.step()
+        # until win_rate(100) crosses the threshold. Same not-saved, re-evaluated-on-
+        # resume design as the dropout latch above.
+        self._yolo_update_latched = False
+        if start_win_rate > YOLO_UNFREEZE_WR_THRESHOLD:
+            self._yolo_update_latched = True
+            self.checkpoint_logger.warn(
+                "YOLO update latch ON (resume: training_history win_rate already above threshold)"
+            )
+
+        # Hyperparameters dump runs AFTER try_load_model + latch init so
+        # [loaded_checkpoints] reflects the final effective weight source per area
+        # (Stage 1 warm-start, V3 own checkpoint, random init, or YOLO11n weights
+        # resolved by ultralytics) and [yolo_update_latch] records whether YOLO
+        # weights update from step 0 this session. It must run BEFORE
+        # _set_runtime_modes(): dump_hyperparameters runs a torchinfo summary whose
+        # forward restores only the top-level train/eval bool, which would clobber
+        # the per-submodule mode mix (YOLO feature_extractor + BN held in eval) that
+        # _set_runtime_modes establishes as the final state below.
         try:
             dump_hyperparameters(
                 out_path=self.archive.session_dir / "hyperparameters.txt",
@@ -575,40 +616,20 @@ class VisualAgentV3(VisualAgentCommonMixin):
                     "model.q_network": (self.q_network, None),
                 },
                 loaded_checkpoints=self.checkpoint_logger.loaded_sources,
+                extra_sections={
+                    # YOLO update latch state at session start: the step-0 value of the
+                    # latch that gates YOLO weight updates, plus the win_rate that decided
+                    # it (the latch is not saved across resumes). Mid-run the transition is
+                    # visible via TB grad_post/yolo.
+                    "yolo_update_latch": {
+                        "active_at_start": self._yolo_update_latched,
+                        "win_rate_at_start": round(start_win_rate, 4),
+                        "wr_threshold": YOLO_UNFREEZE_WR_THRESHOLD,
+                    },
+                },
             )
         except Exception as exc:
             print(f"[V3] hyperparameters dump failed: {exc}")
-
-        self._init_weight_reference = self._capture_trainable_weight_snapshot()
-        self._rolling_weight_reference = self._capture_trainable_weight_snapshot()
-        self._rolling_weight_reference_step = self.total_it
-        # YOLO-only init snapshot for weights/yolo_delta_from_init. Captured here (after
-        # try_load_model) so "init" means the start of this session, matching
-        # _init_weight_reference. feature_extractor params only.
-        self._yolo_init_reference = {
-            name: p.detach().float().cpu().clone()
-            for name, p in self.backbone.feature_extractor.named_parameters()
-        }
-
-        # ── Dropout latch ───────────────────────────────────────────────────
-        # Start at p=0. train_step checks win_rate(100) against the threshold; the
-        # first crossing latches ON permanently, matching PER spread_decay. The
-        # latch flag is not saved, so re-evaluate after loading training_history.
-        self._dropout_latched = False
-        self._set_backbone_dropout_p(0.0)
-        if self.training_history.win_rate(window=100) > DROPOUT_LATCH_WR_THRESHOLD:
-            self._latch_dropout_on(reason="resume: training_history win_rate already above threshold")
-
-        # ── YOLO update latch ───────────────────────────────────────────────
-        # YOLO grads flow + log every step, but are zeroed before optimizer.step()
-        # until win_rate(100) crosses the threshold. Same not-saved, re-evaluated-on-
-        # resume design as the dropout latch above.
-        self._yolo_update_latched = False
-        if self.training_history.win_rate(window=100) > YOLO_UNFREEZE_WR_THRESHOLD:
-            self._yolo_update_latched = True
-            self.checkpoint_logger.warn(
-                "YOLO update latch ON (resume: training_history win_rate already above threshold)"
-            )
 
         self._set_runtime_modes()
         # atexit order is LIFO: close registered first runs last; save registered
@@ -1256,10 +1277,11 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.training_logger.log("grad_post/transformer",   transformer_post,                              step=step, csv=False)
         self.training_logger.log("grad_post/yolo",          yolo_post,                                     step=step, csv=False)
         self.training_logger.log("grad_post/head",          head_post,                                     step=step, csv=False)
-        # YOLO latch state (0/1) marks exactly when YOLO weights start updating;
-        # grad_post/yolo jumps from ~0 to >0 at the same step. yolo_nan_grad_count
-        # guards the deep backbone against NaN/Inf grads under noisy RL signal.
-        self.training_logger.log("train/yolo_update_active",  float(self._yolo_update_latched),            step=step, csv=False)
+        # YOLO update transition is visible without a dedicated scalar: grad_post/yolo
+        # jumps from ~0 to >0 the step the latch fires (grads are zeroed until then),
+        # and the step-0 latch state is recorded in hyperparameters.txt
+        # ([yolo_update_latch]). yolo_nan_grad_count guards the deep backbone against
+        # NaN/Inf grads under noisy RL signal.
         self.training_logger.log("debug/yolo_nan_grad_count", yolo_nan_grad_count,                         step=step, csv=False)
         if weight_distance_log is not None:
             self.training_logger.log("weights/delta_from_init",        weight_distance_log["from_init"],        step=step, csv=False)

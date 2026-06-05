@@ -163,6 +163,19 @@ def _dump_object_attrs(section_name: str, target: Any) -> list[str]:
     return lines
 
 
+def _dump_extra_section(section_name: str, values: dict[str, Any]) -> list[str]:
+    """Render a plain dict as a [section] of key = value lines.
+
+    Caller-controlled escape hatch for facts that fit none of the other
+    categories (module constants / dataclass / instance attrs / model summary) —
+    e.g. runtime latch state resolved at session start. Insertion order is kept.
+    """
+    lines = [f"[{section_name}]"]
+    for name, value in values.items():
+        lines.append(f"{name} = {_format_value(value)}")
+    return lines
+
+
 def _git_info() -> tuple[str, bool] | None:
     try:
         commit = subprocess.run(
@@ -190,6 +203,7 @@ def dump_hyperparameters(
     instance_attrs: dict[str, Any] | None = None,
     models: dict[str, tuple[Any, tuple[int, ...] | None]] | None = None,
     loaded_checkpoints: dict[str, str] | None = None,
+    extra_sections: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     """One-shot dump of training settings to out_path.
 
@@ -209,6 +223,10 @@ def dump_hyperparameters(
             the operator can immediately see which weights this session actually
             used (Stage 1 warm-start vs V3 own checkpoint vs random init).
             Pass ``CheckpointLogger.loaded_sources`` from model_structure.checkpoint_log.
+        extra_sections: dict[section_name -> dict[key -> value]]. Caller-supplied
+            sections for facts none of the categories above cover (e.g. runtime
+            latch state resolved at session start). Emitted right after
+            [loaded_checkpoints]; insertion order is preserved within each section.
     """
     lines: list[str] = [
         "# Hyperparameters dump",
@@ -229,6 +247,10 @@ def dump_hyperparameters(
         key_width = max(len(k) for k in keys)
         for key in keys:
             lines.append(f"{key.ljust(key_width)} = {loaded_checkpoints[key]}")
+        lines.append("")
+
+    for section_name, values in (extra_sections or {}).items():
+        lines.extend(_dump_extra_section(section_name, values))
         lines.append("")
 
     for module in modules or []:
