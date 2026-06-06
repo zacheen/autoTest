@@ -226,7 +226,7 @@ LR_RESUME_WARMUP_STEPS  = 2000  # Extra warmup on every restart, including first
 # ── replay buffer ────────────────────────────────────────────────────
 BUFFER_CAPACITY = 2048
 SAVE_CAPACITY   = 512
-MINIMUM_DATA_SIZE = 200 # min(BUFFER_CAPACITY, SAVE_CAPACITY*4)-1  # below this amount, won't start training
+MINIMUM_DATA_SIZE = min(BUFFER_CAPACITY, SAVE_CAPACITY*4)-1  # below this amount, won't start training
 PENDING_SAMPLE_RATIO = 0.10
 PENDING_EXTRA_CAPACITY = 500
 BUFFER_OVERFLOW = 256
