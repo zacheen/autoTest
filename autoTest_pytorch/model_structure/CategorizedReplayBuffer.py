@@ -611,6 +611,19 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
             entry["sample_count"] = int(entry.get("sample_count", 0)) + 1
         return result
 
+    def allocate_storage_id(self) -> int:
+        """Hand out the next global storage id and advance the counter.
+
+        This is the single id source for every transition_<id>.pt file, shared by
+        the main store's own ``store`` and by the pending store (injected as its
+        ``id_allocator``). One counter means a transition is born with its final id
+        and filename and is never renamed; the pending→main promotion just moves the
+        entry between lists, reusing that same id (see ``store``'s ``storage_id`` arg).
+        """
+        storage_id = self.next_storage_id
+        self.next_storage_id += 1
+        return storage_id
+
     def store(
         self,
         state,
@@ -624,6 +637,7 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         initial_priority=None,
         quantile_spread=0.0,
         transition_ref=None,
+        storage_id=None,
     ):
         """Store a transition.
 
@@ -633,10 +647,16 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         in RAM mode. This lets the pending store hand its already-written transition
         file (or already-cloned dict) to the main store on commit without re-serializing,
         moving, or re-cloning it. ``state`` / ``next_state`` are ignored when a ref is given.
+
+        ``storage_id`` is supplied together with ``transition_ref`` on the commit path:
+        the pending store already allocated the id (from this store's shared allocator)
+        and wrote ``transition_<storage_id>.pt`` under it, so the adopted entry keeps that
+        id — the index entry's id matches its filename and the counter is NOT advanced
+        again. When ``storage_id is None`` (direct store) a fresh id is allocated.
         """
         self.insert_counter += 1
-        storage_id = self.next_storage_id
-        self.next_storage_id += 1
+        if storage_id is None:
+            storage_id = self.allocate_storage_id()
 
         if transition_ref is None:
             transition_ref = self._save_transition(state, next_state, storage_id, "transition")
@@ -678,11 +698,13 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
         tail_reward=None,
         quantile_spread=0.0,
         transition_ref=None,
+        storage_id=None,
     ):
         """Store data whose PER priority is already known.
 
-        ``transition_ref`` is forwarded to ``store`` so an already-saved transition
-        reference can be adopted without re-serialization (see ``store``).
+        ``transition_ref`` and ``storage_id`` are forwarded to ``store`` so an
+        already-saved transition can be adopted under its existing id without
+        re-serialization or a rename (see ``store``).
         """
         return self.store(
             state,
@@ -696,6 +718,7 @@ class _PrioritizedReplayStore(_ReplayStoreBase):
             initial_priority=priority,
             quantile_spread=quantile_spread,
             transition_ref=transition_ref,
+            storage_id=storage_id,
         )
 
     def update_priorities(self, sample_indices, td_errors, quantile_spreads=None):
@@ -1020,11 +1043,14 @@ class _PendingReplayStore(_ReplayStoreBase):
         sample_ratio: float = 0.10,
         storage_mode: str = "ram",
         save_dir=None,
+        id_allocator=None,
     ) -> None:
         if extra_capacity < 0:
             raise ValueError(f"extra_capacity must be >= 0, got {extra_capacity}")
         if not 0.0 <= sample_ratio <= 1.0:
             raise ValueError(f"sample_ratio must be in [0, 1], got {sample_ratio}")
+        if id_allocator is None:
+            raise ValueError("id_allocator (the main store's shared id source) is required")
 
         super().__init__(config=config, storage_mode=storage_mode, save_dir=save_dir)
         self.extra_capacity = int(extra_capacity)
@@ -1032,16 +1058,22 @@ class _PendingReplayStore(_ReplayStoreBase):
         self._reward_types = tuple(self.REWARD_TYPES)
         self._buckets = {reward_type: deque() for reward_type in self._reward_types}
         self._seen_counts = {reward_type: 0 for reward_type in self._reward_types}
-        self._next_pending_id = 0
+        # Shared with the main store: pending and main draw storage ids from the same
+        # counter, so a transition gets one id (and one transition_<id>.pt filename) for
+        # life. Promotion reuses that id — no second id, no rename (see _commit_pending_entries).
+        self._id_allocator = id_allocator
 
         # Pending is a transient staging area: it is never serialized or restored
         # (save_persistent / export_top_k / _load_persistent_buffer touch the main
-        # store only). It shares the main store's save_dir, so on startup clear any
-        # pending_*.pt left behind by a crashed run. The "pending_" prefix scopes this
-        # glob to pending files only — it never matches the main store's state_*.pt.
-        # The base __init__ already created save_dir in disk mode, so this is safe.
+        # store only). It shares the main store's save_dir. With a single unified
+        # transition_<id>.pt scheme, the filename prefix no longer distinguishes pending
+        # from main, so on startup clear ALL stale .pt left behind by a crashed run.
+        # This is safe: the pending store is constructed before any transition is written
+        # and while the main index is still empty, and _load_persistent_buffer performs
+        # the same *.pt wipe before repopulating. The base __init__ already created
+        # save_dir in disk mode. (This pass also sweeps legacy pending_transition_*.pt.)
         if self.storage_mode == "disk":
-            for stale_path in self.save_dir.glob("pending_*.pt"):
+            for stale_path in self.save_dir.glob("*.pt"):
                 stale_path.unlink()
 
     def size(self) -> int:
@@ -1103,14 +1135,16 @@ class _PendingReplayStore(_ReplayStoreBase):
             return False
 
         bucket = self._buckets[reward_type]
-        pending_id = self._next_pending_id
-        self._next_pending_id += 1  # always advance, even on reject, so ids never repeat
+        # Draw the global storage id up front so the file is born under its final name.
+        # Allocate even on a branch that later rejects the entry — ids never repeat, and
+        # the main store does not require contiguous ids.
+        storage_id = self._id_allocator()
 
         # Build metadata only. The (multi-MB) state tensors are written lazily by
         # _materialize() — and ONLY on a branch that actually keeps the entry — so a
         # rejected transition never writes a .pt file that would then leak on disk.
         entry = {
-            "pending_id": pending_id,
+            "storage_id": storage_id,
             "action": action.copy() if isinstance(action, np.ndarray) else np.array(action),
             "reward": float(reward),
             "tail_reward": bucket_reward,
@@ -1122,11 +1156,11 @@ class _PendingReplayStore(_ReplayStoreBase):
 
         def _materialize() -> None:
             # Reuse the shared storage backend: disk mode writes ONE uint8
-            # pending_transition_*.pt and stores its path; RAM mode stores a dict of
-            # cloned tensors. The "pending_transition_" prefix keeps these files from
-            # colliding with the main store's transition_*.pt in the shared save_dir.
+            # transition_<storage_id>.pt and stores its path; RAM mode stores a dict of
+            # cloned tensors. The id comes from the shared allocator, so on commit the
+            # main store adopts this exact file by reference under the same id — no rename.
             entry["transition"] = self._save_transition(
-                state, next_state, pending_id, "pending_transition"
+                state, next_state, storage_id, "transition"
             )
             bucket.append(entry)
 
@@ -1171,7 +1205,7 @@ class _PendingReplayStore(_ReplayStoreBase):
                 continue
             picked = random.sample(bucket_entries, k=take)
             selected.extend(picked)
-            selected_ids.update(entry["pending_id"] for entry in picked)
+            selected_ids.update(entry["storage_id"] for entry in picked)
 
         remaining = count - len(selected)
         if remaining > 0:
@@ -1179,7 +1213,7 @@ class _PendingReplayStore(_ReplayStoreBase):
                 entry
                 for reward_type in self._reward_types
                 for entry in self._buckets[reward_type]
-                if entry["pending_id"] not in selected_ids
+                if entry["storage_id"] not in selected_ids
             ]
             if leftovers:
                 selected.extend(random.sample(leftovers, k=min(remaining, len(leftovers))))
@@ -1193,7 +1227,7 @@ class _PendingReplayStore(_ReplayStoreBase):
             self._buckets[reward_type] = deque(
                 entry
                 for entry in self._buckets[reward_type]
-                if entry["pending_id"] not in committed_ids
+                if entry["storage_id"] not in committed_ids
             )
 
     def _oldest_over_quota_type(
@@ -1209,7 +1243,7 @@ class _PendingReplayStore(_ReplayStoreBase):
             if len(bucket) <= max(0, int(capacities.get(reward_type, 0))):
                 continue
             if bucket:
-                candidates.append((bucket[0]["pending_id"], reward_type))
+                candidates.append((bucket[0]["storage_id"], reward_type))
         if not candidates:
             return None
         return min(candidates)[1]
@@ -1275,12 +1309,12 @@ class CategorizedReplayBuffer:
             config=balance_config,
         )
         self._main = main_store
-        # Pending shares the main store's save_dir — it does not need its own folder.
-        # Ownership of every .pt is tracked purely by which in-memory list holds the
-        # entry (_pending._buckets vs _main.index), never by location; on commit the
-        # file is adopted into _main.index by reference with its path unchanged. The
-        # "pending_" filename prefix is all that keeps pending_*.pt from colliding
-        # with the main store's state_*.pt / next_state_*.pt in the shared dir.
+        # Pending shares the main store's save_dir AND its storage-id counter (via
+        # id_allocator). Every transition therefore has one id and one
+        # transition_<id>.pt filename for life. Ownership is tracked purely by which
+        # in-memory list holds the entry (_pending._buckets vs _main.index), never by
+        # filename or location; on commit the file is adopted into _main.index by
+        # reference under its existing id — no rename, no re-serialize.
         pending_save_dir = (
             save_dir if storage_mode.lower() == "disk" and save_dir else None
         )
@@ -1291,6 +1325,7 @@ class CategorizedReplayBuffer:
                 sample_ratio=pending_sample_ratio,
                 storage_mode=storage_mode,
                 save_dir=pending_save_dir,
+                id_allocator=main_store.allocate_storage_id,
             )
             if pending_extra_capacity > 0 or pending_sample_ratio > 0
             else None
@@ -1531,8 +1566,10 @@ class CategorizedReplayBuffer:
             for entry, td_error, spread in zip(entries, td_values, spread_values):
                 priority = abs(float(td_error)) + self._main.priority_eps
                 # Zero-copy adoption: the pending store already wrote (disk mode) or
-                # cloned (RAM mode) the transition, so hand that single reference to the
-                # main store via transition_ref instead of re-serializing or moving it.
+                # cloned (RAM mode) the transition under a shared storage id, so hand that
+                # single reference AND its id to the main store instead of re-serializing,
+                # moving, or renaming it. Reusing storage_id means the index entry's id
+                # matches its transition_<id>.pt filename and the counter is not bumped.
                 self._main.store_prioritized(
                     None,
                     entry["action"],
@@ -1545,10 +1582,11 @@ class CategorizedReplayBuffer:
                     tail_reward=entry.get("tail_reward", entry["reward"]),
                     quantile_spread=spread,
                     transition_ref=entry["transition"],
+                    storage_id=entry["storage_id"],
                 )
-                committed_ids.add(entry["pending_id"])
+                committed_ids.add(entry["storage_id"])
         finally:
-            # Ownership of each adopted pending_*.pt has transferred to main, whose
+            # Ownership of each adopted transition_<id>.pt has transferred to main, whose
             # _prune_if_needed will unlink it later. Drop those entries from pending
             # bookkeeping WITHOUT deleting the file — in a `finally` so that even if an
             # iteration above raised, pending can never later prune (and delete) a file
