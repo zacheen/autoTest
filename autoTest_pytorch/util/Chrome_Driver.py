@@ -8,9 +8,9 @@ from webdriver_manager.chrome import ChromeDriverManager
 import os
 import sys
 import time
-# Same X-less guard as util/Click — see comment there. pyautogui here is only
-# touched on the non-headless paths plus the headless screen-size lookup, which
-# is bypassed by AUTOTEST_HEADLESS_VIEWPORT.
+# Same X-less guard as util/Click — see comment there. 
+  # pyautogui here is only touched on the non-headless paths (window focus + F11 fullscreen)
+  # headless path uses a fixed CDP viewport and never queries the screen.
 try:
     import pyautogui
 except Exception:
@@ -34,6 +34,13 @@ use_sel = 1
 # Single source of truth — used by both --force-device-scale-factor and the headless
 # CDP viewport override below.
 DEVICE_SCALE_FACTOR = 1.25
+
+# Headless viewport is a FIXED logical size, independent of the host screen, so the
+# page renders at identical pixel dimensions everywhere (local dev, CI, Colab) and
+# the agent's screen-coord templates stay valid regardless of whose monitor runs it.
+# Matches the Colab notebook's AUTOTEST_HEADLESS_VIEWPORT setting.
+# Override per-run via AUTOTEST_HEADLESS_VIEWPORT="WxH".
+HEADLESS_VIEWPORT = "1920x1080"
 
 class Chrome_Driver:
     def __init__(self, game_env):
@@ -72,24 +79,16 @@ class Chrome_Driver:
 
         if HEADLESS:
             # --window-size is unreliable in headless (Chrome defaults to ~800×600).
-            # Force the CSS viewport via CDP so that:
-            #   - CSS width / height = OS screen size / DPR
-            #   - get_screenshot_as_png() returns physical pixels = OS screen size
-            # This matches headed-mode behaviour (Chrome F11 fullscreen with
-            # DPR=DEVICE_SCALE_FACTOR), so existing templates keep working.
-            # AUTOTEST_HEADLESS_VIEWPORT="WxH" overrides pyautogui.size() for
-            # X-less environments (Colab) where pyautogui can't query the screen.
-            viewport_env = os.environ.get("AUTOTEST_HEADLESS_VIEWPORT")
-            if viewport_env:
-                screen_w, screen_h = map(int, viewport_env.lower().split("x"))
-            elif pyautogui is not None:
-                screen_w, screen_h = pyautogui.size()
-            else:
-                raise RuntimeError(
-                    "HEADLESS Chrome needs a viewport size, but pyautogui is "
-                    "unavailable (no X display?) and AUTOTEST_HEADLESS_VIEWPORT "
-                    "is not set. Set AUTOTEST_HEADLESS_VIEWPORT=1920x1080 (or similar)."
-                )
+            # Force the CSS viewport via CDP to a FIXED size (HEADLESS_VIEWPORT),
+            # not the host screen, so:
+            #   - CSS width / height = HEADLESS_VIEWPORT / DPR
+            #   - get_screenshot_as_png() returns physical pixels = HEADLESS_VIEWPORT
+            # The page therefore renders identically on every machine (and matches
+            # Colab), so existing screen-coord templates keep working. This also
+            # means no pyautogui screen query is needed — safe in X-less envs.
+            # AUTOTEST_HEADLESS_VIEWPORT="WxH" overrides the fixed default.
+            viewport = os.environ.get("AUTOTEST_HEADLESS_VIEWPORT", HEADLESS_VIEWPORT)
+            screen_w, screen_h = map(int, viewport.lower().split("x"))
             self.driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
                 "width": int(screen_w / DEVICE_SCALE_FACTOR),
                 "height": int(screen_h / DEVICE_SCALE_FACTOR),
