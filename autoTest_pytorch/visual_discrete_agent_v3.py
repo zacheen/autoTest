@@ -152,6 +152,7 @@ VISUAL_V3_REPLAY_PATH            = VISUAL_V3_REPLAY_BASE / "replay_buffer"
 VISUAL_V3_REPLAY_PERSISTENT_PATH = VISUAL_V3_REPLAY_BASE / "replay_buffer_save"
 VISUAL_V3_TENSORBOARD_DIR        = VISUAL_V3_MODEL_PATH / "tensorboard"
 VISUAL_V3_ACTION_LOG_PATH        = VISUAL_V3_MODEL_PATH / "action_logs"
+VISUAL_V3_LOSE_LOG_PATH          = VISUAL_V3_MODEL_PATH / "lose"
 
 # ── grid / batch ─────────────────────────────────────────────────────
 IMAGE_SIZE = (640, 640)
@@ -336,6 +337,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         self.replay_path = VISUAL_V3_REPLAY_PATH
         self.replay_persistent_path = VISUAL_V3_REPLAY_PERSISTENT_PATH
         self.action_log_path = VISUAL_V3_ACTION_LOG_PATH
+        self.lose_log_path = VISUAL_V3_LOSE_LOG_PATH
         self.image_size = IMAGE_SIZE
         self.save_capacity = SAVE_CAPACITY
         self.priority_min = PRIORITY_MIN

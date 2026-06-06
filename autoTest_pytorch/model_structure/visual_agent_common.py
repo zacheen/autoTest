@@ -499,71 +499,112 @@ class VisualAgentCommonMixin:
     def _should_log_action_image(self) -> bool:
         return bool(getattr(self, "_log_actions_this_episode", True))
 
+    def _render_action_image(self, state, log_info, step_count, reward=None) -> "Image.Image":
+        """Draw the clicked cell, grid lines, and Q/action text onto the state frame.
+
+        Returns the annotated PIL image. Shared by log_action_image (every-N-episode
+        action trace) and log_lose_image (every eval loss, for failure inspection).
+        """
+        from PIL import ImageDraw, ImageFont
+
+        img_array = state.detach().cpu().clamp(0, 1).mul(255).byte().numpy().transpose(1, 2, 0)
+        img = Image.fromarray(img_array)
+        img_w, img_h = img.size
+        grid_left, grid_top, grid_right, grid_bottom = _scaled_action_log_board_rect(img_w, img_h)
+        cell_w = (grid_right - grid_left) / self.grid_w
+        cell_h = (grid_bottom - grid_top) / self.grid_h
+
+        draw = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype("arial.ttf", 12)
+        except Exception:
+            font = ImageFont.load_default()
+
+        row, col = log_info["row"], log_info["col"]
+        left = int(round(grid_left + col * cell_w))
+        top = int(round(grid_top + row * cell_h))
+        right = int(round(grid_left + (col + 1) * cell_w))
+        bottom = int(round(grid_top + (row + 1) * cell_h))
+        draw.rectangle(
+            [left, top, right, bottom],
+            outline="red",
+            width=4,
+        )
+        for r in range(1, self.grid_h):
+            y = int(round(grid_top + r * cell_h))
+            draw.line([grid_left, y, grid_right, y], fill="white", width=1)
+        for c in range(1, self.grid_w):
+            x = int(round(grid_left + c * cell_w))
+            draw.line([x, grid_top, x, grid_bottom], fill="white", width=1)
+
+        lines = [
+            f"Step: {step_count}",
+            f"Action: {log_info['action_id']} -> ({row},{col})",
+            f"Source: {log_info.get('source', '?')}",
+        ]
+        if log_info.get("selected_q") is not None:
+            lines.append(f"Q: {log_info['selected_q']:.4f}")
+        top_actions = log_info.get("top_actions") or []
+        if top_actions:
+            lines.append("Top5 Q:")
+            for rank, item in enumerate(top_actions[:5], start=1):
+                action_id, top_row, top_col, top_q = item
+                lines.append(
+                    f"{rank}: {int(action_id)} ({int(top_row)},{int(top_col)}) {float(top_q):.4f}"
+                )
+        if reward is not None:
+            lines.append(f"Reward: {reward:.1f}")
+
+        text_y = 5
+        for line in lines:
+            bbox = draw.textbbox((5, text_y), line, font=font)
+            draw.rectangle(bbox, fill="black")
+            draw.text((5, text_y), line, fill="white", font=font)
+            text_y += 15
+
+        return img
+
+    def _save_action_image(
+        self, state, log_info, step_count, reward, *, out_dir, label, microsecond
+    ) -> None:
+        """Render the annotated frame and save it to out_dir. Shared save skeleton.
+
+        ``microsecond`` widens the timestamp so two frames written in the same second
+        (e.g. two eval episodes losing on the same step) do not overwrite each other.
+        """
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            img = self._render_action_image(state, log_info, step_count, reward)
+            fmt = "%Y%m%d_%H%M%S_%f" if microsecond else "%Y%m%d_%H%M%S"
+            ts = datetime.datetime.now().strftime(fmt)
+            img.save(out_dir / f"{ts}_step_{step_count:04d}.png")
+        except Exception as exc:
+            print(f"{self.log_prefix} {label} failed: {exc}")
+
     def log_action_image(self, state, log_info, step_count, reward=None) -> None:
         if not getattr(self, "log_actions", True) or log_info is None:
             return
         if not self._should_log_action_image():
             return
-        try:
-            from PIL import ImageDraw, ImageFont
+        self._save_action_image(
+            state, log_info, step_count, reward,
+            out_dir=self.action_log_path, label="log_action_image", microsecond=False,
+        )
 
-            self.action_log_path.mkdir(parents=True, exist_ok=True)
-            img_array = state.detach().cpu().clamp(0, 1).mul(255).byte().numpy().transpose(1, 2, 0)
-            img = Image.fromarray(img_array)
-            img_w, img_h = img.size
-            grid_left, grid_top, grid_right, grid_bottom = _scaled_action_log_board_rect(img_w, img_h)
-            cell_w = (grid_right - grid_left) / self.grid_w
-            cell_h = (grid_bottom - grid_top) / self.grid_h
+    def _lose_log_path(self) -> Path:
+        """Folder for eval-loss frames. Defaults to a `lose/` sibling of action_logs."""
+        return getattr(self, "lose_log_path", None) or (self.action_log_path.parent / "lose")
 
-            draw = ImageDraw.Draw(img)
-            try:
-                font = ImageFont.truetype("arial.ttf", 12)
-            except Exception:
-                font = ImageFont.load_default()
+    def log_lose_image(self, state, log_info, step_count, reward=None) -> None:
+        """Save the frame the agent saw right before an eval loss.
 
-            row, col = log_info["row"], log_info["col"]
-            left = int(round(grid_left + col * cell_w))
-            top = int(round(grid_top + row * cell_h))
-            right = int(round(grid_left + (col + 1) * cell_w))
-            bottom = int(round(grid_top + (row + 1) * cell_h))
-            draw.rectangle(
-                [left, top, right, bottom],
-                outline="red",
-                width=4,
-            )
-            for r in range(1, self.grid_h):
-                y = int(round(grid_top + r * cell_h))
-                draw.line([grid_left, y, grid_right, y], fill="white", width=1)
-            for c in range(1, self.grid_w):
-                x = int(round(grid_left + c * cell_w))
-                draw.line([x, grid_top, x, grid_bottom], fill="white", width=1)
-
-            lines = [
-                f"Step: {step_count}",
-                f"Action: {log_info['action_id']} -> ({row},{col})",
-                f"Source: {log_info.get('source', '?')}",
-            ]
-            if log_info.get("selected_q") is not None:
-                lines.append(f"Q: {log_info['selected_q']:.4f}")
-            top_actions = log_info.get("top_actions") or []
-            if top_actions:
-                lines.append("Top5 Q:")
-                for rank, item in enumerate(top_actions[:5], start=1):
-                    action_id, top_row, top_col, top_q = item
-                    lines.append(
-                        f"{rank}: {int(action_id)} ({int(top_row)},{int(top_col)}) {float(top_q):.4f}"
-                    )
-            if reward is not None:
-                lines.append(f"Reward: {reward:.1f}")
-
-            text_y = 5
-            for line in lines:
-                bbox = draw.textbbox((5, text_y), line, font=font)
-                draw.rectangle(bbox, fill="black")
-                draw.text((5, text_y), line, fill="white", font=font)
-                text_y += 15
-
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            img.save(self.action_log_path / f"{ts}_step_{step_count:04d}.png")
-        except Exception as exc:
-            print(f"{self.log_prefix} log_action_image failed: {exc}")
+        Unlike log_action_image, this ignores the every-N-episode action-trace gate:
+        every eval loss is captured so the operator can inspect whether the board was
+        genuinely undecidable or the loss came from a logic problem.
+        """
+        if not getattr(self, "log_actions", True) or log_info is None:
+            return
+        self._save_action_image(
+            state, log_info, step_count, reward,
+            out_dir=self._lose_log_path(), label="log_lose_image", microsecond=True,
+        )

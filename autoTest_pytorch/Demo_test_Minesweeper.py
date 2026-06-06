@@ -420,7 +420,7 @@ class Game_test_case(unittest.TestCase) :
         while not done and game_status.step_count < EVAL_MAX_STEPS_PER_EPISODE:
             check_pause()
             current_screenshot = self.capture_grid_state(game_status)
-            action, _ = agent.select_action(current_screenshot, add_noise=False)
+            action, log_info = agent.select_action(current_screenshot, add_noise=False)
             game_status.update_state(current_screenshot, action)
             row, col = agent.action_to_grid(action)
             game_status.click_attempt_count += 1
@@ -457,6 +457,15 @@ class Game_test_case(unittest.TestCase) :
                 game_status.game_over = 1
                 done = True
                 game_status.next_state = None
+                # Record the frame the agent saw before the fatal click (clicked
+                # cell highlighted + top-5 Q) so we can tell a genuinely
+                # undecidable board apart from a logic problem.
+                agent.log_lose_image(
+                    current_screenshot,
+                    log_info,
+                    game_status.step_count,
+                    reward=game_status.reward,
+                )
             elif server_status == "won":
                 game_status.reward = MINESWEEPER_REWARD_CONFIG.win
                 game_status.game_over = 1
