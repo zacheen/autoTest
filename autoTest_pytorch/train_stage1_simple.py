@@ -280,7 +280,7 @@ def run_fixed_policy_evaluation(logic, agent, num_episodes):
 
     return {
         'avg_reward':       eval_hist.avg_reward(window=None),
-        'win_rate':         eval_hist.win_rate(window=None) * 100,  # Percentage.
+        'win_rate':         eval_hist.win_rate(window=None),
         'avg_steps':        eval_hist.avg_steps(window=None),
         'avg_invalid_rate': eval_hist.avg_invalid_rate(window=None),
     }
@@ -418,7 +418,7 @@ def main():
             if episode % LOG_INTERVAL == 0:
                 hist = agent.training_history
                 avg_reward = hist.avg_reward(window=LOG_INTERVAL)
-                win_rate = hist.win_rate(window=LOG_INTERVAL) * 100
+                win_rate = hist.win_rate(window=LOG_INTERVAL)
                 elapsed = time.time() - start_time
                 eps_per_sec = episode / elapsed
 
@@ -431,7 +431,7 @@ def main():
                 print(f"[{now_str}] "
                       f"[Ep {episode:>6d}] "
                       f"Avg Reward: {avg_reward:>7.2f} | "
-                      f"Win Rate(50): {win_rate:>5.1f}% | "
+                      f"Win Rate(50): {win_rate:>6.1%} | "
                       f"Speed: {eps_per_sec:.1f} ep/s | "
                       f"Epsilon: {agent.epsilon:.4f}")
 
@@ -453,7 +453,7 @@ def main():
         print("--- Final Evaluation ---")
         final_eval = run_evaluation(logic, agent)
         print(f"Avg Reward: {final_eval['avg_reward']:.2f}")
-        print(f"Win Rate: {final_eval['win_rate']:.1f}%")
+        print(f"Win Rate: {final_eval['win_rate']:.1%}")
         print(f"Avg Steps: {final_eval['avg_steps']:.1f}")
         print(f"Invalid Rate: {final_eval['avg_invalid_rate']:.2%}")
 

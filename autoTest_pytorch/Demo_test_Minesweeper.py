@@ -401,7 +401,7 @@ class Game_test_case(unittest.TestCase) :
 
         return {
             "avg_reward": sum(rewards) / max(len(rewards), 1),
-            "win_rate": sum(wins) / max(len(wins), 1) * 100.0,
+            "win_rate": sum(wins) / max(len(wins), 1),
             "avg_steps": sum(steps) / max(len(steps), 1),
             "avg_invalid_rate": sum(invalid_rates) / max(len(invalid_rates), 1),
         }

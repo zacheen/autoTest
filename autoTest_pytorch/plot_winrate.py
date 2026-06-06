@@ -37,7 +37,7 @@ def main():
     plt.figure(figsize=(12, 6))
     plt.plot(episodes, win_rates, 'b-o', markersize=3, linewidth=1.5)
     plt.xlabel('Episode')
-    plt.ylabel('Win Rate (%)')
+    plt.ylabel('Win Rate')
     plt.title('Validation Win Rate')
     plt.grid(True, alpha=0.3)
     plt.ylim(bottom=0)
@@ -45,9 +45,9 @@ def main():
     # Annotate the best point.
     max_wr = max(win_rates)
     max_ep = episodes[win_rates.index(max_wr)]
-    plt.annotate(f'Best: {max_wr:.1f}% @ ep{max_ep}',
+    plt.annotate(f'Best: {max_wr:.1%} @ ep{max_ep}',
                  xy=(max_ep, max_wr),
-                 xytext=(max_ep + len(episodes) * 0.05, max_wr + 3),
+                 xytext=(max_ep + len(episodes) * 0.05, max_wr + 0.03),
                  arrowprops=dict(arrowstyle='->', color='red'),
                  fontsize=10, color='red')
 

@@ -52,10 +52,19 @@ def log_eval_metrics(
     seconds_since_last_eval: float | None = None,
     duration_seconds: float | None = None,
     console_prefix: str = "EVAL",
+    log_win_rate_tb: bool = True,
 ) -> None:
-    """Write eval metrics to TensorBoard, CSV, and console."""
+    """Write eval metrics to TensorBoard, CSV, and console.
+
+    ``win_rate`` is a 0~1 fraction. ``log_win_rate_tb=False`` suppresses the
+    standalone ``eval/win_rate`` TB tag (CSV is always kept); v3 uses this so the
+    eval win rate is shown only via the train/eval sub-run overlay.
+    """
     logger.log("eval/avg_reward", avg_reward, step=episode, csv_col="eval_avg_reward")
-    logger.log("eval/win_rate", win_rate, step=episode, csv_col="eval_win_rate")
+    logger.log(
+        "eval/win_rate", win_rate, step=episode, csv_col="eval_win_rate",
+        tb=log_win_rate_tb,
+    )
     logger.log("eval/avg_steps", avg_steps, step=episode, csv_col="eval_avg_steps")
     logger.log(
         "eval/avg_invalid_rate",
@@ -91,7 +100,7 @@ def log_eval_metrics(
     print(
         f"[{console_prefix} Ep {episode}] "
         f"Avg Reward: {avg_reward:.3f} | "
-        f"Win Rate: {win_rate:.1f}% | "
+        f"Win Rate: {win_rate:.1%} | "
         f"Avg Steps: {avg_steps:.1f} | "
         f"Invalid Rate: {avg_invalid_rate:.2%}"
         f"{suffix}"

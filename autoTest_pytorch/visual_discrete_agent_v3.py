@@ -540,6 +540,11 @@ class VisualAgentV3(VisualAgentCommonMixin):
             csv_fields=csv_fields,
             tb_writer=SummaryWriter(log_dir=str(self.tensorboard_log_dir)),
         )
+        # Win-rate overlay: train vs eval win rate share one TB chart by writing the
+        # SAME tag ("win_rate", 0~1) to two sub-run dirs. TB groups same-tag scalars
+        # across runs onto one chart with distinct colors, aligned on the episode step.
+        self._wr_train_writer = SummaryWriter(log_dir=str(self.tensorboard_log_dir / "train"))
+        self._wr_eval_writer = SummaryWriter(log_dir=str(self.tensorboard_log_dir / "eval"))
         self.archive.register_on_rollover(
             lambda new_dir: self.training_logger.swap_csv_to(new_dir / "training_log.csv")
         )
@@ -1413,7 +1418,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # noise is high; `is_win` remains in CSV for arbitrary rolling windows.
         self.training_logger.log("episode/reward_mean",        float(reward_mean),        step=ep_idx, csv_col="reward_mean")
         self.training_logger.log("episode/invalid_click_rate", float(invalid_click_rate), step=ep_idx, csv_col="invalid_click_rate")
-        self.training_logger.log("episode/win_rate_recent",    rolling_wr,                step=ep_idx, csv_col="win_rate_recent")
+        # Standalone TB tag dropped (tb=False) in favour of the train/eval "win_rate"
+        # overlay below; CSV column win_rate_recent is kept. rolling_wr is already 0~1.
+        self.training_logger.log("episode/win_rate_recent",    rolling_wr,                step=ep_idx, csv_col="win_rate_recent", tb=False)
+        self._wr_train_writer.add_scalar("win_rate", rolling_wr, ep_idx)
         self.training_logger.log("is_win",                     int(bool(win)),            step=ep_idx, tb=False)
         self.training_logger.log("epsilon",                    next_eps,                  step=ep_idx, tb=False)  # TB side is written by on_episode_end.
         self.training_logger.log("timestamp",                  datetime.datetime.now().isoformat(), step=ep_idx, tb=False)
@@ -1421,6 +1429,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
 
         self.training_logger.commit_csv_row()
         self.training_logger.flush()
+        self._wr_train_writer.flush()
 
         status = "WIN " if win else "LOSE"
         print(
@@ -1442,7 +1451,9 @@ class VisualAgentV3(VisualAgentCommonMixin):
         seconds_since_last_eval: float,
         duration_seconds: float,
     ) -> None:
-        """Record one fixed-policy evaluation summary."""
+        """Record one fixed-policy evaluation summary. win_rate is a 0~1 fraction."""
+        # Suppress the standalone eval/win_rate TB tag; the eval win rate is shown via
+        # the train/eval "win_rate" overlay instead. CSV eval_win_rate is still written.
         log_eval_metrics_common(
             self.training_logger,
             episode=self.episode_count,
@@ -1453,7 +1464,10 @@ class VisualAgentV3(VisualAgentCommonMixin):
             seconds_since_last_eval=seconds_since_last_eval,
             duration_seconds=duration_seconds,
             console_prefix="V3 EVAL",
+            log_win_rate_tb=False,
         )
+        self._wr_eval_writer.add_scalar("win_rate", win_rate, self.episode_count)
+        self._wr_eval_writer.flush()
 
     def _scan_state_dict_finite(self, sd_label, state_dict):
         """Scan all floating tensors in a state_dict and return [(label, msg)].
@@ -1842,6 +1856,14 @@ class VisualAgentV3(VisualAgentCommonMixin):
         logger = getattr(self, "training_logger", None)
         if logger is not None and not logger.closed:
             logger.close()
+        # win_rate overlay sub-run writers live outside training_logger.
+        for attr in ("_wr_train_writer", "_wr_eval_writer"):
+            writer = getattr(self, attr, None)
+            if writer is not None:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
 
     # ──────────────────────────── action image log ─────────────────────
 
