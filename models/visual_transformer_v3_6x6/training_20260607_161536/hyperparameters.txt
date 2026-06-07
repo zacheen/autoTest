@@ -1,0 +1,449 @@
+# Hyperparameters dump
+# Session:   training_20260607_161536
+# Timestamp: 2026-06-07T16:15:42
+# Git:       ce4b7e6 (dirty: False)
+
+[loaded_checkpoints]
+backbone         = models\visual_transformer_v3_6x6\backbone.pth
+optimizer_state  = models\visual_transformer_v3_6x6\optimizer_state.pth
+q_network        = models\visual_transformer_v3_6x6\fqf_network.pth
+q_target         = models\visual_transformer_v3_6x6\fqf_target.pth
+replay_buffer    = models\visual_transformer_v3_6x6\training_state.pth
+training_history = models\visual_transformer_v3_6x6\training_history.pth
+yolo_backbone    = yolo11n.pt
+
+[yolo_update_latch]
+active_at_start = True
+win_rate_at_start = 0.97
+wr_threshold = 0.4
+
+[visual_discrete_agent_v3]
+AGE_DECAY = 0.002
+BATCH_SIZE = 64
+BUFFER_CAPACITY = 2048
+BUFFER_OVERFLOW = 256
+DECODER_DROPOUT = 0.1
+DECODER_D_MODEL = 64
+DECODER_FF_DIM = 256
+DECODER_NHEAD = 4
+DECODER_NUM_LAYERS = 4
+DEFAULT_ENCODER_DIMS = [64, 64, 64, 64, 64]
+DEFAULT_ENCODER_FF_MULT = 4
+DIAGNOSTIC_LOG_EVERY = 10
+DROPOUT_LATCH_WR_THRESHOLD = 0.4
+ENCODER_DIMS = [64, 64, 64, 64, 64]
+FQF_ENTROPY_COEF = 0.001
+FQF_HUBER_KAPPA = 1.0
+GRAD_CLIP_NORM = 10.0
+GRID_H = 6
+GRID_W = 6
+HISTOGRAM_EVERY = 200
+IMAGE_SIZE = (640, 640)
+LOG_ACTIONS = True
+LR_BACKBONE_PRETRAINED = 5e-06
+LR_RESUME_WARMUP_STEPS = 2000
+LR_WARMUP_START_FACTOR = 0.0
+LR_WARMUP_STEPS = 2000
+LR_YOLO = 2e-06
+MINIMUM_DATA_SIZE = 2047
+NUM_ACTIONS = 36
+NUM_FQF_FRACTIONS = 8
+N_STEP = 1
+PENDING_EXTRA_CAPACITY = 500
+PENDING_SAMPLE_RATIO = 0.1
+PER_ALPHA = 0.6
+PER_BETA_END = 1.0
+PER_BETA_EP = 5000
+PER_BETA_START = 0.4
+PER_UNIFORM_MIX = 0.2
+PRIORITY_EPS = 0.001
+PRIORITY_MAX = 5.0
+PRIORITY_MIN = 0.05
+SAVE_CAPACITY = 512
+SAVE_EVERY_N_EPISODES = 500
+SEED = 1607491860
+SPREAD_DECAY = 2.0
+SPREAD_DECAY_LATCH_WR_THRESHOLD = 0.4
+STAGE1_CKPT_DIR = models\stage1_transformer
+TARGET_UPDATE_FREQ = 400
+TRAIN_EVERY_N_STEPS = 1
+TRANSFORMER_MODEL_PATH = models\stage1_transformer
+USE_AMP = True
+USE_FLASH_SDP = True
+USE_MATH_SDP = True
+USE_MEM_EFFICIENT_SDP = True
+VISUAL_V3_ACTION_LOG_PATH = models\visual_transformer_v3_6x6\action_logs
+VISUAL_V3_LOSE_LOG_PATH = models\visual_transformer_v3_6x6\lose
+VISUAL_V3_MODEL_PATH = models\visual_transformer_v3_6x6
+VISUAL_V3_REPLAY_BASE = C:\dont_move\temp\autotest
+VISUAL_V3_REPLAY_PATH = C:\dont_move\temp\autotest\replay_buffer
+VISUAL_V3_REPLAY_PERSISTENT_PATH = C:\dont_move\temp\autotest\replay_buffer_save
+VISUAL_V3_TENSORBOARD_DIR = models\visual_transformer_v3_6x6\tensorboard
+WEIGHT_DISTANCE_LOG_EVERY = 100
+YOLO_UNFREEZE_WR_THRESHOLD = 0.4
+
+[reward_config]
+gamma = 0.9
+invalid_click = -0.75
+lose = -0.7
+valid_click = 0.5
+win = 1
+
+[epsilon_controller]
+wr_min = 0.2
+wr_max = 0.85
+eps_min = 0.02
+eps_max = 0.3
+
+[optimizer (AdamW)]
+amsgrad = False
+betas = (0.9, 0.999)
+capturable = False
+decoupled_weight_decay = True
+differentiable = False
+eps = 1e-08
+foreach = False
+fused = False
+maximize = False
+weight_decay = 1e-05
+group_0.lr = 5e-05
+group_1.lr = 5e-06
+group_2.lr = 2e-06
+group_3.lr = 5e-05
+
+[model.backbone]
+# Freeze status (per top-level submodule, derived from param.requires_grad)
+decoder: trainable, params=267,008
+encoder: trainable, params=199,936
+feature_extractor: mixed (trainable=307,376/309,600), params=309,600
+query_tokens: trainable, params=2,304
+token_adapter: trainable, params=8,512
+TOTAL: params=787,360 (trainable=785,136, frozen=2,224)
+
+# torchinfo summary (input_size=(1, 3, 640, 640))
+===================================================================================================================
+Layer (type:depth-idx)                                            Output Shape              Param #
+===================================================================================================================
+VisualBackboneV3                                                  [1, 36, 64]               2,304
+├─YOLO11nLastFeatureExtractor: 1-1                                [1, 128, 40, 40]          --
+│    └─ModuleList: 2-1                                            --                        --
+│    │    └─Conv: 3-1                                             [1, 16, 320, 320]         --
+│    │    │    └─Conv2d: 4-1                                      [1, 16, 320, 320]         432
+│    │    │    └─BatchNorm2d: 4-2                                 [1, 16, 320, 320]         (32)
+│    │    └─C3k2: 3-24                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-32                                 --                        (recursive)
+│    │    │    │    └─C3k: 5-31                                   --                        (recursive)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-1               [1, 16, 320, 320]         --
+│    │    └─Conv: 3-3                                             [1, 32, 160, 160]         --
+│    │    │    └─Conv2d: 4-4                                      [1, 32, 160, 160]         4,608
+│    │    │    └─BatchNorm2d: 4-5                                 [1, 32, 160, 160]         (64)
+│    │    └─C3k2: 3-24                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-32                                 --                        (recursive)
+│    │    │    │    └─C3k: 5-31                                   --                        (recursive)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-2               [1, 32, 160, 160]         --
+│    │    └─C3k2: 3-5                                             [1, 64, 160, 160]         5,552
+│    │    │    └─Conv: 4-7                                        [1, 32, 160, 160]         --
+│    │    │    │    └─Conv2d: 5-3                                 [1, 32, 160, 160]         1,024
+│    │    │    │    └─BatchNorm2d: 5-4                            [1, 32, 160, 160]         (64)
+│    │    └─C3k2: 3-24                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-32                                 --                        (recursive)
+│    │    │    │    └─C3k: 5-31                                   --                        (recursive)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-3               [1, 32, 160, 160]         --
+│    │    └─C3k2: 3-11                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-11                                 --                        (recursive)
+│    │    │    │    └─Bottleneck: 5-6                             [1, 16, 160, 160]         1,184
+│    │    │    │    │    └─Conv: 6-4                              [1, 8, 160, 160]          --
+│    │    │    │    │    │    └─Conv2d: 7-4                       [1, 8, 160, 160]          1,152
+│    │    │    │    │    │    └─BatchNorm2d: 7-5                  [1, 8, 160, 160]          (16)
+│    │    └─C3k2: 3-24                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-32                                 --                        (recursive)
+│    │    │    │    └─C3k: 5-31                                   --                        (recursive)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-4               [1, 8, 160, 160]          --
+│    │    └─C3k2: 3-11                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-11                                 --                        (recursive)
+│    │    │    │    └─Bottleneck: 5-8                             --                        (recursive)
+│    │    │    │    │    └─Conv: 6-6                              [1, 16, 160, 160]         --
+│    │    │    │    │    │    └─Conv2d: 7-7                       [1, 16, 160, 160]         1,152
+│    │    │    │    │    │    └─BatchNorm2d: 7-8                  [1, 16, 160, 160]         (32)
+│    │    └─C3k2: 3-24                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-32                                 --                        (recursive)
+│    │    │    │    └─C3k: 5-31                                   --                        (recursive)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-5               [1, 16, 160, 160]         --
+│    │    └─C3k2: 3-11                                            --                        (recursive)
+│    │    │    └─Conv: 4-13                                       [1, 64, 160, 160]         --
+│    │    │    │    └─Conv2d: 5-10                                [1, 64, 160, 160]         3,072
+│    │    │    │    └─BatchNorm2d: 5-11                           [1, 64, 160, 160]         (128)
+│    │    └─C3k2: 3-24                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-32                                 --                        (recursive)
+│    │    │    │    └─C3k: 5-31                                   --                        (recursive)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-6               [1, 64, 160, 160]         --
+│    │    └─Conv: 3-13                                            [1, 64, 80, 80]           --
+│    │    │    └─Conv2d: 4-15                                     [1, 64, 80, 80]           36,864
+│    │    │    └─BatchNorm2d: 4-16                                [1, 64, 80, 80]           (128)
+│    │    └─C3k2: 3-24                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-32                                 --                        (recursive)
+│    │    │    │    └─C3k: 5-31                                   --                        (recursive)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-7               [1, 64, 80, 80]           --
+│    │    └─C3k2: 3-15                                            [1, 128, 80, 80]          21,856
+│    │    │    └─Conv: 4-18                                       [1, 64, 80, 80]           --
+│    │    │    │    └─Conv2d: 5-14                                [1, 64, 80, 80]           4,096
+│    │    │    │    └─BatchNorm2d: 5-15                           [1, 64, 80, 80]           (128)
+│    │    └─C3k2: 3-24                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-32                                 --                        (recursive)
+│    │    │    │    └─C3k: 5-31                                   --                        (recursive)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-8               [1, 64, 80, 80]           --
+│    │    └─C3k2: 3-21                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-22                                 --                        (recursive)
+│    │    │    │    └─Bottleneck: 5-17                            [1, 32, 80, 80]           4,672
+│    │    │    │    │    └─Conv: 6-11                             [1, 16, 80, 80]           --
+│    │    │    │    │    │    └─Conv2d: 7-13                      [1, 16, 80, 80]           4,608
+│    │    │    │    │    │    └─BatchNorm2d: 7-14                 [1, 16, 80, 80]           (32)
+│    │    └─C3k2: 3-24                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-32                                 --                        (recursive)
+│    │    │    │    └─C3k: 5-31                                   --                        (recursive)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-9               [1, 16, 80, 80]           --
+│    │    └─C3k2: 3-21                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-22                                 --                        (recursive)
+│    │    │    │    └─Bottleneck: 5-19                            --                        (recursive)
+│    │    │    │    │    └─Conv: 6-13                             [1, 32, 80, 80]           --
+│    │    │    │    │    │    └─Conv2d: 7-16                      [1, 32, 80, 80]           4,608
+│    │    │    │    │    │    └─BatchNorm2d: 7-17                 [1, 32, 80, 80]           (64)
+│    │    └─C3k2: 3-24                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-32                                 --                        (recursive)
+│    │    │    │    └─C3k: 5-31                                   --                        (recursive)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-10              [1, 32, 80, 80]           --
+│    │    └─C3k2: 3-21                                            --                        (recursive)
+│    │    │    └─Conv: 4-24                                       [1, 128, 80, 80]          --
+│    │    │    │    └─Conv2d: 5-21                                [1, 128, 80, 80]          12,288
+│    │    │    │    └─BatchNorm2d: 5-22                           [1, 128, 80, 80]          (256)
+│    │    └─C3k2: 3-24                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-32                                 --                        (recursive)
+│    │    │    │    └─C3k: 5-31                                   --                        (recursive)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-11              [1, 128, 80, 80]          --
+│    │    └─Conv: 3-23                                            [1, 128, 40, 40]          --
+│    │    │    └─Conv2d: 4-26                                     [1, 128, 40, 40]          147,456
+│    │    │    └─BatchNorm2d: 4-27                                [1, 128, 40, 40]          (256)
+│    │    └─C3k2: 3-24                                            --                        (recursive)
+│    │    │    └─ModuleList: 4-32                                 --                        (recursive)
+│    │    │    │    └─C3k: 5-31                                   --                        (recursive)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-12              [1, 128, 40, 40]          --
+│    │    └─C3k2: 3-25                                            [1, 128, 40, 40]          --
+│    │    │    └─Conv: 4-29                                       [1, 128, 40, 40]          --
+│    │    │    │    └─Conv2d: 5-25                                [1, 128, 40, 40]          16,384
+│    │    │    │    └─BatchNorm2d: 5-26                           [1, 128, 40, 40]          (256)
+│    │    │    └─ModuleList: 4-32                                 --                        (recursive)
+│    │    │    │    └─C3k: 5-31                                   --                        (recursive)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-13              [1, 128, 40, 40]          --
+│    │    │    │    └─C3k: 5-28                                   [1, 64, 40, 40]           --
+│    │    │    │    │    └─Conv: 6-18                             [1, 32, 40, 40]           --
+│    │    │    │    │    │    └─Conv2d: 7-22                      [1, 32, 40, 40]           2,048
+│    │    │    │    │    │    └─BatchNorm2d: 7-23                 [1, 32, 40, 40]           (64)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-14              [1, 32, 40, 40]           --
+│    │    │    │    │    └─Sequential: 6-20                       [1, 32, 40, 40]           --
+│    │    │    │    │    │    └─Bottleneck: 7-25                  [1, 32, 40, 40]           9,280
+│    │    │    │    │    │    │    └─Conv: 8-15                   [1, 32, 40, 40]           --
+│    │    │    │    │    │    │    │    └─Conv2d: 9-15            [1, 32, 40, 40]           9,216
+│    │    │    │    │    │    │    │    └─BatchNorm2d: 9-16       [1, 32, 40, 40]           (64)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-17              [1, 32, 40, 40]           --
+│    │    │    │    │    │    └─Bottleneck: 7-27                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-17                   [1, 32, 40, 40]           --
+│    │    │    │    │    │    │    │    └─Conv2d: 9-18            [1, 32, 40, 40]           9,216
+│    │    │    │    │    │    │    │    └─BatchNorm2d: 9-19       [1, 32, 40, 40]           (64)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-20              [1, 32, 40, 40]           --
+│    │    │    │    │    │    └─Bottleneck: 7-29                  [1, 32, 40, 40]           --
+│    │    │    │    │    │    │    └─Conv: 8-19                   [1, 32, 40, 40]           --
+│    │    │    │    │    │    │    │    └─Conv2d: 9-21            [1, 32, 40, 40]           9,216
+│    │    │    │    │    │    │    │    └─BatchNorm2d: 9-22       [1, 32, 40, 40]           (64)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-23              [1, 32, 40, 40]           --
+│    │    │    │    │    │    │    └─Conv: 8-21                   [1, 32, 40, 40]           --
+│    │    │    │    │    │    │    │    └─Conv2d: 9-24            [1, 32, 40, 40]           9,216
+│    │    │    │    │    │    │    │    └─BatchNorm2d: 9-25       [1, 32, 40, 40]           (64)
+│    │    │    │    │    │    │    │    └─SiLU: 9-26              [1, 32, 40, 40]           --
+│    │    │    │    │    └─Conv: 6-21                             [1, 32, 40, 40]           --
+│    │    │    │    │    │    └─Conv2d: 7-30                      [1, 32, 40, 40]           2,048
+│    │    │    │    │    │    └─BatchNorm2d: 7-31                 [1, 32, 40, 40]           (64)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-27              [1, 32, 40, 40]           --
+│    │    │    │    │    └─Conv: 6-23                             [1, 64, 40, 40]           --
+│    │    │    │    │    │    └─Conv2d: 7-33                      [1, 64, 40, 40]           4,096
+│    │    │    │    │    │    └─BatchNorm2d: 7-34                 [1, 64, 40, 40]           (128)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-28              [1, 64, 40, 40]           --
+│    │    │    └─Conv: 4-31                                       [1, 128, 40, 40]          --
+│    │    │    │    └─Conv2d: 5-29                                [1, 128, 40, 40]          24,576
+│    │    │    │    └─BatchNorm2d: 5-30                           [1, 128, 40, 40]          (256)
+│    │    │    └─ModuleList: 4-32                                 --                        (recursive)
+│    │    │    │    └─C3k: 5-31                                   --                        (recursive)
+│    │    │    │    │    └─Sequential: 6-25                       --                        (recursive)
+│    │    │    │    │    │    └─Bottleneck: 7-36                  --                        (recursive)
+│    │    │    │    │    │    │    └─Conv: 8-24                   --                        (recursive)
+│    │    │    │    │    │    │    │    └─SiLU: 9-29              [1, 128, 40, 40]          --
+├─Sequential: 1-2                                                 [1, 1600, 64]             --
+│    └─LayerNorm: 2-2                                             [1, 1600, 128]            256
+│    └─Linear: 2-3                                                [1, 1600, 64]             8,256
+├─FixedSinusoidalPositionEmbedding: 1-3                           [1600, 64]                --
+├─HierarchicalEncoder: 1-4                                        [1, 1600, 64]             --
+│    └─ModuleList: 2-4                                            --                        --
+│    │    └─HierarchicalEncoderLayer: 3-26                        [1, 1600, 64]             --
+│    │    │    └─TransformerEncoderLayer: 4-33                    [1, 1600, 64]             --
+│    │    │    │    └─LayerNorm: 5-32                             [1, 1600, 64]             128
+│    │    │    │    └─MultiheadAttention: 5-33                    [1, 1600, 64]             16,640
+│    │    │    │    └─Dropout: 5-34                               [1, 1600, 64]             --
+│    │    │    │    └─LayerNorm: 5-35                             [1, 1600, 64]             128
+│    │    │    │    └─Linear: 5-36                                [1, 1600, 256]            16,640
+│    │    │    │    └─Dropout: 5-37                               [1, 1600, 256]            --
+│    │    │    │    └─Linear: 5-38                                [1, 1600, 64]             16,448
+│    │    │    │    └─Dropout: 5-39                               [1, 1600, 64]             --
+│    │    │    └─Identity: 4-34                                   [1, 1600, 64]             --
+│    │    └─HierarchicalEncoderLayer: 3-27                        [1, 1600, 64]             --
+│    │    │    └─TransformerEncoderLayer: 4-35                    [1, 1600, 64]             --
+│    │    │    │    └─LayerNorm: 5-40                             [1, 1600, 64]             128
+│    │    │    │    └─MultiheadAttention: 5-41                    [1, 1600, 64]             16,640
+│    │    │    │    └─Dropout: 5-42                               [1, 1600, 64]             --
+│    │    │    │    └─LayerNorm: 5-43                             [1, 1600, 64]             128
+│    │    │    │    └─Linear: 5-44                                [1, 1600, 256]            16,640
+│    │    │    │    └─Dropout: 5-45                               [1, 1600, 256]            --
+│    │    │    │    └─Linear: 5-46                                [1, 1600, 64]             16,448
+│    │    │    │    └─Dropout: 5-47                               [1, 1600, 64]             --
+│    │    │    └─Identity: 4-36                                   [1, 1600, 64]             --
+│    │    └─HierarchicalEncoderLayer: 3-28                        [1, 1600, 64]             --
+│    │    │    └─TransformerEncoderLayer: 4-37                    [1, 1600, 64]             --
+│    │    │    │    └─LayerNorm: 5-48                             [1, 1600, 64]             128
+│    │    │    │    └─MultiheadAttention: 5-49                    [1, 1600, 64]             16,640
+│    │    │    │    └─Dropout: 5-50                               [1, 1600, 64]             --
+│    │    │    │    └─LayerNorm: 5-51                             [1, 1600, 64]             128
+│    │    │    │    └─Linear: 5-52                                [1, 1600, 256]            16,640
+│    │    │    │    └─Dropout: 5-53                               [1, 1600, 256]            --
+│    │    │    │    └─Linear: 5-54                                [1, 1600, 64]             16,448
+│    │    │    │    └─Dropout: 5-55                               [1, 1600, 64]             --
+│    │    │    └─Identity: 4-38                                   [1, 1600, 64]             --
+│    │    └─HierarchicalEncoderLayer: 3-29                        [1, 1600, 64]             --
+│    │    │    └─TransformerEncoderLayer: 4-39                    [1, 1600, 64]             --
+│    │    │    │    └─LayerNorm: 5-56                             [1, 1600, 64]             128
+│    │    │    │    └─MultiheadAttention: 5-57                    [1, 1600, 64]             16,640
+│    │    │    │    └─Dropout: 5-58                               [1, 1600, 64]             --
+│    │    │    │    └─LayerNorm: 5-59                             [1, 1600, 64]             128
+│    │    │    │    └─Linear: 5-60                                [1, 1600, 256]            16,640
+│    │    │    │    └─Dropout: 5-61                               [1, 1600, 256]            --
+│    │    │    │    └─Linear: 5-62                                [1, 1600, 64]             16,448
+│    │    │    │    └─Dropout: 5-63                               [1, 1600, 64]             --
+│    │    │    └─Identity: 4-40                                   [1, 1600, 64]             --
+├─TransformerDecoder: 1-5                                         [1, 36, 64]               --
+│    └─ModuleList: 2-5                                            --                        --
+│    │    └─TransformerDecoderLayer: 3-30                         [1, 36, 64]               --
+│    │    │    └─LayerNorm: 4-41                                  [1, 36, 64]               128
+│    │    │    └─MultiheadAttention: 4-42                         [1, 36, 64]               16,640
+│    │    │    └─Dropout: 4-43                                    [1, 36, 64]               --
+│    │    │    └─LayerNorm: 4-44                                  [1, 36, 64]               128
+│    │    │    └─MultiheadAttention: 4-45                         [1, 36, 64]               16,640
+│    │    │    └─Dropout: 4-46                                    [1, 36, 64]               --
+│    │    │    └─LayerNorm: 4-47                                  [1, 36, 64]               128
+│    │    │    └─Linear: 4-48                                     [1, 36, 256]              16,640
+│    │    │    └─Dropout: 4-49                                    [1, 36, 256]              --
+│    │    │    └─Linear: 4-50                                     [1, 36, 64]               16,448
+│    │    │    └─Dropout: 4-51                                    [1, 36, 64]               --
+│    │    └─TransformerDecoderLayer: 3-31                         [1, 36, 64]               --
+│    │    │    └─LayerNorm: 4-52                                  [1, 36, 64]               128
+│    │    │    └─MultiheadAttention: 4-53                         [1, 36, 64]               16,640
+│    │    │    └─Dropout: 4-54                                    [1, 36, 64]               --
+│    │    │    └─LayerNorm: 4-55                                  [1, 36, 64]               128
+│    │    │    └─MultiheadAttention: 4-56                         [1, 36, 64]               16,640
+│    │    │    └─Dropout: 4-57                                    [1, 36, 64]               --
+│    │    │    └─LayerNorm: 4-58                                  [1, 36, 64]               128
+│    │    │    └─Linear: 4-59                                     [1, 36, 256]              16,640
+│    │    │    └─Dropout: 4-60                                    [1, 36, 256]              --
+│    │    │    └─Linear: 4-61                                     [1, 36, 64]               16,448
+│    │    │    └─Dropout: 4-62                                    [1, 36, 64]               --
+│    │    └─TransformerDecoderLayer: 3-32                         [1, 36, 64]               --
+│    │    │    └─LayerNorm: 4-63                                  [1, 36, 64]               128
+│    │    │    └─MultiheadAttention: 4-64                         [1, 36, 64]               16,640
+│    │    │    └─Dropout: 4-65                                    [1, 36, 64]               --
+│    │    │    └─LayerNorm: 4-66                                  [1, 36, 64]               128
+│    │    │    └─MultiheadAttention: 4-67                         [1, 36, 64]               16,640
+│    │    │    └─Dropout: 4-68                                    [1, 36, 64]               --
+│    │    │    └─LayerNorm: 4-69                                  [1, 36, 64]               128
+│    │    │    └─Linear: 4-70                                     [1, 36, 256]              16,640
+│    │    │    └─Dropout: 4-71                                    [1, 36, 256]              --
+│    │    │    └─Linear: 4-72                                     [1, 36, 64]               16,448
+│    │    │    └─Dropout: 4-73                                    [1, 36, 64]               --
+│    │    └─TransformerDecoderLayer: 3-33                         [1, 36, 64]               --
+│    │    │    └─LayerNorm: 4-74                                  [1, 36, 64]               128
+│    │    │    └─MultiheadAttention: 4-75                         [1, 36, 64]               16,640
+│    │    │    └─Dropout: 4-76                                    [1, 36, 64]               --
+│    │    │    └─LayerNorm: 4-77                                  [1, 36, 64]               128
+│    │    │    └─MultiheadAttention: 4-78                         [1, 36, 64]               16,640
+│    │    │    └─Dropout: 4-79                                    [1, 36, 64]               --
+│    │    │    └─LayerNorm: 4-80                                  [1, 36, 64]               128
+│    │    │    └─Linear: 4-81                                     [1, 36, 256]              16,640
+│    │    │    └─Dropout: 4-82                                    [1, 36, 256]              --
+│    │    │    └─Linear: 4-83                                     [1, 36, 64]               16,448
+│    │    │    └─Dropout: 4-84                                    [1, 36, 64]               --
+===================================================================================================================
+Total params: 829,904
+Trainable params: 826,992
+Non-trainable params: 2,912
+Total mult-adds (Units.GIGABYTES): 1.10
+===================================================================================================================
+Input size (MB): 4.92
+Forward/backward pass size (MB): 161.97
+Params size (MB): 2.34
+Estimated Total Size (MB): 169.23
+===================================================================================================================
+
+[model.q_network]
+# Freeze status (per top-level submodule, derived from param.requires_grad)
+fraction_proposal: trainable, params=4,680
+quantile_embedding: trainable, params=8,320
+value_head: trainable, params=4,225
+TOTAL: params=17,225 (trainable=17,225, frozen=0)

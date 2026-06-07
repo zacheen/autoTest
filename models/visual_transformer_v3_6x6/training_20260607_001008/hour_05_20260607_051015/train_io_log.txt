@@ -1,0 +1,2009 @@
+
+============================================================
+Session started: 2026-06-07T00:10:08.307161
+Hour 05 started: 2026-06-07T05:10:15.680503
+Encoder dims: [64, 64, 64, 64, 64]
+Path: models\visual_transformer_v3_6x6\training_20260607_001008\hour_05_20260607_051015\train_io_log.txt
+============================================================
+[Step 85980] 05:10:33
+  real_reward_mean=0.5330
+  q_top5=[(6, 1, 0, 1.1213524341583252), (0, 0, 0, 1.019792079925537), (9, 1, 3, 0.3294757604598999), (14, 2, 2, 0.315147340297699), (21, 3, 3, 0.3059694766998291)]
+  Q_loss=0.235416 | q_mean=0.475716 | epsilon=0.0200
+  td_error_mean=0.238458 | frac_clipped=0.099
+  fpn_norm_entropy=0.9158 | fpn_tau_std=0.2743
+  grad_total_pre=58.578854 | grad_total_post=10.000000 | clip_scale=0.170710 clip_percent=82.93%
+  backbone_pre=58.445495 (yolo=53.731283 tfm=22.996198) head_pre=3.950430
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 85990] 05:10:53
+  real_reward_mean=0.5330
+  q_top5=[(0, 0, 0, 1.1373211145401), (2, 0, 2, 0.3384210765361786), (12, 2, 0, 0.27764201164245605), (32, 5, 2, 0.2500617504119873), (9, 1, 3, 0.24850773811340332)]
+  Q_loss=0.173052 | q_mean=0.361779 | epsilon=0.0200
+  td_error_mean=0.206036 | frac_clipped=0.094
+  fpn_norm_entropy=0.9125 | fpn_tau_std=0.2734
+  grad_total_pre=59.725353 | grad_total_post=10.000000 | clip_scale=0.167433 clip_percent=83.26%
+  backbone_pre=59.323334 (yolo=48.963470 tfm=33.493829) head_pre=6.918076
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86000] 05:11:09
+  real_reward_mean=0.5455
+  q_top5=[(0, 0, 0, 0.9986556768417358), (24, 4, 0, 0.18931907415390015), (18, 3, 0, 0.17511120438575745), (31, 5, 1, 0.17260697484016418), (30, 5, 0, 0.1710551232099533)]
+  Q_loss=0.265506 | q_mean=0.544322 | epsilon=0.0200
+  td_error_mean=0.178407 | frac_clipped=0.083
+  fpn_norm_entropy=0.9157 | fpn_tau_std=0.2738
+  grad_total_pre=26.084156 | grad_total_post=9.999999 | clip_scale=0.383374 clip_percent=61.66%
+  backbone_pre=25.826603 (yolo=21.863736 tfm=13.747381) head_pre=3.656469
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.173187e-02 | weight_delta_prev_100=7.433302e-04 (ref_step=85900)
+---
+[Step 86010] 05:11:27
+  real_reward_mean=0.5335
+  q_top5=[(21, 3, 3, 1.9075298309326172), (15, 2, 3, 1.8745397329330444), (16, 2, 4, 1.837234377861023), (28, 4, 4, 1.8218865394592285), (20, 3, 2, 1.813822627067566)]
+  Q_loss=0.119416 | q_mean=0.665193 | epsilon=0.0200
+  td_error_mean=0.185353 | frac_clipped=0.075
+  fpn_norm_entropy=0.9202 | fpn_tau_std=0.2747
+  grad_total_pre=6.833968 | grad_total_post=6.833968 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=6.459402 (yolo=6.111027 tfm=2.092661) head_pre=2.231422
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86020] 05:11:43
+  real_reward_mean=0.5505
+  q_top5=[(24, 4, 0, 1.0287381410598755), (34, 5, 4, 0.2263210415840149), (27, 4, 3, 0.21928757429122925), (21, 3, 3, 0.20179453492164612), (8, 1, 2, 0.19570226967334747)]
+  Q_loss=0.183651 | q_mean=0.601217 | epsilon=0.0200
+  td_error_mean=0.195960 | frac_clipped=0.083
+  fpn_norm_entropy=0.9179 | fpn_tau_std=0.2744
+  grad_total_pre=22.965261 | grad_total_post=9.999999 | clip_scale=0.435440 clip_percent=56.46%
+  backbone_pre=22.777883 (yolo=20.546288 tfm=9.832700) head_pre=2.927670
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86030] 05:13:02
+  real_reward_mean=0.5680
+  q_top5=[(5, 0, 5, 1.0662750005722046), (2, 0, 2, 0.2591536045074463), (17, 2, 5, 0.24490678310394287), (7, 1, 1, 0.23865126073360443), (29, 4, 5, 0.22947871685028076)]
+  Q_loss=0.153326 | q_mean=0.504087 | epsilon=0.0200
+  td_error_mean=0.173062 | frac_clipped=0.069
+  fpn_norm_entropy=0.9145 | fpn_tau_std=0.2737
+  grad_total_pre=7.075352 | grad_total_post=7.075352 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=6.839185 (yolo=6.369880 tfm=2.489795) head_pre=1.812778
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86040] 05:13:20
+  real_reward_mean=0.5680
+  q_top5=[(24, 4, 0, 1.0422827005386353), (20, 3, 2, 0.2229670137166977), (16, 2, 4, 0.2188372164964676), (5, 0, 5, 0.2067662924528122), (11, 1, 5, 0.2051006555557251)]
+  Q_loss=0.133758 | q_mean=0.618692 | epsilon=0.0200
+  td_error_mean=0.191604 | frac_clipped=0.075
+  fpn_norm_entropy=0.9222 | fpn_tau_std=0.2755
+  grad_total_pre=21.985506 | grad_total_post=9.999999 | clip_scale=0.454845 clip_percent=54.52%
+  backbone_pre=21.654597 (yolo=19.280970 tfm=9.857270) head_pre=3.800115
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86050] 05:13:36
+  real_reward_mean=0.5630
+  q_top5=[(5, 0, 5, 1.0270494222640991), (8, 1, 2, 0.2117074579000473), (2, 0, 2, 0.18580156564712524), (7, 1, 1, 0.17265921831130981), (32, 5, 2, 0.17176605761051178)]
+  Q_loss=0.350037 | q_mean=0.668058 | epsilon=0.0200
+  td_error_mean=0.265851 | frac_clipped=0.100
+  fpn_norm_entropy=0.9217 | fpn_tau_std=0.2753
+  grad_total_pre=43.319862 | grad_total_post=10.000000 | clip_scale=0.230841 clip_percent=76.92%
+  backbone_pre=42.656642 (yolo=39.514549 tfm=16.068276) head_pre=7.551260
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86060] 05:13:57
+  real_reward_mean=0.5680
+  q_top5=[(30, 5, 0, 1.083986759185791), (7, 1, 1, 0.19052118062973022), (15, 2, 3, 0.1789444386959076), (9, 1, 3, 0.17772263288497925), (20, 3, 2, 0.17328466475009918)]
+  Q_loss=0.177064 | q_mean=0.550998 | epsilon=0.0200
+  td_error_mean=0.203548 | frac_clipped=0.100
+  fpn_norm_entropy=0.9150 | fpn_tau_std=0.2741
+  grad_total_pre=37.829590 | grad_total_post=10.000000 | clip_scale=0.264343 clip_percent=73.57%
+  backbone_pre=37.060533 (yolo=34.450097 tfm=13.662867) head_pre=7.589117
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86070] 05:14:18
+  real_reward_mean=0.5730
+  q_top5=[(35, 5, 5, 0.9968005418777466), (17, 2, 5, 0.16096481680870056), (28, 4, 4, 0.15520596504211426), (18, 3, 0, 0.14784172177314758), (21, 3, 3, 0.14011162519454956)]
+  Q_loss=0.116835 | q_mean=0.584296 | epsilon=0.0200
+  td_error_mean=0.160437 | frac_clipped=0.062
+  fpn_norm_entropy=0.9207 | fpn_tau_std=0.2752
+  grad_total_pre=3.331906 | grad_total_post=3.331906 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=3.182693 (yolo=2.872525 tfm=1.370451) head_pre=0.985933
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86080] 05:14:36
+  real_reward_mean=0.5730
+  q_top5=[(5, 0, 5, 0.974785327911377), (27, 4, 3, 0.2058468461036682), (4, 0, 4, 0.19688263535499573), (30, 5, 0, 0.19524499773979187), (23, 3, 5, 0.18362459540367126)]
+  Q_loss=0.135175 | q_mean=0.481126 | epsilon=0.0200
+  td_error_mean=0.192133 | frac_clipped=0.075
+  fpn_norm_entropy=0.9147 | fpn_tau_std=0.2739
+  grad_total_pre=40.572136 | grad_total_post=10.000000 | clip_scale=0.246475 clip_percent=75.35%
+  backbone_pre=40.506000 (yolo=38.462292 tfm=12.703861) head_pre=2.315635
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86090] 05:14:52
+  real_reward_mean=0.5680
+  q_top5=[(33, 5, 3, 0.9998863935470581), (21, 3, 3, 0.27783092856407166), (3, 0, 3, 0.275118350982666), (35, 5, 5, 0.2697124481201172), (31, 5, 1, 0.25140753388404846)]
+  Q_loss=0.280968 | q_mean=0.389080 | epsilon=0.0200
+  td_error_mean=0.297023 | frac_clipped=0.124
+  fpn_norm_entropy=0.9152 | fpn_tau_std=0.2738
+  grad_total_pre=131.576416 | grad_total_post=10.000001 | clip_scale=0.076001 clip_percent=92.40%
+  backbone_pre=131.378005 (yolo=115.906656 tfm=61.853274) head_pre=7.223088
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86100] 05:15:10
+  real_reward_mean=0.5680
+  q_top5=[(5, 0, 5, 1.0042121410369873), (30, 5, 0, 0.21615661680698395), (8, 1, 2, 0.21394658088684082), (19, 3, 1, 0.21386602520942688), (24, 4, 0, 0.21386224031448364)]
+  Q_loss=0.075974 | q_mean=0.519142 | epsilon=0.0200
+  td_error_mean=0.170054 | frac_clipped=0.059
+  fpn_norm_entropy=0.9133 | fpn_tau_std=0.2734
+  grad_total_pre=8.673160 | grad_total_post=8.673159 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=8.554771 (yolo=7.947147 tfm=3.166537) head_pre=1.428142
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.182948e-02 | weight_delta_prev_100=7.191095e-04 (ref_step=86000)
+---
+[Step 86110] 05:15:29
+  real_reward_mean=0.5730
+  q_top5=[(5, 0, 5, 0.992667555809021), (1, 0, 1, 0.15822485089302063), (22, 3, 4, 0.1453881561756134), (20, 3, 2, 0.1442904770374298), (7, 1, 1, 0.13865509629249573)]
+  Q_loss=0.212913 | q_mean=0.456912 | epsilon=0.0200
+  td_error_mean=0.226727 | frac_clipped=0.101
+  fpn_norm_entropy=0.9133 | fpn_tau_std=0.2730
+  grad_total_pre=59.646946 | grad_total_post=10.000000 | clip_scale=0.167653 clip_percent=83.23%
+  backbone_pre=58.958926 (yolo=52.627709 tfm=26.579677) head_pre=9.033444
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86120] 05:15:44
+  real_reward_mean=0.5730
+  q_top5=[(5, 0, 5, 1.0219115018844604), (2, 0, 2, 0.21019580960273743), (17, 2, 5, 0.19965225458145142), (26, 4, 2, 0.18732516467571259), (9, 1, 3, 0.18631954491138458)]
+  Q_loss=0.144453 | q_mean=0.556190 | epsilon=0.0200
+  td_error_mean=0.191461 | frac_clipped=0.099
+  fpn_norm_entropy=0.9159 | fpn_tau_std=0.2739
+  grad_total_pre=67.179565 | grad_total_post=10.000001 | clip_scale=0.148855 clip_percent=85.11%
+  backbone_pre=66.794270 (yolo=61.985592 tfm=24.884953) head_pre=7.184698
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86130] 05:16:02
+  real_reward_mean=0.5730
+  q_top5=[(5, 0, 5, 0.9895375370979309), (6, 1, 0, 0.1744123250246048), (26, 4, 2, 0.16863685846328735), (4, 0, 4, 0.16327527165412903), (1, 0, 1, 0.159077987074852)]
+  Q_loss=0.128351 | q_mean=0.623362 | epsilon=0.0200
+  td_error_mean=0.198433 | frac_clipped=0.082
+  fpn_norm_entropy=0.9198 | fpn_tau_std=0.2747
+  grad_total_pre=15.097491 | grad_total_post=10.000000 | clip_scale=0.662362 clip_percent=33.76%
+  backbone_pre=15.000064 (yolo=13.227296 tfm=7.073934) head_pre=1.712402
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86140] 05:16:21
+  real_reward_mean=0.5900
+  q_top5=[(1, 0, 1, 1.0228071212768555), (10, 1, 4, 0.23318679630756378), (29, 4, 5, 0.22090163826942444), (20, 3, 2, 0.2194516956806183), (15, 2, 3, 0.20983606576919556)]
+  Q_loss=0.262204 | q_mean=0.539300 | epsilon=0.0200
+  td_error_mean=0.227039 | frac_clipped=0.100
+  fpn_norm_entropy=0.9155 | fpn_tau_std=0.2738
+  grad_total_pre=38.222843 | grad_total_post=10.000000 | clip_scale=0.261624 clip_percent=73.84%
+  backbone_pre=37.759787 (yolo=32.099095 tfm=19.885915) head_pre=5.931636
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86150] 05:16:36
+  real_reward_mean=0.5730
+  q_top5=[(5, 0, 5, 1.0312209129333496), (4, 0, 4, 0.4032983183860779), (15, 2, 3, 0.23474304378032684), (9, 1, 3, 0.22376839816570282), (2, 0, 2, 0.21763820946216583)]
+  Q_loss=0.173389 | q_mean=0.573126 | epsilon=0.0200
+  td_error_mean=0.205263 | frac_clipped=0.072
+  fpn_norm_entropy=0.9168 | fpn_tau_std=0.2743
+  grad_total_pre=123.509712 | grad_total_post=10.000000 | clip_scale=0.080965 clip_percent=91.90%
+  backbone_pre=123.415271 (yolo=100.271108 tfm=71.951609) head_pre=4.828947
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86160] 05:16:51
+  real_reward_mean=0.5505
+  q_top5=[(5, 0, 5, 1.009718656539917), (34, 5, 4, 0.19726897776126862), (20, 3, 2, 0.18565991520881653), (4, 0, 4, 0.18535813689231873), (18, 3, 0, 0.18407142162322998)]
+  Q_loss=0.124208 | q_mean=0.487519 | epsilon=0.0200
+  td_error_mean=0.157486 | frac_clipped=0.065
+  fpn_norm_entropy=0.9141 | fpn_tau_std=0.2736
+  grad_total_pre=58.314568 | grad_total_post=10.000000 | clip_scale=0.171484 clip_percent=82.85%
+  backbone_pre=58.217180 (yolo=54.371650 tfm=20.807780) head_pre=3.368757
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86170] 05:17:11
+  real_reward_mean=0.5505
+  q_top5=[(30, 5, 0, 0.9992324113845825), (8, 1, 2, 0.234995499253273), (16, 2, 4, 0.23231635987758636), (14, 2, 2, 0.2242826521396637), (7, 1, 1, 0.2238549292087555)]
+  Q_loss=0.124064 | q_mean=0.597335 | epsilon=0.0200
+  td_error_mean=0.203295 | frac_clipped=0.078
+  fpn_norm_entropy=0.9176 | fpn_tau_std=0.2741
+  grad_total_pre=11.377884 | grad_total_post=10.000000 | clip_scale=0.878898 clip_percent=12.11%
+  backbone_pre=11.296998 (yolo=10.264100 tfm=4.719154) head_pre=1.354290
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86180] 05:17:30
+  real_reward_mean=0.5505
+  q_top5=[(3, 0, 3, 0.9718477725982666), (28, 4, 4, 0.20324760675430298), (4, 0, 4, 0.18980459868907928), (6, 1, 0, 0.17398332059383392), (33, 5, 3, 0.1706760972738266)]
+  Q_loss=0.298942 | q_mean=0.589532 | epsilon=0.0200
+  td_error_mean=0.266713 | frac_clipped=0.108
+  fpn_norm_entropy=0.9161 | fpn_tau_std=0.2741
+  grad_total_pre=24.810711 | grad_total_post=10.000000 | clip_scale=0.403052 clip_percent=59.69%
+  backbone_pre=24.020757 (yolo=20.762598 tfm=12.079374) head_pre=6.210850
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86190] 05:17:42
+  real_reward_mean=0.5455
+  q_top5=[(24, 4, 0, 1.215096354484558), (30, 5, 0, 1.1276662349700928), (31, 5, 1, 0.4213361442089081), (33, 5, 3, 0.3726489543914795), (35, 5, 5, 0.3425825238227844)]
+  Q_loss=0.264402 | q_mean=0.562547 | epsilon=0.0200
+  td_error_mean=0.226294 | frac_clipped=0.066
+  fpn_norm_entropy=0.9162 | fpn_tau_std=0.2743
+  grad_total_pre=38.555225 | grad_total_post=10.000000 | clip_scale=0.259368 clip_percent=74.06%
+  backbone_pre=37.067943 (yolo=31.489130 tfm=19.556766) head_pre=10.605329
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86200] 05:17:58
+  real_reward_mean=0.5405
+  q_top5=[(30, 5, 0, 1.040333867073059), (24, 4, 0, 0.25639647245407104), (29, 4, 5, 0.24749693274497986), (4, 0, 4, 0.2299950122833252), (34, 5, 4, 0.22844311594963074)]
+  Q_loss=0.189205 | q_mean=0.557440 | epsilon=0.0200
+  td_error_mean=0.235936 | frac_clipped=0.112
+  fpn_norm_entropy=0.9155 | fpn_tau_std=0.2739
+  grad_total_pre=28.317450 | grad_total_post=9.999999 | clip_scale=0.353139 clip_percent=64.69%
+  backbone_pre=27.847067 (yolo=25.315576 tfm=11.600894) head_pre=5.139922
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.188553e-02 | weight_delta_prev_100=7.375049e-04 (ref_step=86100)
+---
+[Step 86210] 05:18:16
+  real_reward_mean=0.5405
+  q_top5=[(0, 0, 0, 1.0018494129180908), (2, 0, 2, 0.2016209363937378), (26, 4, 2, 0.18965867161750793), (30, 5, 0, 0.1852726936340332), (27, 4, 3, 0.18525733053684235)]
+  Q_loss=0.059167 | q_mean=0.422750 | epsilon=0.0200
+  td_error_mean=0.118582 | frac_clipped=0.033
+  fpn_norm_entropy=0.9176 | fpn_tau_std=0.2743
+  grad_total_pre=6.807672 | grad_total_post=6.807672 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=6.670759 (yolo=6.173314 tfm=2.527691) head_pre=1.358446
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86220] 05:18:34
+  real_reward_mean=0.5455
+  q_top5=[(1, 0, 1, 1.1087126731872559), (0, 0, 0, 0.6667456030845642), (11, 1, 5, 0.21967311203479767), (21, 3, 3, 0.21869739890098572), (34, 5, 4, 0.2116268277168274)]
+  Q_loss=0.096305 | q_mean=0.517326 | epsilon=0.0200
+  td_error_mean=0.163980 | frac_clipped=0.067
+  fpn_norm_entropy=0.9126 | fpn_tau_std=0.2732
+  grad_total_pre=10.513622 | grad_total_post=9.999999 | clip_scale=0.951147 clip_percent=4.89%
+  backbone_pre=9.853929 (yolo=9.048874 tfm=3.900999) head_pre=3.665562
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86230] 05:18:55
+  real_reward_mean=0.5335
+  q_top5=[(29, 4, 5, 1.0904185771942139), (35, 5, 5, -0.6698031425476074), (23, 3, 5, -0.723442018032074), (17, 2, 5, -0.7403044700622559), (4, 0, 4, -0.7765385508537292)]
+  Q_loss=0.278239 | q_mean=0.501879 | epsilon=0.0200
+  td_error_mean=0.262349 | frac_clipped=0.113
+  fpn_norm_entropy=0.9128 | fpn_tau_std=0.2731
+  grad_total_pre=104.308311 | grad_total_post=10.000001 | clip_scale=0.095870 clip_percent=90.41%
+  backbone_pre=104.166260 (yolo=96.326566 tfm=39.645964) head_pre=5.441982
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86240] 05:19:11
+  real_reward_mean=0.5285
+  q_top5=[(5, 0, 5, 1.0159112215042114), (11, 1, 5, 0.2918063998222351), (2, 0, 2, 0.2644737660884857), (15, 2, 3, 0.24018189311027527), (29, 4, 5, 0.227090522646904)]
+  Q_loss=0.156643 | q_mean=0.634063 | epsilon=0.0200
+  td_error_mean=0.186541 | frac_clipped=0.077
+  fpn_norm_entropy=0.9200 | fpn_tau_std=0.2745
+  grad_total_pre=54.631672 | grad_total_post=10.000000 | clip_scale=0.183044 clip_percent=81.70%
+  backbone_pre=54.348571 (yolo=49.502110 tfm=22.434532) head_pre=5.554507
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86250] 05:19:32
+  real_reward_mean=0.5605
+  q_top5=[(34, 5, 4, 1.0155898332595825), (35, 5, 5, 0.6627618670463562), (25, 4, 1, 0.1452530026435852), (4, 0, 4, 0.14188897609710693), (2, 0, 2, 0.13917653262615204)]
+  Q_loss=0.113471 | q_mean=0.582572 | epsilon=0.0200
+  td_error_mean=0.190959 | frac_clipped=0.072
+  fpn_norm_entropy=0.9212 | fpn_tau_std=0.2748
+  grad_total_pre=14.875079 | grad_total_post=9.999999 | clip_scale=0.672265 clip_percent=32.77%
+  backbone_pre=14.842021 (yolo=12.972601 tfm=7.210908) head_pre=0.991156
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86260] 05:19:50
+  real_reward_mean=0.5730
+  q_top5=[(5, 0, 5, 1.0129145383834839), (3, 0, 3, 0.24271130561828613), (15, 2, 3, 0.19749815762043), (17, 2, 5, 0.19100753962993622), (22, 3, 4, 0.1883818805217743)]
+  Q_loss=0.137358 | q_mean=0.749517 | epsilon=0.0200
+  td_error_mean=0.208560 | frac_clipped=0.068
+  fpn_norm_entropy=0.9201 | fpn_tau_std=0.2750
+  grad_total_pre=9.712142 | grad_total_post=9.712142 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=9.612278 (yolo=8.603644 tfm=4.286396) head_pre=1.389178
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86270] 05:20:06
+  real_reward_mean=0.5680
+  q_top5=[(5, 0, 5, 1.0161807537078857), (4, 0, 4, 0.606862485408783), (32, 5, 2, 0.21879631280899048), (35, 5, 5, 0.2162969708442688), (18, 3, 0, 0.18060195446014404)]
+  Q_loss=0.089450 | q_mean=0.533308 | epsilon=0.0200
+  td_error_mean=0.148511 | frac_clipped=0.059
+  fpn_norm_entropy=0.9164 | fpn_tau_std=0.2741
+  grad_total_pre=6.036902 | grad_total_post=6.036902 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=5.966938 (yolo=5.539322 tfm=2.218166) head_pre=0.916427
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86280] 05:20:25
+  real_reward_mean=0.5680
+  q_top5=[(25, 4, 1, 0.954474151134491), (24, 4, 0, 0.6128420829772949), (1, 0, 1, 0.1055818647146225), (0, 0, 0, 0.07341192662715912), (11, 1, 5, 0.07040663063526154)]
+  Q_loss=0.062421 | q_mean=0.556905 | epsilon=0.0200
+  td_error_mean=0.127480 | frac_clipped=0.046
+  fpn_norm_entropy=0.9149 | fpn_tau_std=0.2737
+  grad_total_pre=3.753287 | grad_total_post=3.753287 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=3.469370 (yolo=3.006603 tfm=1.731147) head_pre=1.432002
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86290] 05:20:40
+  real_reward_mean=0.5730
+  q_top5=[(1, 0, 1, 1.0294325351715088), (0, 0, 0, 0.8758904933929443), (12, 2, 0, 0.1705111712217331), (34, 5, 4, 0.16715839505195618), (14, 2, 2, 0.15973447263240814)]
+  Q_loss=0.167359 | q_mean=0.366492 | epsilon=0.0200
+  td_error_mean=0.176631 | frac_clipped=0.079
+  fpn_norm_entropy=0.9115 | fpn_tau_std=0.2730
+  grad_total_pre=12.057384 | grad_total_post=10.000000 | clip_scale=0.829367 clip_percent=17.06%
+  backbone_pre=11.362882 (yolo=10.124720 tfm=5.158015) head_pre=4.033042
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86300] 05:20:59
+  real_reward_mean=0.5780
+  q_top5=[(35, 5, 5, 0.9756476879119873), (29, 4, 5, -0.6539726853370667), (17, 2, 5, -0.7260544300079346), (23, 3, 5, -0.7465048432350159), (18, 3, 0, -0.7867106795310974)]
+  Q_loss=0.130058 | q_mean=0.680972 | epsilon=0.0200
+  td_error_mean=0.159121 | frac_clipped=0.059
+  fpn_norm_entropy=0.9191 | fpn_tau_std=0.2745
+  grad_total_pre=13.638006 | grad_total_post=10.000000 | clip_scale=0.733245 clip_percent=26.68%
+  backbone_pre=13.449157 (yolo=12.441209 tfm=5.108438) head_pre=2.261727
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.193942e-02 | weight_delta_prev_100=6.814203e-04 (ref_step=86200)
+---
+[Step 86310] 05:21:20
+  real_reward_mean=0.5660
+  q_top5=[(35, 5, 5, 0.9717578291893005), (1, 0, 1, 0.2079593390226364), (5, 0, 5, 0.20107387006282806), (6, 1, 0, 0.18691477179527283), (12, 2, 0, 0.17516368627548218)]
+  Q_loss=0.191839 | q_mean=0.547807 | epsilon=0.0200
+  td_error_mean=0.167681 | frac_clipped=0.067
+  fpn_norm_entropy=0.9168 | fpn_tau_std=0.2744
+  grad_total_pre=29.434452 | grad_total_post=9.999999 | clip_scale=0.339738 clip_percent=66.03%
+  backbone_pre=29.229195 (yolo=23.519448 tfm=17.354580) head_pre=3.470033
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86320] 05:21:38
+  real_reward_mean=0.5660
+  q_top5=[(34, 5, 4, 1.0736881494522095), (35, 5, 5, 1.059123158454895), (29, 4, 5, 0.4629531502723694), (6, 1, 0, 0.29266709089279175), (17, 2, 5, 0.2880796790122986)]
+  Q_loss=0.320931 | q_mean=0.497422 | epsilon=0.0200
+  td_error_mean=0.248283 | frac_clipped=0.094
+  fpn_norm_entropy=0.9142 | fpn_tau_std=0.2739
+  grad_total_pre=35.935486 | grad_total_post=9.999999 | clip_scale=0.278276 clip_percent=72.17%
+  backbone_pre=35.833597 (yolo=30.900196 tfm=18.144547) head_pre=2.704106
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86330] 05:21:56
+  real_reward_mean=0.5780
+  q_top5=[(30, 5, 0, 0.9645395278930664), (11, 1, 5, 0.3019012212753296), (15, 2, 3, 0.251752108335495), (10, 1, 4, 0.2340681403875351), (16, 2, 4, 0.233432337641716)]
+  Q_loss=0.219454 | q_mean=0.620119 | epsilon=0.0200
+  td_error_mean=0.167376 | frac_clipped=0.060
+  fpn_norm_entropy=0.9180 | fpn_tau_std=0.2743
+  grad_total_pre=16.820387 | grad_total_post=9.999999 | clip_scale=0.594517 clip_percent=40.55%
+  backbone_pre=16.318652 (yolo=14.652959 tfm=7.182564) head_pre=4.077620
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86340] 05:22:09
+  real_reward_mean=0.5605
+  q_top5=[(34, 5, 4, 1.0716536045074463), (35, 5, 5, 0.5730212330818176), (4, 0, 4, 0.2957940995693207), (5, 0, 5, 0.27843958139419556), (11, 1, 5, 0.2767091393470764)]
+  Q_loss=0.255949 | q_mean=0.513836 | epsilon=0.0200
+  td_error_mean=0.200371 | frac_clipped=0.074
+  fpn_norm_entropy=0.9163 | fpn_tau_std=0.2736
+  grad_total_pre=32.343853 | grad_total_post=10.000000 | clip_scale=0.309178 clip_percent=69.08%
+  backbone_pre=32.038199 (yolo=28.423882 tfm=14.782731) head_pre=4.436064
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86350] 05:22:33
+  real_reward_mean=0.5435
+  q_top5=[(18, 3, 0, 1.0418318510055542), (4, 0, 4, 0.25099730491638184), (14, 2, 2, 0.24660514295101166), (6, 1, 0, 0.24529343843460083), (16, 2, 4, 0.24528270959854126)]
+  Q_loss=0.104214 | q_mean=0.553145 | epsilon=0.0200
+  td_error_mean=0.164360 | frac_clipped=0.060
+  fpn_norm_entropy=0.9184 | fpn_tau_std=0.2741
+  grad_total_pre=7.862254 | grad_total_post=7.862253 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=7.769140 (yolo=6.575553 tfm=4.137831) head_pre=1.206437
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86360] 05:22:51
+  real_reward_mean=0.5410
+  q_top5=[(32, 5, 2, 1.0041019916534424), (11, 1, 5, 0.2109963744878769), (0, 0, 0, 0.2079838216304779), (5, 0, 5, 0.19883134961128235), (6, 1, 0, 0.19794312119483948)]
+  Q_loss=0.132720 | q_mean=0.591658 | epsilon=0.0200
+  td_error_mean=0.162776 | frac_clipped=0.044
+  fpn_norm_entropy=0.9189 | fpn_tau_std=0.2741
+  grad_total_pre=17.948288 | grad_total_post=9.999999 | clip_scale=0.557156 clip_percent=44.28%
+  backbone_pre=17.740789 (yolo=11.762007 tfm=13.281219) head_pre=2.721298
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86370] 05:23:13
+  real_reward_mean=0.5335
+  q_top5=[(35, 5, 5, 0.9941271543502808), (16, 2, 4, 0.195121169090271), (5, 0, 5, 0.18889237940311432), (21, 3, 3, 0.18268528580665588), (33, 5, 3, 0.1790046989917755)]
+  Q_loss=0.179017 | q_mean=0.560662 | epsilon=0.0200
+  td_error_mean=0.186049 | frac_clipped=0.075
+  fpn_norm_entropy=0.9186 | fpn_tau_std=0.2742
+  grad_total_pre=54.002621 | grad_total_post=10.000000 | clip_scale=0.185176 clip_percent=81.48%
+  backbone_pre=53.433530 (yolo=41.379231 tfm=33.806825) head_pre=7.819262
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86380] 05:23:32
+  real_reward_mean=0.5335
+  q_top5=[(35, 5, 5, 0.949333906173706), (2, 0, 2, 0.11524327844381332), (3, 0, 3, 0.10423345863819122), (10, 1, 4, 0.08507715910673141), (4, 0, 4, 0.08041786402463913)]
+  Q_loss=0.183091 | q_mean=0.520990 | epsilon=0.0200
+  td_error_mean=0.214447 | frac_clipped=0.085
+  fpn_norm_entropy=0.9187 | fpn_tau_std=0.2742
+  grad_total_pre=16.211576 | grad_total_post=9.999997 | clip_scale=0.616843 clip_percent=38.32%
+  backbone_pre=16.026995 (yolo=15.084658 tfm=5.414577) head_pre=2.439387
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86390] 05:23:50
+  real_reward_mean=0.5385
+  q_top5=[(24, 4, 0, 1.0791904926300049), (32, 5, 2, 0.25420159101486206), (11, 1, 5, 0.2345190942287445), (31, 5, 1, 0.21605171263217926), (33, 5, 3, 0.21075710654258728)]
+  Q_loss=0.194104 | q_mean=0.488740 | epsilon=0.0200
+  td_error_mean=0.232639 | frac_clipped=0.086
+  fpn_norm_entropy=0.9185 | fpn_tau_std=0.2742
+  grad_total_pre=106.879112 | grad_total_post=10.000001 | clip_scale=0.093564 clip_percent=90.64%
+  backbone_pre=106.667971 (yolo=93.257577 tfm=51.779150) head_pre=6.714869
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86400] 05:24:02
+  real_reward_mean=0.5085
+  q_top5=[(1, 0, 1, 1.0147342681884766), (0, 0, 0, 1.0058012008666992), (20, 3, 2, 0.3176525831222534), (7, 1, 1, 0.29785168170928955), (3, 0, 3, 0.29307883977890015)]
+  Q_loss=0.092829 | q_mean=0.451655 | epsilon=0.0200
+  td_error_mean=0.158581 | frac_clipped=0.056
+  fpn_norm_entropy=0.9150 | fpn_tau_std=0.2734
+  grad_total_pre=31.777458 | grad_total_post=9.999999 | clip_scale=0.314688 clip_percent=68.53%
+  backbone_pre=31.435938 (yolo=25.760218 tfm=18.017474) head_pre=4.646362
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.201215e-02 | weight_delta_prev_100=7.100350e-04 (ref_step=86300)
+---
+[Step 86410] 05:24:23
+  real_reward_mean=0.5080
+  q_top5=[(4, 0, 4, 1.093567967414856), (7, 1, 1, 0.24215863645076752), (35, 5, 5, 0.24120597541332245), (26, 4, 2, 0.23796235024929047), (15, 2, 3, 0.23671883344650269)]
+  Q_loss=0.175321 | q_mean=0.557542 | epsilon=0.0200
+  td_error_mean=0.210720 | frac_clipped=0.079
+  fpn_norm_entropy=0.9179 | fpn_tau_std=0.2741
+  grad_total_pre=38.036549 | grad_total_post=10.000000 | clip_scale=0.262905 clip_percent=73.71%
+  backbone_pre=37.311875 (yolo=33.890936 tfm=15.607065) head_pre=7.389392
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86420] 05:24:41
+  real_reward_mean=0.5080
+  q_top5=[(29, 4, 5, 1.4075987339019775), (34, 5, 4, 1.2702465057373047), (35, 5, 5, 1.2218973636627197), (28, 4, 4, 0.7755122184753418), (11, 1, 5, 0.6336532831192017)]
+  Q_loss=0.327873 | q_mean=0.629775 | epsilon=0.0200
+  td_error_mean=0.300748 | frac_clipped=0.115
+  fpn_norm_entropy=0.9163 | fpn_tau_std=0.2741
+  grad_total_pre=121.388786 | grad_total_post=10.000001 | clip_scale=0.082380 clip_percent=91.76%
+  backbone_pre=120.599808 (yolo=112.792930 tfm=42.685697) head_pre=13.817503
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86430] 05:25:00
+  real_reward_mean=0.5080
+  q_top5=[(5, 0, 5, 1.012131929397583), (8, 1, 2, 0.20485325157642365), (18, 3, 0, 0.19435715675354004), (3, 0, 3, 0.1936979740858078), (9, 1, 3, 0.19069793820381165)]
+  Q_loss=0.137182 | q_mean=0.696255 | epsilon=0.0200
+  td_error_mean=0.170697 | frac_clipped=0.068
+  fpn_norm_entropy=0.9178 | fpn_tau_std=0.2742
+  grad_total_pre=50.494053 | grad_total_post=10.000000 | clip_scale=0.198043 clip_percent=80.20%
+  backbone_pre=50.230366 (yolo=42.813059 tfm=26.270357) head_pre=5.153588
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86440] 05:25:18
+  real_reward_mean=0.5305
+  q_top5=[(35, 5, 5, 1.0380921363830566), (4, 0, 4, 0.20514050126075745), (6, 1, 0, 0.19649432599544525), (16, 2, 4, 0.1930292248725891), (8, 1, 2, 0.19182157516479492)]
+  Q_loss=0.082927 | q_mean=0.554792 | epsilon=0.0200
+  td_error_mean=0.157826 | frac_clipped=0.047
+  fpn_norm_entropy=0.9188 | fpn_tau_std=0.2743
+  grad_total_pre=10.527824 | grad_total_post=9.999999 | clip_scale=0.949864 clip_percent=5.01%
+  backbone_pre=9.965001 (yolo=9.460436 tfm=3.130718) head_pre=3.396151
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86450] 05:25:36
+  real_reward_mean=0.5375
+  q_top5=[(35, 5, 5, 0.9768012762069702), (15, 2, 3, 0.21416650712490082), (4, 0, 4, 0.19900555908679962), (1, 0, 1, 0.1915489137172699), (5, 0, 5, 0.18946462869644165)]
+  Q_loss=0.157472 | q_mean=0.526472 | epsilon=0.0200
+  td_error_mean=0.187430 | frac_clipped=0.063
+  fpn_norm_entropy=0.9182 | fpn_tau_std=0.2741
+  grad_total_pre=39.648872 | grad_total_post=10.000000 | clip_scale=0.252214 clip_percent=74.78%
+  backbone_pre=39.598697 (yolo=34.694810 tfm=19.087350) head_pre=1.994062
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86460] 05:25:52
+  real_reward_mean=0.5275
+  q_top5=[(4, 0, 4, 1.0120537281036377), (25, 4, 1, 0.1867188811302185), (35, 5, 5, 0.15402960777282715), (26, 4, 2, 0.1536090075969696), (27, 4, 3, 0.13445043563842773)]
+  Q_loss=0.135039 | q_mean=0.413804 | epsilon=0.0200
+  td_error_mean=0.179930 | frac_clipped=0.083
+  fpn_norm_entropy=0.9141 | fpn_tau_std=0.2735
+  grad_total_pre=4.423003 | grad_total_post=4.423003 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=4.247103 (yolo=3.731793 tfm=2.027710) head_pre=1.234938
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86470] 05:26:07
+  real_reward_mean=0.5225
+  q_top5=[(35, 5, 5, 0.9793291091918945), (27, 4, 3, 0.19979023933410645), (16, 2, 4, 0.1864498406648636), (1, 0, 1, 0.18457841873168945), (29, 4, 5, 0.18420857191085815)]
+  Q_loss=0.144345 | q_mean=0.575975 | epsilon=0.0200
+  td_error_mean=0.177655 | frac_clipped=0.053
+  fpn_norm_entropy=0.9187 | fpn_tau_std=0.2744
+  grad_total_pre=56.067875 | grad_total_post=10.000000 | clip_scale=0.178355 clip_percent=82.16%
+  backbone_pre=56.014555 (yolo=52.187637 tfm=20.348979) head_pre=2.444616
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86480] 05:26:24
+  real_reward_mean=0.5175
+  q_top5=[(24, 4, 0, 0.9886016845703125), (23, 3, 5, 0.2510484457015991), (7, 1, 1, 0.2248562127351761), (28, 4, 4, 0.21170306205749512), (16, 2, 4, 0.209190234541893)]
+  Q_loss=0.143443 | q_mean=0.590222 | epsilon=0.0200
+  td_error_mean=0.185431 | frac_clipped=0.056
+  fpn_norm_entropy=0.9209 | fpn_tau_std=0.2749
+  grad_total_pre=20.745361 | grad_total_post=10.000000 | clip_scale=0.482035 clip_percent=51.80%
+  backbone_pre=20.212221 (yolo=18.815398 tfm=7.383405) head_pre=4.672921
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86490] 05:26:45
+  real_reward_mean=0.5225
+  q_top5=[(0, 0, 0, 1.0213520526885986), (2, 0, 2, 0.19617587327957153), (23, 3, 5, 0.19199733436107635), (26, 4, 2, 0.19049423933029175), (21, 3, 3, 0.18199089169502258)]
+  Q_loss=0.279000 | q_mean=0.499311 | epsilon=0.0200
+  td_error_mean=0.246617 | frac_clipped=0.097
+  fpn_norm_entropy=0.9163 | fpn_tau_std=0.2739
+  grad_total_pre=23.704355 | grad_total_post=9.999999 | clip_scale=0.421863 clip_percent=57.81%
+  backbone_pre=23.631682 (yolo=20.234239 tfm=12.207865) head_pre=1.854709
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86500] 05:27:04
+  real_reward_mean=0.5525
+  q_top5=[(6, 1, 0, 1.1011919975280762), (8, 1, 2, 0.2678638696670532), (25, 4, 1, 0.25573503971099854), (16, 2, 4, 0.25166621804237366), (4, 0, 4, 0.24647854268550873)]
+  Q_loss=0.206399 | q_mean=0.657029 | epsilon=0.0200
+  td_error_mean=0.175363 | frac_clipped=0.058
+  fpn_norm_entropy=0.9211 | fpn_tau_std=0.2749
+  grad_total_pre=100.258720 | grad_total_post=10.000001 | clip_scale=0.099742 clip_percent=90.03%
+  backbone_pre=100.183471 (yolo=83.952241 tfm=54.669453) head_pre=3.883783
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.207711e-02 | weight_delta_prev_100=8.350073e-04 (ref_step=86400)
+---
+[Step 86510] 05:27:25
+  real_reward_mean=0.5530
+  q_top5=[(5, 0, 5, 0.9935578107833862), (29, 4, 5, 0.2411532700061798), (23, 3, 5, 0.2109590768814087), (3, 0, 3, 0.21022768318653107), (0, 0, 0, 0.20406688749790192)]
+  Q_loss=0.096349 | q_mean=0.576927 | epsilon=0.0200
+  td_error_mean=0.157507 | frac_clipped=0.059
+  fpn_norm_entropy=0.9193 | fpn_tau_std=0.2745
+  grad_total_pre=12.311915 | grad_total_post=9.999999 | clip_scale=0.812221 clip_percent=18.78%
+  backbone_pre=12.155767 (yolo=9.936083 tfm=7.002636) head_pre=1.954632
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86520] 05:27:40
+  real_reward_mean=0.5355
+  q_top5=[(11, 1, 5, 1.1131107807159424), (17, 2, 5, 0.2866795063018799), (22, 3, 4, 0.2625698447227478), (3, 0, 3, 0.2532639801502228), (9, 1, 3, 0.24067422747612)]
+  Q_loss=0.253397 | q_mean=0.702364 | epsilon=0.0200
+  td_error_mean=0.187050 | frac_clipped=0.055
+  fpn_norm_entropy=0.9210 | fpn_tau_std=0.2750
+  grad_total_pre=40.286377 | grad_total_post=10.000000 | clip_scale=0.248223 clip_percent=75.18%
+  backbone_pre=39.954922 (yolo=31.367817 tfm=24.747845) head_pre=5.157176
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86530] 05:28:01
+  real_reward_mean=0.5235
+  q_top5=[(3, 0, 3, 1.0176713466644287), (34, 5, 4, 0.25050368905067444), (5, 0, 5, 0.22849434614181519), (21, 3, 3, 0.228409081697464), (15, 2, 3, 0.21671095490455627)]
+  Q_loss=0.134659 | q_mean=0.672229 | epsilon=0.0200
+  td_error_mean=0.183977 | frac_clipped=0.079
+  fpn_norm_entropy=0.9192 | fpn_tau_std=0.2749
+  grad_total_pre=62.416447 | grad_total_post=9.999999 | clip_scale=0.160214 clip_percent=83.98%
+  backbone_pre=62.346291 (yolo=45.890607 tfm=42.203225) head_pre=2.958444
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86540] 05:28:17
+  real_reward_mean=0.5235
+  q_top5=[(5, 0, 5, 1.007117509841919), (16, 2, 4, 0.23456960916519165), (20, 3, 2, 0.18072381615638733), (13, 2, 1, 0.17912796139717102), (3, 0, 3, 0.17560669779777527)]
+  Q_loss=0.168010 | q_mean=0.512007 | epsilon=0.0200
+  td_error_mean=0.174937 | frac_clipped=0.059
+  fpn_norm_entropy=0.9138 | fpn_tau_std=0.2738
+  grad_total_pre=55.137226 | grad_total_post=10.000000 | clip_scale=0.181366 clip_percent=81.86%
+  backbone_pre=54.860613 (yolo=42.488788 tfm=34.704319) head_pre=5.516062
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86550] 05:28:38
+  real_reward_mean=0.5235
+  q_top5=[(30, 5, 0, 1.1220850944519043), (17, 2, 5, 0.28785890340805054), (23, 3, 5, 0.2789483070373535), (34, 5, 4, 0.2717064619064331), (27, 4, 3, 0.26049867272377014)]
+  Q_loss=0.097664 | q_mean=0.520448 | epsilon=0.0200
+  td_error_mean=0.179398 | frac_clipped=0.050
+  fpn_norm_entropy=0.9212 | fpn_tau_std=0.2751
+  grad_total_pre=7.530245 | grad_total_post=7.530245 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=7.397943 (yolo=6.641036 tfm=3.259785) head_pre=1.405361
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86560] 05:28:56
+  real_reward_mean=0.5285
+  q_top5=[(1, 0, 1, 0.9323432445526123), (20, 3, 2, 0.20954158902168274), (12, 2, 0, 0.19215349853038788), (28, 4, 4, 0.1794881522655487), (22, 3, 4, 0.1760251671075821)]
+  Q_loss=0.141547 | q_mean=0.564304 | epsilon=0.0200
+  td_error_mean=0.232217 | frac_clipped=0.074
+  fpn_norm_entropy=0.9175 | fpn_tau_std=0.2741
+  grad_total_pre=7.295073 | grad_total_post=7.295073 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=7.115218 (yolo=6.631070 tfm=2.579776) head_pre=1.609892
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86570] 05:29:12
+  real_reward_mean=0.5410
+  q_top5=[(11, 1, 5, 1.3830925226211548), (4, 0, 4, 1.2950494289398193), (5, 0, 5, 1.2727348804473877), (23, 3, 5, 0.6050177812576294), (32, 5, 2, 0.556962788105011)]
+  Q_loss=0.064917 | q_mean=0.515895 | epsilon=0.0200
+  td_error_mean=0.104775 | frac_clipped=0.032
+  fpn_norm_entropy=0.9157 | fpn_tau_std=0.2735
+  grad_total_pre=101.028633 | grad_total_post=10.000000 | clip_scale=0.098982 clip_percent=90.10%
+  backbone_pre=100.885575 (yolo=90.310782 tfm=44.965120) head_pre=5.374536
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86580] 05:29:28
+  real_reward_mean=0.5410
+  q_top5=[(17, 2, 5, 1.1936395168304443), (11, 1, 5, 0.40259355306625366), (6, 1, 0, 0.3905540108680725), (14, 2, 2, 0.3790353536605835), (4, 0, 4, 0.37530434131622314)]
+  Q_loss=0.239638 | q_mean=0.718487 | epsilon=0.0200
+  td_error_mean=0.260052 | frac_clipped=0.098
+  fpn_norm_entropy=0.9189 | fpn_tau_std=0.2740
+  grad_total_pre=75.421242 | grad_total_post=10.000000 | clip_scale=0.132589 clip_percent=86.74%
+  backbone_pre=74.729177 (yolo=68.113691 tfm=30.740445) head_pre=10.193823
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86590] 05:29:44
+  real_reward_mean=0.5310
+  q_top5=[(5, 0, 5, 1.0092236995697021), (9, 1, 3, 0.19402095675468445), (15, 2, 3, 0.18421563506126404), (17, 2, 5, 0.1833677440881729), (20, 3, 2, 0.1744365692138672)]
+  Q_loss=0.317908 | q_mean=0.586518 | epsilon=0.0200
+  td_error_mean=0.252609 | frac_clipped=0.111
+  fpn_norm_entropy=0.9178 | fpn_tau_std=0.2739
+  grad_total_pre=115.785896 | grad_total_post=10.000000 | clip_scale=0.086366 clip_percent=91.36%
+  backbone_pre=115.186763 (yolo=104.899512 tfm=47.582378) head_pre=11.763641
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86600] 05:30:02
+  real_reward_mean=0.5310
+  q_top5=[(23, 3, 5, 1.018672227859497), (5, 0, 5, 0.2683597505092621), (11, 1, 5, 0.26397526264190674), (9, 1, 3, 0.25419649481773376), (7, 1, 1, 0.2483634054660797)]
+  Q_loss=0.247480 | q_mean=0.649268 | epsilon=0.0200
+  td_error_mean=0.276621 | frac_clipped=0.104
+  fpn_norm_entropy=0.9160 | fpn_tau_std=0.2738
+  grad_total_pre=77.462929 | grad_total_post=10.000000 | clip_scale=0.129094 clip_percent=87.09%
+  backbone_pre=76.922514 (yolo=68.636316 tfm=34.729374) head_pre=9.134168
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.213914e-02 | weight_delta_prev_100=6.891902e-04 (ref_step=86500)
+---
+[Step 86610] 05:30:24
+  real_reward_mean=0.5355
+  q_top5=[(17, 2, 5, 1.9568787813186646), (21, 3, 3, 1.938431978225708), (16, 2, 4, 1.929469347000122), (34, 5, 4, 1.9293239116668701), (15, 2, 3, 1.9188674688339233)]
+  Q_loss=0.094238 | q_mean=0.629742 | epsilon=0.0200
+  td_error_mean=0.148161 | frac_clipped=0.049
+  fpn_norm_entropy=0.9145 | fpn_tau_std=0.2735
+  grad_total_pre=11.661260 | grad_total_post=10.000000 | clip_scale=0.857540 clip_percent=14.25%
+  backbone_pre=11.516758 (yolo=10.320216 tfm=5.111641) head_pre=1.830102
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86620] 05:30:39
+  real_reward_mean=0.5480
+  q_top5=[(35, 5, 5, 0.9913436770439148), (22, 3, 4, 0.2002643644809723), (11, 1, 5, 0.18720543384552002), (15, 2, 3, 0.18665167689323425), (4, 0, 4, 0.17599619925022125)]
+  Q_loss=0.151334 | q_mean=0.577807 | epsilon=0.0200
+  td_error_mean=0.201792 | frac_clipped=0.080
+  fpn_norm_entropy=0.9138 | fpn_tau_std=0.2735
+  grad_total_pre=6.712379 | grad_total_post=6.712379 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=6.614410 (yolo=6.246112 tfm=2.176352) head_pre=1.142635
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86630] 05:30:57
+  real_reward_mean=0.5600
+  q_top5=[(11, 1, 5, 1.0209344625473022), (5, 0, 5, 0.2858695387840271), (21, 3, 3, 0.24216662347316742), (26, 4, 2, 0.22541017830371857), (3, 0, 3, 0.21002091467380524)]
+  Q_loss=0.199155 | q_mean=0.638772 | epsilon=0.0200
+  td_error_mean=0.181086 | frac_clipped=0.065
+  fpn_norm_entropy=0.9198 | fpn_tau_std=0.2747
+  grad_total_pre=122.134392 | grad_total_post=10.000001 | clip_scale=0.081877 clip_percent=91.81%
+  backbone_pre=122.071636 (yolo=99.860198 tfm=70.209866) head_pre=3.914986
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86640] 05:31:12
+  real_reward_mean=0.5550
+  q_top5=[(5, 0, 5, 0.9904245138168335), (24, 4, 0, 0.18641924858093262), (1, 0, 1, 0.18560045957565308), (9, 1, 3, 0.182809978723526), (13, 2, 1, 0.18210625648498535)]
+  Q_loss=0.140427 | q_mean=0.480685 | epsilon=0.0200
+  td_error_mean=0.220914 | frac_clipped=0.081
+  fpn_norm_entropy=0.9182 | fpn_tau_std=0.2740
+  grad_total_pre=17.523661 | grad_total_post=9.999999 | clip_scale=0.570657 clip_percent=42.93%
+  backbone_pre=16.582340 (yolo=14.617785 tfm=7.829071) head_pre=5.666101
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86650] 05:31:28
+  real_reward_mean=0.5500
+  q_top5=[(32, 5, 2, 1.041106939315796), (5, 0, 5, 0.7667374014854431), (14, 2, 2, 0.2454175353050232), (3, 0, 3, 0.21538324654102325), (27, 4, 3, 0.21450352668762207)]
+  Q_loss=0.252457 | q_mean=0.478790 | epsilon=0.0200
+  td_error_mean=0.236450 | frac_clipped=0.089
+  fpn_norm_entropy=0.9194 | fpn_tau_std=0.2745
+  grad_total_pre=11.049677 | grad_total_post=9.999999 | clip_scale=0.905004 clip_percent=9.50%
+  backbone_pre=10.203954 (yolo=9.078763 tfm=4.657975) head_pre=4.239654
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86660] 05:31:45
+  real_reward_mean=0.5575
+  q_top5=[(28, 4, 4, 0.9770304560661316), (11, 1, 5, 0.1506066918373108), (24, 4, 0, 0.13414007425308228), (1, 0, 1, 0.12618231773376465), (0, 0, 0, 0.11926697194576263)]
+  Q_loss=0.091056 | q_mean=0.580745 | epsilon=0.0200
+  td_error_mean=0.133132 | frac_clipped=0.038
+  fpn_norm_entropy=0.9193 | fpn_tau_std=0.2743
+  grad_total_pre=19.592546 | grad_total_post=9.999998 | clip_scale=0.510398 clip_percent=48.96%
+  backbone_pre=19.314624 (yolo=15.300687 tfm=11.787437) head_pre=3.288334
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86670] 05:32:01
+  real_reward_mean=0.5575
+  q_top5=[(30, 5, 0, 0.9942351579666138), (23, 3, 5, 0.22231677174568176), (11, 1, 5, 0.21781420707702637), (9, 1, 3, 0.21708224713802338), (10, 1, 4, 0.21346378326416016)]
+  Q_loss=0.140432 | q_mean=0.521960 | epsilon=0.0200
+  td_error_mean=0.166603 | frac_clipped=0.066
+  fpn_norm_entropy=0.9190 | fpn_tau_std=0.2744
+  grad_total_pre=32.955662 | grad_total_post=9.999999 | clip_scale=0.303438 clip_percent=69.66%
+  backbone_pre=32.728762 (yolo=27.039298 tfm=18.440397) head_pre=3.860527
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86680] 05:32:19
+  real_reward_mean=0.5625
+  q_top5=[(30, 5, 0, 0.9777233600616455), (9, 1, 3, 0.2136528640985489), (2, 0, 2, 0.20551353693008423), (4, 0, 4, 0.1983712911605835), (16, 2, 4, 0.19556917250156403)]
+  Q_loss=0.094400 | q_mean=0.503818 | epsilon=0.0200
+  td_error_mean=0.153388 | frac_clipped=0.044
+  fpn_norm_entropy=0.9171 | fpn_tau_std=0.2742
+  grad_total_pre=43.661869 | grad_total_post=10.000000 | clip_scale=0.229033 clip_percent=77.10%
+  backbone_pre=43.581425 (yolo=41.006625 tfm=14.757957) head_pre=2.649184
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86690] 05:32:34
+  real_reward_mean=0.5625
+  q_top5=[(4, 0, 4, 0.9767907857894897), (9, 1, 3, 0.14937639236450195), (32, 5, 2, 0.14755983650684357), (21, 3, 3, 0.14698894321918488), (22, 3, 4, 0.14498279988765717)]
+  Q_loss=0.109904 | q_mean=0.581853 | epsilon=0.0200
+  td_error_mean=0.188567 | frac_clipped=0.060
+  fpn_norm_entropy=0.9190 | fpn_tau_std=0.2748
+  grad_total_pre=36.071606 | grad_total_post=10.000000 | clip_scale=0.277226 clip_percent=72.28%
+  backbone_pre=35.934929 (yolo=30.802936 tfm=18.506708) head_pre=3.137126
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86700] 05:32:53
+  real_reward_mean=0.5625
+  q_top5=[(0, 0, 0, 1.036238670349121), (3, 0, 3, 0.2274949848651886), (9, 1, 3, 0.21897906064987183), (2, 0, 2, 0.20335470139980316), (11, 1, 5, 0.19820331037044525)]
+  Q_loss=0.171528 | q_mean=0.496999 | epsilon=0.0200
+  td_error_mean=0.185232 | frac_clipped=0.073
+  fpn_norm_entropy=0.9191 | fpn_tau_std=0.2749
+  grad_total_pre=11.936209 | grad_total_post=9.999999 | clip_scale=0.837787 clip_percent=16.22%
+  backbone_pre=11.791569 (yolo=10.112157 tfm=6.065095) head_pre=1.852565
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.221908e-02 | weight_delta_prev_100=6.604706e-04 (ref_step=86600)
+---
+[Step 86710] 05:33:11
+  real_reward_mean=0.5700
+  q_top5=[(0, 0, 0, 0.9783999919891357), (1, 0, 1, 0.15492087602615356), (23, 3, 5, 0.12631282210350037), (11, 1, 5, 0.12171615660190582), (19, 3, 1, 0.11476752161979675)]
+  Q_loss=0.128022 | q_mean=0.493088 | epsilon=0.0200
+  td_error_mean=0.180326 | frac_clipped=0.072
+  fpn_norm_entropy=0.9134 | fpn_tau_std=0.2737
+  grad_total_pre=13.831357 | grad_total_post=9.999999 | clip_scale=0.722995 clip_percent=27.70%
+  backbone_pre=13.295363 (yolo=10.963512 tfm=7.521175) head_pre=3.813104
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86720] 05:33:27
+  real_reward_mean=0.5575
+  q_top5=[(0, 0, 0, 1.0725963115692139), (31, 5, 1, 0.2698216438293457), (19, 3, 1, 0.24524880945682526), (18, 3, 0, 0.2441590577363968), (12, 2, 0, 0.23645955324172974)]
+  Q_loss=0.127911 | q_mean=0.471811 | epsilon=0.0200
+  td_error_mean=0.181671 | frac_clipped=0.073
+  fpn_norm_entropy=0.9184 | fpn_tau_std=0.2748
+  grad_total_pre=16.244890 | grad_total_post=9.999999 | clip_scale=0.615578 clip_percent=38.44%
+  backbone_pre=16.159496 (yolo=15.138462 tfm=5.652990) head_pre=1.663474
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86730] 05:33:42
+  real_reward_mean=0.5525
+  q_top5=[(35, 5, 5, 1.006483793258667), (13, 2, 1, 0.1511172205209732), (21, 3, 3, 0.1273902803659439), (27, 4, 3, 0.11980587989091873), (12, 2, 0, 0.11631621420383453)]
+  Q_loss=0.231633 | q_mean=0.654284 | epsilon=0.0200
+  td_error_mean=0.222250 | frac_clipped=0.102
+  fpn_norm_entropy=0.9162 | fpn_tau_std=0.2741
+  grad_total_pre=69.057251 | grad_total_post=10.000000 | clip_scale=0.144807 clip_percent=85.52%
+  backbone_pre=68.331753 (yolo=63.799278 tfm=24.472037) head_pre=9.983773
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86740] 05:34:00
+  real_reward_mean=0.5455
+  q_top5=[(4, 0, 4, 0.5180093050003052), (3, 0, 3, 0.18527236580848694), (35, 5, 5, 0.1231147050857544), (8, 1, 2, 0.11193695664405823), (27, 4, 3, 0.09917013347148895)]
+  Q_loss=0.126827 | q_mean=0.465859 | epsilon=0.0200
+  td_error_mean=0.201661 | frac_clipped=0.078
+  fpn_norm_entropy=0.9131 | fpn_tau_std=0.2733
+  grad_total_pre=29.273798 | grad_total_post=9.999999 | clip_scale=0.341602 clip_percent=65.84%
+  backbone_pre=28.875036 (yolo=26.564811 tfm=11.317179) head_pre=4.815340
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86750] 05:34:19
+  real_reward_mean=0.5285
+  q_top5=[(0, 0, 0, 1.079762578010559), (27, 4, 3, 0.1843600869178772), (26, 4, 2, 0.18164384365081787), (23, 3, 5, 0.17310693860054016), (15, 2, 3, 0.1528310328722)]
+  Q_loss=0.117885 | q_mean=0.549591 | epsilon=0.0200
+  td_error_mean=0.175516 | frac_clipped=0.049
+  fpn_norm_entropy=0.9156 | fpn_tau_std=0.2741
+  grad_total_pre=8.738577 | grad_total_post=8.738577 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=8.314756 (yolo=7.613562 tfm=3.341980) head_pre=2.688414
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86760] 05:34:38
+  real_reward_mean=0.5335
+  q_top5=[(5, 0, 5, 0.9940196871757507), (3, 0, 3, 0.17703622579574585), (34, 5, 4, 0.1686669886112213), (10, 1, 4, 0.16434916853904724), (21, 3, 3, 0.16282899677753448)]
+  Q_loss=0.204215 | q_mean=0.530213 | epsilon=0.0200
+  td_error_mean=0.209849 | frac_clipped=0.099
+  fpn_norm_entropy=0.9151 | fpn_tau_std=0.2736
+  grad_total_pre=31.082184 | grad_total_post=10.000000 | clip_scale=0.321728 clip_percent=67.83%
+  backbone_pre=30.223040 (yolo=24.089360 tfm=18.251983) head_pre=7.257414
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86770] 05:34:53
+  real_reward_mean=0.5335
+  q_top5=[(1, 0, 1, 0.9465681314468384), (0, 0, 0, 0.21953526139259338), (21, 3, 3, 0.19080092012882233), (31, 5, 1, 0.18476693332195282), (22, 3, 4, 0.18220749497413635)]
+  Q_loss=0.073802 | q_mean=0.599718 | epsilon=0.0200
+  td_error_mean=0.152432 | frac_clipped=0.041
+  fpn_norm_entropy=0.9173 | fpn_tau_std=0.2741
+  grad_total_pre=10.410126 | grad_total_post=9.999999 | clip_scale=0.960603 clip_percent=3.94%
+  backbone_pre=10.151396 (yolo=9.326670 tfm=4.008000) head_pre=2.306486
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86780] 05:35:12
+  real_reward_mean=0.5335
+  q_top5=[(35, 5, 5, 0.9568371772766113), (26, 4, 2, 0.16609379649162292), (33, 5, 3, 0.15455737709999084), (27, 4, 3, 0.15219444036483765), (4, 0, 4, 0.1404542177915573)]
+  Q_loss=0.151071 | q_mean=0.544219 | epsilon=0.0200
+  td_error_mean=0.271836 | frac_clipped=0.101
+  fpn_norm_entropy=0.9166 | fpn_tau_std=0.2741
+  grad_total_pre=9.257683 | grad_total_post=9.257683 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=9.167620 (yolo=8.280623 tfm=3.934022) head_pre=1.288192
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86790] 05:35:30
+  real_reward_mean=0.5435
+  q_top5=[(5, 0, 5, 1.062868595123291), (29, 4, 5, 0.26451238989830017), (1, 0, 1, 0.2388087809085846), (6, 1, 0, 0.22203472256660461), (34, 5, 4, 0.20971257984638214)]
+  Q_loss=0.106847 | q_mean=0.448309 | epsilon=0.0200
+  td_error_mean=0.172494 | frac_clipped=0.080
+  fpn_norm_entropy=0.9133 | fpn_tau_std=0.2732
+  grad_total_pre=35.962349 | grad_total_post=10.000001 | clip_scale=0.278069 clip_percent=72.19%
+  backbone_pre=34.625978 (yolo=30.889599 tfm=15.645798) head_pre=9.712482
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86800] 05:35:49
+  real_reward_mean=0.5385
+  q_top5=[(23, 3, 5, 0.9884203672409058), (0, 0, 0, 0.2303023338317871), (28, 4, 4, 0.22401267290115356), (7, 1, 1, 0.21410012245178223), (12, 2, 0, 0.20826348662376404)]
+  Q_loss=0.257934 | q_mean=0.611161 | epsilon=0.0200
+  td_error_mean=0.233299 | frac_clipped=0.073
+  fpn_norm_entropy=0.9190 | fpn_tau_std=0.2745
+  grad_total_pre=102.624557 | grad_total_post=10.000000 | clip_scale=0.097443 clip_percent=90.26%
+  backbone_pre=102.042766 (yolo=87.971038 tfm=51.709018) head_pre=10.912085
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.228530e-02 | weight_delta_prev_100=7.104721e-04 (ref_step=86700)
+---
+[Step 86810] 05:36:04
+  real_reward_mean=0.5335
+  q_top5=[(0, 0, 0, 1.013122320175171), (4, 0, 4, 0.20900660753250122), (16, 2, 4, 0.2008538842201233), (2, 0, 2, 0.19156813621520996), (20, 3, 2, 0.18673062324523926)]
+  Q_loss=0.179041 | q_mean=0.658599 | epsilon=0.0200
+  td_error_mean=0.192464 | frac_clipped=0.060
+  fpn_norm_entropy=0.9218 | fpn_tau_std=0.2751
+  grad_total_pre=63.204220 | grad_total_post=10.000000 | clip_scale=0.158217 clip_percent=84.18%
+  backbone_pre=63.036055 (yolo=59.275445 tfm=21.446813) head_pre=4.607536
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86820] 05:36:22
+  real_reward_mean=0.5510
+  q_top5=[(2, 0, 2, 1.077744722366333), (26, 4, 2, 0.3372191786766052), (30, 5, 0, 0.31277865171432495), (31, 5, 1, 0.3105179965496063), (15, 2, 3, 0.30938950181007385)]
+  Q_loss=0.123320 | q_mean=0.438508 | epsilon=0.0200
+  td_error_mean=0.168776 | frac_clipped=0.055
+  fpn_norm_entropy=0.9168 | fpn_tau_std=0.2739
+  grad_total_pre=27.550610 | grad_total_post=9.999999 | clip_scale=0.362968 clip_percent=63.70%
+  backbone_pre=27.377312 (yolo=25.005629 tfm=11.146108) head_pre=3.085274
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86830] 05:36:43
+  real_reward_mean=0.5560
+  q_top5=[(35, 5, 5, 0.9780659079551697), (4, 0, 4, 0.24712373316287994), (27, 4, 3, 0.23918697237968445), (12, 2, 0, 0.23571501672267914), (7, 1, 1, 0.2340797781944275)]
+  Q_loss=0.195376 | q_mean=0.521902 | epsilon=0.0200
+  td_error_mean=0.252070 | frac_clipped=0.087
+  fpn_norm_entropy=0.9189 | fpn_tau_std=0.2745
+  grad_total_pre=28.400801 | grad_total_post=10.000000 | clip_scale=0.352103 clip_percent=64.79%
+  backbone_pre=28.097681 (yolo=25.849161 tfm=11.013652) head_pre=4.138336
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86840] 05:36:55
+  real_reward_mean=0.5580
+  q_top5=[(32, 5, 2, 0.9484170079231262), (33, 5, 3, 0.6747493743896484), (4, 0, 4, 0.23222821950912476), (13, 2, 1, 0.2231636643409729), (17, 2, 5, 0.17818117141723633)]
+  Q_loss=0.077247 | q_mean=0.551753 | epsilon=0.0200
+  td_error_mean=0.127873 | frac_clipped=0.046
+  fpn_norm_entropy=0.9155 | fpn_tau_std=0.2738
+  grad_total_pre=7.013002 | grad_total_post=7.013003 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=6.731038 (yolo=6.005417 tfm=3.040039) head_pre=1.968585
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86850] 05:37:07
+  real_reward_mean=0.4450
+  q_top5=[(31, 5, 1, 1.1272263526916504), (32, 5, 2, 0.9516436457633972), (10, 1, 4, 0.38215208053588867), (9, 1, 3, 0.3553694486618042), (8, 1, 2, 0.3426817059516907)]
+  Q_loss=0.203013 | q_mean=0.567487 | epsilon=0.0200
+  td_error_mean=0.215604 | frac_clipped=0.078
+  fpn_norm_entropy=0.9217 | fpn_tau_std=0.2749
+  grad_total_pre=70.868950 | grad_total_post=9.999999 | clip_scale=0.141106 clip_percent=85.89%
+  backbone_pre=70.685274 (yolo=59.421831 tfm=38.281248) head_pre=5.098966
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86860] 05:37:22
+  real_reward_mean=0.3525
+  q_top5=[(0, 0, 0, 0.9721754789352417), (15, 2, 3, 0.20511659979820251), (14, 2, 2, 0.16422438621520996), (8, 1, 2, 0.16329391300678253), (17, 2, 5, 0.15953563153743744)]
+  Q_loss=0.162546 | q_mean=0.779562 | epsilon=0.0200
+  td_error_mean=0.215267 | frac_clipped=0.081
+  fpn_norm_entropy=0.9243 | fpn_tau_std=0.2757
+  grad_total_pre=50.559471 | grad_total_post=10.000000 | clip_scale=0.197787 clip_percent=80.22%
+  backbone_pre=50.503623 (yolo=42.813547 tfm=26.788359) head_pre=2.375789
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86870] 05:37:37
+  real_reward_mean=0.3575
+  q_top5=[(0, 0, 0, 1.002606987953186), (34, 5, 4, 0.2338327169418335), (28, 4, 4, 0.22364641726016998), (26, 4, 2, 0.2188544124364853), (3, 0, 3, 0.21250522136688232)]
+  Q_loss=0.072914 | q_mean=0.689543 | epsilon=0.0200
+  td_error_mean=0.111203 | frac_clipped=0.031
+  fpn_norm_entropy=0.9177 | fpn_tau_std=0.2745
+  grad_total_pre=28.169163 | grad_total_post=10.000000 | clip_scale=0.354998 clip_percent=64.50%
+  backbone_pre=27.969404 (yolo=24.410551 tfm=13.653298) head_pre=3.348760
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86880] 05:37:58
+  real_reward_mean=0.3575
+  q_top5=[(35, 5, 5, 0.9801706075668335), (5, 0, 5, 0.2341645061969757), (11, 1, 5, 0.20573166012763977), (23, 3, 5, 0.1819668561220169), (9, 1, 3, 0.1810380071401596)]
+  Q_loss=0.127847 | q_mean=0.613483 | epsilon=0.0200
+  td_error_mean=0.165599 | frac_clipped=0.058
+  fpn_norm_entropy=0.9160 | fpn_tau_std=0.2740
+  grad_total_pre=10.336132 | grad_total_post=9.999999 | clip_scale=0.967480 clip_percent=3.25%
+  backbone_pre=9.873504 (yolo=8.986685 tfm=4.089690) head_pre=3.057702
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86890] 05:38:20
+  real_reward_mean=0.3575
+  q_top5=[(0, 0, 0, 1.004328966140747), (1, 0, 1, 0.2278965413570404), (29, 4, 5, 0.21864302456378937), (30, 5, 0, 0.21630525588989258), (8, 1, 2, 0.20463787019252777)]
+  Q_loss=0.155736 | q_mean=0.643104 | epsilon=0.0200
+  td_error_mean=0.193231 | frac_clipped=0.065
+  fpn_norm_entropy=0.9199 | fpn_tau_std=0.2751
+  grad_total_pre=13.122327 | grad_total_post=10.000000 | clip_scale=0.762060 clip_percent=23.79%
+  backbone_pre=12.047094 (yolo=11.053281 tfm=4.791392) head_pre=5.202212
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86900] 05:38:35
+  real_reward_mean=0.3575
+  q_top5=[(31, 5, 1, 1.0135494470596313), (30, 5, 0, 0.734332799911499), (32, 5, 2, 0.41426122188568115), (1, 0, 1, 0.2661930322647095), (5, 0, 5, 0.24077555537223816)]
+  Q_loss=0.090371 | q_mean=0.504643 | epsilon=0.0200
+  td_error_mean=0.165468 | frac_clipped=0.067
+  fpn_norm_entropy=0.9187 | fpn_tau_std=0.2749
+  grad_total_pre=28.913282 | grad_total_post=9.999998 | clip_scale=0.345862 clip_percent=65.41%
+  backbone_pre=28.857616 (yolo=25.698179 tfm=13.128809) head_pre=1.793269
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.234519e-02 | weight_delta_prev_100=7.808820e-04 (ref_step=86800)
+---
+[Step 86910] 05:38:56
+  real_reward_mean=0.3675
+  q_top5=[(5, 0, 5, 0.9670318365097046), (34, 5, 4, 0.17264921963214874), (20, 3, 2, 0.1706482172012329), (32, 5, 2, 0.16165974736213684), (33, 5, 3, 0.15461744368076324)]
+  Q_loss=0.062118 | q_mean=0.517972 | epsilon=0.0200
+  td_error_mean=0.108481 | frac_clipped=0.027
+  fpn_norm_entropy=0.9179 | fpn_tau_std=0.2748
+  grad_total_pre=41.153431 | grad_total_post=10.000000 | clip_scale=0.242993 clip_percent=75.70%
+  backbone_pre=41.028216 (yolo=37.321975 tfm=17.040679) head_pre=3.207856
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86920] 05:39:12
+  real_reward_mean=0.3500
+  q_top5=[(6, 1, 0, 1.1846563816070557), (0, 0, 0, 1.1026461124420166), (2, 0, 2, 0.8299965858459473), (1, 0, 1, 0.4735989272594452), (25, 4, 1, 0.39675837755203247)]
+  Q_loss=0.095924 | q_mean=0.606339 | epsilon=0.0200
+  td_error_mean=0.152372 | frac_clipped=0.062
+  fpn_norm_entropy=0.9198 | fpn_tau_std=0.2751
+  grad_total_pre=12.146569 | grad_total_post=9.999999 | clip_scale=0.823278 clip_percent=17.67%
+  backbone_pre=12.113708 (yolo=9.657002 tfm=7.313292) head_pre=0.892869
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86930] 05:39:32
+  real_reward_mean=0.3500
+  q_top5=[(30, 5, 0, 0.9773791432380676), (6, 1, 0, 0.22208404541015625), (8, 1, 2, 0.16470655798912048), (34, 5, 4, 0.1607798933982849), (13, 2, 1, 0.15190260112285614)]
+  Q_loss=0.173145 | q_mean=0.688124 | epsilon=0.0200
+  td_error_mean=0.165015 | frac_clipped=0.052
+  fpn_norm_entropy=0.9212 | fpn_tau_std=0.2752
+  grad_total_pre=56.795895 | grad_total_post=10.000000 | clip_scale=0.176069 clip_percent=82.39%
+  backbone_pre=56.431248 (yolo=51.403063 tfm=23.285423) head_pre=6.425548
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86940] 05:39:47
+  real_reward_mean=0.3550
+  q_top5=[(4, 0, 4, 1.0400930643081665), (32, 5, 2, 0.23935309052467346), (7, 1, 1, 0.22513404488563538), (25, 4, 1, 0.20333048701286316), (31, 5, 1, 0.19849516451358795)]
+  Q_loss=0.238235 | q_mean=0.595579 | epsilon=0.0200
+  td_error_mean=0.169421 | frac_clipped=0.060
+  fpn_norm_entropy=0.9186 | fpn_tau_std=0.2749
+  grad_total_pre=16.225677 | grad_total_post=9.999999 | clip_scale=0.616307 clip_percent=38.37%
+  backbone_pre=15.131109 (yolo=13.853136 tfm=6.086137) head_pre=5.858509
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86950] 05:40:05
+  real_reward_mean=0.4950
+  q_top5=[(35, 5, 5, 1.0581474304199219), (4, 0, 4, 0.28140175342559814), (17, 2, 5, 0.26843011379241943), (28, 4, 4, 0.2602924704551697), (33, 5, 3, 0.2526562809944153)]
+  Q_loss=0.067082 | q_mean=0.675908 | epsilon=0.0200
+  td_error_mean=0.128925 | frac_clipped=0.040
+  fpn_norm_entropy=0.9189 | fpn_tau_std=0.2750
+  grad_total_pre=4.649127 | grad_total_post=4.649127 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=4.289221 (yolo=3.936084 tfm=1.704308) head_pre=1.793591
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86960] 05:40:26
+  real_reward_mean=0.5705
+  q_top5=[(1, 0, 1, 1.2336227893829346), (6, 1, 0, 1.190512776374817), (0, 0, 0, 1.1610819101333618), (25, 4, 1, 0.5074117183685303), (29, 4, 5, 0.4541298747062683)]
+  Q_loss=0.186254 | q_mean=0.625536 | epsilon=0.0200
+  td_error_mean=0.232236 | frac_clipped=0.085
+  fpn_norm_entropy=0.9142 | fpn_tau_std=0.2745
+  grad_total_pre=145.409927 | grad_total_post=10.000000 | clip_scale=0.068771 clip_percent=93.12%
+  backbone_pre=145.225124 (yolo=126.039579 tfm=72.141258) head_pre=7.328719
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86970] 05:40:45
+  real_reward_mean=0.5535
+  q_top5=[(0, 0, 0, 0.959428071975708), (15, 2, 3, 0.24268653988838196), (11, 1, 5, 0.2289714217185974), (9, 1, 3, 0.19633999466896057), (28, 4, 4, 0.1884574294090271)]
+  Q_loss=0.185129 | q_mean=0.416714 | epsilon=0.0200
+  td_error_mean=0.234905 | frac_clipped=0.095
+  fpn_norm_entropy=0.9151 | fpn_tau_std=0.2746
+  grad_total_pre=21.462559 | grad_total_post=10.000000 | clip_scale=0.465928 clip_percent=53.41%
+  backbone_pre=21.202818 (yolo=19.057082 tfm=9.294467) head_pre=3.328954
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86980] 05:41:03
+  real_reward_mean=0.5535
+  q_top5=[(0, 0, 0, 1.0035063028335571), (18, 3, 0, 0.28313228487968445), (10, 1, 4, 0.28253620862960815), (4, 0, 4, 0.28194308280944824), (3, 0, 3, 0.27816611528396606)]
+  Q_loss=0.085208 | q_mean=0.653055 | epsilon=0.0200
+  td_error_mean=0.147158 | frac_clipped=0.051
+  fpn_norm_entropy=0.9176 | fpn_tau_std=0.2748
+  grad_total_pre=25.838333 | grad_total_post=9.999999 | clip_scale=0.387022 clip_percent=61.30%
+  backbone_pre=25.349974 (yolo=22.661756 tfm=11.360722) head_pre=4.999828
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 86990] 05:41:21
+  real_reward_mean=0.5485
+  q_top5=[(5, 0, 5, 1.0643253326416016), (0, 0, 0, 0.2777988016605377), (21, 3, 3, 0.2430354207754135), (34, 5, 4, 0.24108465015888214), (6, 1, 0, 0.23572024703025818)]
+  Q_loss=0.078414 | q_mean=0.641546 | epsilon=0.0200
+  td_error_mean=0.158114 | frac_clipped=0.044
+  fpn_norm_entropy=0.9150 | fpn_tau_std=0.2741
+  grad_total_pre=13.742114 | grad_total_post=9.999999 | clip_scale=0.727690 clip_percent=27.23%
+  backbone_pre=13.670389 (yolo=11.543749 tfm=7.322663) head_pre=1.402196
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87000] 05:41:40
+  real_reward_mean=0.5415
+  q_top5=[(1, 0, 1, 0.9625630378723145), (9, 1, 3, 0.17168202996253967), (15, 2, 3, 0.16626019775867462), (29, 4, 5, 0.16252435743808746), (4, 0, 4, 0.15166929364204407)]
+  Q_loss=0.128461 | q_mean=0.594554 | epsilon=0.0200
+  td_error_mean=0.142434 | frac_clipped=0.046
+  fpn_norm_entropy=0.9160 | fpn_tau_std=0.2742
+  grad_total_pre=26.758165 | grad_total_post=9.999999 | clip_scale=0.373718 clip_percent=62.63%
+  backbone_pre=25.995663 (yolo=24.170512 tfm=9.568742) head_pre=6.342315
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.243233e-02 | weight_delta_prev_100=7.715535e-04 (ref_step=86900)
+---
+[Step 87010] 05:41:58
+  real_reward_mean=0.5315
+  q_top5=[(30, 5, 0, 1.154563546180725), (24, 4, 0, 1.0969805717468262), (33, 5, 3, 0.31703782081604004), (29, 4, 5, 0.2842947840690613), (5, 0, 5, 0.2769894599914551)]
+  Q_loss=0.147288 | q_mean=0.552663 | epsilon=0.0200
+  td_error_mean=0.146181 | frac_clipped=0.053
+  fpn_norm_entropy=0.9178 | fpn_tau_std=0.2744
+  grad_total_pre=30.409597 | grad_total_post=10.000000 | clip_scale=0.328844 clip_percent=67.12%
+  backbone_pre=29.835399 (yolo=27.295541 tfm=12.045932) head_pre=5.881550
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87020] 05:42:19
+  real_reward_mean=0.5540
+  q_top5=[(32, 5, 2, 1.0579023361206055), (5, 0, 5, 0.9593117237091064), (3, 0, 3, 0.6989983320236206), (6, 1, 0, 0.18527747690677643), (12, 2, 0, 0.18352244794368744)]
+  Q_loss=0.133437 | q_mean=0.555592 | epsilon=0.0200
+  td_error_mean=0.186220 | frac_clipped=0.060
+  fpn_norm_entropy=0.9193 | fpn_tau_std=0.2746
+  grad_total_pre=19.686224 | grad_total_post=9.999999 | clip_scale=0.507969 clip_percent=49.20%
+  backbone_pre=19.610833 (yolo=18.890223 tfm=5.267280) head_pre=1.721245
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87030] 05:42:37
+  real_reward_mean=0.5370
+  q_top5=[(24, 4, 0, 1.1091511249542236), (29, 4, 5, 0.22288277745246887), (14, 2, 2, 0.21845465898513794), (31, 5, 1, 0.218035489320755), (6, 1, 0, 0.21724632382392883)]
+  Q_loss=0.064416 | q_mean=0.629770 | epsilon=0.0200
+  td_error_mean=0.114696 | frac_clipped=0.032
+  fpn_norm_entropy=0.9165 | fpn_tau_std=0.2742
+  grad_total_pre=17.251398 | grad_total_post=9.999998 | clip_scale=0.579663 clip_percent=42.03%
+  backbone_pre=16.884250 (yolo=14.405812 tfm=8.806275) head_pre=3.540171
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87040] 05:42:54
+  real_reward_mean=0.5370
+  q_top5=[(0, 0, 0, 1.0784913301467896), (24, 4, 0, 0.32611846923828125), (28, 4, 4, 0.27215248346328735), (2, 0, 2, 0.2705885171890259), (27, 4, 3, 0.26512253284454346)]
+  Q_loss=0.167965 | q_mean=0.713426 | epsilon=0.0200
+  td_error_mean=0.166719 | frac_clipped=0.045
+  fpn_norm_entropy=0.9206 | fpn_tau_std=0.2751
+  grad_total_pre=93.723335 | grad_total_post=10.000000 | clip_scale=0.106697 clip_percent=89.33%
+  backbone_pre=93.492428 (yolo=74.067962 tfm=57.050601) head_pre=6.574963
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87050] 05:43:12
+  real_reward_mean=0.5320
+  q_top5=[(0, 0, 0, 0.9890372157096863), (10, 1, 4, 0.19127699732780457), (4, 0, 4, 0.1873055100440979), (11, 1, 5, 0.18702176213264465), (29, 4, 5, 0.17729118466377258)]
+  Q_loss=0.145085 | q_mean=0.574066 | epsilon=0.0200
+  td_error_mean=0.168469 | frac_clipped=0.062
+  fpn_norm_entropy=0.9146 | fpn_tau_std=0.2741
+  grad_total_pre=14.653934 | grad_total_post=10.000000 | clip_scale=0.682411 clip_percent=31.76%
+  backbone_pre=14.493689 (yolo=12.526869 tfm=7.290033) head_pre=2.161202
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87060] 05:43:28
+  real_reward_mean=0.5315
+  q_top5=[(0, 0, 0, 1.0907015800476074), (6, 1, 0, 1.00628662109375), (21, 3, 3, 0.35014885663986206), (15, 2, 3, 0.3337200880050659), (10, 1, 4, 0.307801753282547)]
+  Q_loss=0.105463 | q_mean=0.505595 | epsilon=0.0200
+  td_error_mean=0.148706 | frac_clipped=0.055
+  fpn_norm_entropy=0.9159 | fpn_tau_std=0.2744
+  grad_total_pre=23.693546 | grad_total_post=10.000000 | clip_scale=0.422056 clip_percent=57.79%
+  backbone_pre=23.610523 (yolo=20.185620 tfm=12.247349) head_pre=1.981746
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87070] 05:43:46
+  real_reward_mean=0.5315
+  q_top5=[(0, 0, 0, 1.0442017316818237), (30, 5, 0, 0.22273433208465576), (18, 3, 0, 0.22215205430984497), (5, 0, 5, 0.20042307674884796), (33, 5, 3, 0.19091182947158813)]
+  Q_loss=0.136346 | q_mean=0.582996 | epsilon=0.0200
+  td_error_mean=0.187124 | frac_clipped=0.075
+  fpn_norm_entropy=0.9137 | fpn_tau_std=0.2739
+  grad_total_pre=23.901445 | grad_total_post=9.999999 | clip_scale=0.418385 clip_percent=58.16%
+  backbone_pre=23.383045 (yolo=20.369676 tfm=11.482294) head_pre=4.950985
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87080] 05:44:04
+  real_reward_mean=0.5145
+  q_top5=[(35, 5, 5, 1.0004228353500366), (10, 1, 4, 0.2777651250362396), (11, 1, 5, 0.27094247937202454), (4, 0, 4, 0.2670639753341675), (5, 0, 5, 0.2643641233444214)]
+  Q_loss=0.078719 | q_mean=0.653821 | epsilon=0.0200
+  td_error_mean=0.144793 | frac_clipped=0.040
+  fpn_norm_entropy=0.9168 | fpn_tau_std=0.2746
+  grad_total_pre=11.444330 | grad_total_post=9.999999 | clip_scale=0.873795 clip_percent=12.62%
+  backbone_pre=11.285185 (yolo=9.945723 tfm=5.332729) head_pre=1.901915
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87090] 05:44:23
+  real_reward_mean=0.5145
+  q_top5=[(5, 0, 5, 0.9652220010757446), (14, 2, 2, 0.18332597613334656), (35, 5, 5, 0.17086225748062134), (8, 1, 2, 0.16672250628471375), (13, 2, 1, 0.16417619585990906)]
+  Q_loss=0.203627 | q_mean=0.559363 | epsilon=0.0200
+  td_error_mean=0.250887 | frac_clipped=0.109
+  fpn_norm_entropy=0.9169 | fpn_tau_std=0.2745
+  grad_total_pre=24.363747 | grad_total_post=9.999999 | clip_scale=0.410446 clip_percent=58.96%
+  backbone_pre=24.136862 (yolo=21.652172 tfm=10.666375) head_pre=3.317233
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87100] 05:44:38
+  real_reward_mean=0.5045
+  q_top5=[(30, 5, 0, 1.0103309154510498), (21, 3, 3, 0.2587050795555115), (29, 4, 5, 0.24854309856891632), (3, 0, 3, 0.24783572554588318), (27, 4, 3, 0.22964590787887573)]
+  Q_loss=0.116654 | q_mean=0.534380 | epsilon=0.0200
+  td_error_mean=0.228711 | frac_clipped=0.073
+  fpn_norm_entropy=0.9157 | fpn_tau_std=0.2745
+  grad_total_pre=12.060326 | grad_total_post=9.999999 | clip_scale=0.829165 clip_percent=17.08%
+  backbone_pre=11.882745 (yolo=10.510130 tfm=5.544077) head_pre=2.062001
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.251516e-02 | weight_delta_prev_100=8.044309e-04 (ref_step=87000)
+---
+[Step 87110] 05:44:53
+  real_reward_mean=0.5045
+  q_top5=[(35, 5, 5, 0.9780494570732117), (5, 0, 5, 0.21697673201560974), (23, 3, 5, 0.1902192384004593), (11, 1, 5, 0.18954381346702576), (15, 2, 3, 0.1877223551273346)]
+  Q_loss=0.110754 | q_mean=0.654894 | epsilon=0.0200
+  td_error_mean=0.190262 | frac_clipped=0.068
+  fpn_norm_entropy=0.9192 | fpn_tau_std=0.2750
+  grad_total_pre=7.180319 | grad_total_post=7.180318 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=7.044201 (yolo=6.156046 tfm=3.424013) head_pre=1.391476
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87120] 05:45:12
+  real_reward_mean=0.5045
+  q_top5=[(25, 4, 1, 1.0264003276824951), (2, 0, 2, 0.2241087257862091), (1, 0, 1, 0.201838880777359), (4, 0, 4, 0.2014273703098297), (6, 1, 0, 0.19748204946517944)]
+  Q_loss=0.092636 | q_mean=0.773198 | epsilon=0.0200
+  td_error_mean=0.148725 | frac_clipped=0.062
+  fpn_norm_entropy=0.9215 | fpn_tau_std=0.2756
+  grad_total_pre=38.233749 | grad_total_post=9.999999 | clip_scale=0.261549 clip_percent=73.85%
+  backbone_pre=38.048276 (yolo=35.401227 tfm=13.943617) head_pre=3.761399
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87130] 05:45:33
+  real_reward_mean=0.5215
+  q_top5=[(6, 1, 0, 1.1160242557525635), (24, 4, 0, 0.3606342673301697), (8, 1, 2, 0.34891724586486816), (12, 2, 0, 0.31447267532348633), (3, 0, 3, 0.3072989583015442)]
+  Q_loss=0.146567 | q_mean=0.586498 | epsilon=0.0200
+  td_error_mean=0.185162 | frac_clipped=0.071
+  fpn_norm_entropy=0.9162 | fpn_tau_std=0.2745
+  grad_total_pre=31.031670 | grad_total_post=10.000000 | clip_scale=0.322251 clip_percent=67.77%
+  backbone_pre=30.761988 (yolo=27.942090 tfm=12.866216) head_pre=4.082239
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87140] 05:45:50
+  real_reward_mean=0.5215
+  q_top5=[(5, 0, 5, 1.016568899154663), (20, 3, 2, 0.18011504411697388), (0, 0, 0, 0.17778101563453674), (26, 4, 2, 0.17656895518302917), (25, 4, 1, 0.1751711368560791)]
+  Q_loss=0.077069 | q_mean=0.606645 | epsilon=0.0200
+  td_error_mean=0.138354 | frac_clipped=0.041
+  fpn_norm_entropy=0.9181 | fpn_tau_std=0.2744
+  grad_total_pre=9.972212 | grad_total_post=9.972212 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=9.922598 (yolo=9.346814 tfm=3.330917) head_pre=0.993516
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87150] 05:46:05
+  real_reward_mean=0.5165
+  q_top5=[(11, 1, 5, 1.0381674766540527), (5, 0, 5, 0.25801917910575867), (26, 4, 2, 0.19205713272094727), (22, 3, 4, 0.15759435296058655), (29, 4, 5, 0.1535595804452896)]
+  Q_loss=0.237069 | q_mean=0.527916 | epsilon=0.0200
+  td_error_mean=0.203849 | frac_clipped=0.077
+  fpn_norm_entropy=0.9176 | fpn_tau_std=0.2744
+  grad_total_pre=22.715414 | grad_total_post=9.999999 | clip_scale=0.440230 clip_percent=55.98%
+  backbone_pre=22.578006 (yolo=21.260169 tfm=7.600759) head_pre=2.494733
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87160] 05:46:21
+  real_reward_mean=0.5290
+  q_top5=[(0, 0, 0, 0.9681755304336548), (3, 0, 3, 0.1854032278060913), (25, 4, 1, 0.17640173435211182), (8, 1, 2, 0.16456931829452515), (32, 5, 2, 0.16214948892593384)]
+  Q_loss=0.108511 | q_mean=0.612128 | epsilon=0.0200
+  td_error_mean=0.174496 | frac_clipped=0.064
+  fpn_norm_entropy=0.9175 | fpn_tau_std=0.2743
+  grad_total_pre=20.936224 | grad_total_post=9.999998 | clip_scale=0.477641 clip_percent=52.24%
+  backbone_pre=20.630344 (yolo=18.547261 tfm=9.033838) head_pre=3.565716
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87170] 05:46:42
+  real_reward_mean=0.5170
+  q_top5=[(30, 5, 0, 0.9740183353424072), (18, 3, 0, 0.27001631259918213), (6, 1, 0, 0.2651268541812897), (7, 1, 1, 0.2609829306602478), (31, 5, 1, 0.25181031227111816)]
+  Q_loss=0.138661 | q_mean=0.692205 | epsilon=0.0200
+  td_error_mean=0.176711 | frac_clipped=0.076
+  fpn_norm_entropy=0.9176 | fpn_tau_std=0.2744
+  grad_total_pre=11.775557 | grad_total_post=9.999999 | clip_scale=0.849217 clip_percent=15.08%
+  backbone_pre=11.711976 (yolo=10.619712 tfm=4.938835) head_pre=1.222038
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87180] 05:48:05
+  real_reward_mean=0.5410
+  q_top5=[(12, 2, 0, 1.0320007801055908), (10, 1, 4, 0.23877999186515808), (0, 0, 0, 0.23225454986095428), (17, 2, 5, 0.22645698487758636), (5, 0, 5, 0.21708804368972778)]
+  Q_loss=0.105153 | q_mean=0.552760 | epsilon=0.0200
+  td_error_mean=0.162602 | frac_clipped=0.057
+  fpn_norm_entropy=0.9118 | fpn_tau_std=0.2734
+  grad_total_pre=18.040888 | grad_total_post=9.999998 | clip_scale=0.554296 clip_percent=44.57%
+  backbone_pre=17.656568 (yolo=15.616420 tfm=8.239042) head_pre=3.703946
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87190] 05:48:20
+  real_reward_mean=0.5235
+  q_top5=[(34, 5, 4, 0.9695733785629272), (16, 2, 4, 0.23178741335868835), (11, 1, 5, 0.22382131218910217), (23, 3, 5, 0.220535010099411), (17, 2, 5, 0.18611595034599304)]
+  Q_loss=0.134051 | q_mean=0.694907 | epsilon=0.0200
+  td_error_mean=0.186655 | frac_clipped=0.075
+  fpn_norm_entropy=0.9137 | fpn_tau_std=0.2737
+  grad_total_pre=9.550365 | grad_total_post=9.550365 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=9.027237 (yolo=8.428566 tfm=3.232690) head_pre=3.117445
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87200] 05:48:39
+  real_reward_mean=0.5405
+  q_top5=[(0, 0, 0, 0.9856329560279846), (2, 0, 2, 0.23793330788612366), (9, 1, 3, 0.19305731356143951), (4, 0, 4, 0.1674889624118805), (8, 1, 2, 0.1649644374847412)]
+  Q_loss=0.268197 | q_mean=0.627840 | epsilon=0.0200
+  td_error_mean=0.281753 | frac_clipped=0.109
+  fpn_norm_entropy=0.9161 | fpn_tau_std=0.2740
+  grad_total_pre=21.234287 | grad_total_post=9.999999 | clip_scale=0.470936 clip_percent=52.91%
+  backbone_pre=20.543445 (yolo=18.762516 tfm=8.366669) head_pre=5.372319
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.258889e-02 | weight_delta_prev_100=7.394137e-04 (ref_step=87100)
+---
+[Step 87210] 05:48:55
+  real_reward_mean=0.5355
+  q_top5=[(35, 5, 5, 0.977501392364502), (10, 1, 4, 0.2712928056716919), (15, 2, 3, 0.2534705400466919), (4, 0, 4, 0.24080821871757507), (3, 0, 3, 0.24025940895080566)]
+  Q_loss=0.197758 | q_mean=0.744894 | epsilon=0.0200
+  td_error_mean=0.218034 | frac_clipped=0.082
+  fpn_norm_entropy=0.9212 | fpn_tau_std=0.2751
+  grad_total_pre=12.125975 | grad_total_post=9.999999 | clip_scale=0.824676 clip_percent=17.53%
+  backbone_pre=12.036546 (yolo=10.553194 tfm=5.788656) head_pre=1.469972
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87220] 05:49:15
+  real_reward_mean=0.5405
+  q_top5=[(5, 0, 5, 1.0045881271362305), (21, 3, 3, 0.2526699900627136), (28, 4, 4, 0.23599717020988464), (33, 5, 3, 0.2334194779396057), (26, 4, 2, 0.23129169642925262)]
+  Q_loss=0.216671 | q_mean=0.595374 | epsilon=0.0200
+  td_error_mean=0.228202 | frac_clipped=0.089
+  fpn_norm_entropy=0.9174 | fpn_tau_std=0.2745
+  grad_total_pre=163.514404 | grad_total_post=10.000000 | clip_scale=0.061157 clip_percent=93.88%
+  backbone_pre=162.991386 (yolo=141.144746 tfm=81.512900) head_pre=13.067849
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87230] 05:49:33
+  real_reward_mean=0.5575
+  q_top5=[(30, 5, 0, 1.0153038501739502), (25, 4, 1, 0.300247460603714), (11, 1, 5, 0.2900698482990265), (26, 4, 2, 0.27522534132003784), (19, 3, 1, 0.27122873067855835)]
+  Q_loss=0.229894 | q_mean=0.507443 | epsilon=0.0200
+  td_error_mean=0.286537 | frac_clipped=0.100
+  fpn_norm_entropy=0.9162 | fpn_tau_std=0.2742
+  grad_total_pre=65.518265 | grad_total_post=10.000000 | clip_scale=0.152629 clip_percent=84.74%
+  backbone_pre=64.598233 (yolo=59.114828 tfm=26.045513) head_pre=10.941254
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87240] 05:49:49
+  real_reward_mean=0.5625
+  q_top5=[(11, 1, 5, 1.093296766281128), (9, 1, 3, 0.28981471061706543), (1, 0, 1, 0.2553742527961731), (3, 0, 3, 0.2502393126487732), (0, 0, 0, 0.2488546371459961)]
+  Q_loss=0.133476 | q_mean=0.596147 | epsilon=0.0200
+  td_error_mean=0.205782 | frac_clipped=0.070
+  fpn_norm_entropy=0.9180 | fpn_tau_std=0.2748
+  grad_total_pre=12.393959 | grad_total_post=9.999999 | clip_scale=0.806845 clip_percent=19.32%
+  backbone_pre=12.324546 (yolo=11.388094 tfm=4.712299) head_pre=1.309874
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87250] 05:50:07
+  real_reward_mean=0.5625
+  q_top5=[(6, 1, 0, 1.1538389921188354), (4, 0, 4, 0.3527374863624573), (12, 2, 0, 0.347024530172348), (10, 1, 4, 0.2838301658630371), (18, 3, 0, 0.2755633294582367)]
+  Q_loss=0.194104 | q_mean=0.781091 | epsilon=0.0200
+  td_error_mean=0.212422 | frac_clipped=0.064
+  fpn_norm_entropy=0.9240 | fpn_tau_std=0.2761
+  grad_total_pre=105.638260 | grad_total_post=10.000000 | clip_scale=0.094663 clip_percent=90.53%
+  backbone_pre=104.836853 (yolo=98.456806 tfm=36.014204) head_pre=12.987503
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87260] 05:50:26
+  real_reward_mean=0.5675
+  q_top5=[(34, 5, 4, 1.0073139667510986), (33, 5, 3, 0.6614318490028381), (4, 0, 4, 0.18469277024269104), (2, 0, 2, 0.181444451212883), (9, 1, 3, 0.163028746843338)]
+  Q_loss=0.150314 | q_mean=0.700727 | epsilon=0.0200
+  td_error_mean=0.229881 | frac_clipped=0.082
+  fpn_norm_entropy=0.9233 | fpn_tau_std=0.2760
+  grad_total_pre=20.999384 | grad_total_post=9.999999 | clip_scale=0.476204 clip_percent=52.38%
+  backbone_pre=20.954521 (yolo=18.327176 tfm=10.159063) head_pre=1.371918
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87270] 05:50:41
+  real_reward_mean=0.5675
+  q_top5=[(30, 5, 0, 0.9675798416137695), (31, 5, 1, 0.2687002420425415), (13, 2, 1, 0.22538690268993378), (12, 2, 0, 0.22223439812660217), (4, 0, 4, 0.22175203263759613)]
+  Q_loss=0.095337 | q_mean=0.560007 | epsilon=0.0200
+  td_error_mean=0.170372 | frac_clipped=0.064
+  fpn_norm_entropy=0.9189 | fpn_tau_std=0.2749
+  grad_total_pre=47.621052 | grad_total_post=10.000000 | clip_scale=0.209991 clip_percent=79.00%
+  backbone_pre=47.532342 (yolo=44.228828 tfm=17.410753) head_pre=2.905337
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87280] 05:50:56
+  real_reward_mean=0.5625
+  q_top5=[(5, 0, 5, 1.0690784454345703), (18, 3, 0, 0.2062900960445404), (24, 4, 0, 0.1956239640712738), (7, 1, 1, 0.19203531742095947), (21, 3, 3, 0.1872708946466446)]
+  Q_loss=0.088641 | q_mean=0.577335 | epsilon=0.0200
+  td_error_mean=0.155902 | frac_clipped=0.057
+  fpn_norm_entropy=0.9172 | fpn_tau_std=0.2746
+  grad_total_pre=6.833539 | grad_total_post=6.833539 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=6.531267 (yolo=5.698045 tfm=3.192135) head_pre=2.009928
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87290] 05:51:12
+  real_reward_mean=0.5800
+  q_top5=[(4, 0, 4, 1.0155112743377686), (21, 3, 3, 0.24056307971477509), (26, 4, 2, 0.22631888091564178), (2, 0, 2, 0.22487877309322357), (27, 4, 3, 0.20736262202262878)]
+  Q_loss=0.152156 | q_mean=0.685424 | epsilon=0.0200
+  td_error_mean=0.243025 | frac_clipped=0.097
+  fpn_norm_entropy=0.9188 | fpn_tau_std=0.2748
+  grad_total_pre=8.596544 | grad_total_post=8.596544 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=8.007205 (yolo=6.716101 tfm=4.359968) head_pre=3.128136
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87300] 05:51:30
+  real_reward_mean=0.5750
+  q_top5=[(31, 5, 1, 1.0359399318695068), (33, 5, 3, 0.2243620902299881), (35, 5, 5, 0.20136061310768127), (22, 3, 4, 0.19819089770317078), (28, 4, 4, 0.1956346482038498)]
+  Q_loss=0.175598 | q_mean=0.574471 | epsilon=0.0200
+  td_error_mean=0.244907 | frac_clipped=0.085
+  fpn_norm_entropy=0.9159 | fpn_tau_std=0.2744
+  grad_total_pre=208.122574 | grad_total_post=10.000000 | clip_scale=0.048049 clip_percent=95.20%
+  backbone_pre=207.480411 (yolo=192.103490 tfm=78.386032) head_pre=16.336723
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.260057e-02 | weight_delta_prev_100=7.662537e-04 (ref_step=87200)
+---
+[Step 87310] 05:51:48
+  real_reward_mean=0.5800
+  q_top5=[(5, 0, 5, 1.1171948909759521), (34, 5, 4, 0.7880154848098755), (33, 5, 3, 0.6389364004135132), (6, 1, 0, 0.3541446328163147), (35, 5, 5, 0.3487994074821472)]
+  Q_loss=0.177246 | q_mean=0.645143 | epsilon=0.0200
+  td_error_mean=0.223342 | frac_clipped=0.097
+  fpn_norm_entropy=0.9172 | fpn_tau_std=0.2747
+  grad_total_pre=18.659546 | grad_total_post=9.999999 | clip_scale=0.535919 clip_percent=46.41%
+  backbone_pre=18.339167 (yolo=15.089472 tfm=10.422710) head_pre=3.442907
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87320] 05:52:01
+  real_reward_mean=0.5530
+  q_top5=[(35, 5, 5, 0.9715119004249573), (29, 4, 5, 0.1557149589061737), (17, 2, 5, 0.14870983362197876), (25, 4, 1, 0.14099672436714172), (3, 0, 3, 0.14078034460544586)]
+  Q_loss=0.386679 | q_mean=0.653345 | epsilon=0.0200
+  td_error_mean=0.271098 | frac_clipped=0.101
+  fpn_norm_entropy=0.9198 | fpn_tau_std=0.2750
+  grad_total_pre=74.322952 | grad_total_post=10.000000 | clip_scale=0.134548 clip_percent=86.55%
+  backbone_pre=73.400453 (yolo=66.912080 tfm=30.172835) head_pre=11.673672
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87330] 05:52:22
+  real_reward_mean=0.5530
+  q_top5=[(30, 5, 0, 0.9848602414131165), (26, 4, 2, 0.20769503712654114), (14, 2, 2, 0.20383432507514954), (22, 3, 4, 0.19825969636440277), (6, 1, 0, 0.18510207533836365)]
+  Q_loss=0.147848 | q_mean=0.655944 | epsilon=0.0200
+  td_error_mean=0.198290 | frac_clipped=0.076
+  fpn_norm_entropy=0.9198 | fpn_tau_std=0.2749
+  grad_total_pre=52.252377 | grad_total_post=10.000001 | clip_scale=0.191379 clip_percent=80.86%
+  backbone_pre=52.163921 (yolo=47.148887 tfm=22.317193) head_pre=3.039175
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87340] 05:52:37
+  real_reward_mean=0.5480
+  q_top5=[(35, 5, 5, 1.0315039157867432), (17, 2, 5, 0.23475944995880127), (23, 3, 5, 0.2301430106163025), (29, 4, 5, 0.2269069105386734), (4, 0, 4, 0.22623445093631744)]
+  Q_loss=0.084255 | q_mean=0.688543 | epsilon=0.0200
+  td_error_mean=0.176110 | frac_clipped=0.062
+  fpn_norm_entropy=0.9189 | fpn_tau_std=0.2747
+  grad_total_pre=15.013535 | grad_total_post=9.999999 | clip_scale=0.666066 clip_percent=33.39%
+  backbone_pre=14.975306 (yolo=13.745205 tfm=5.943831) head_pre=1.070726
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87350] 05:52:53
+  real_reward_mean=0.5480
+  q_top5=[(6, 1, 0, 0.9909435510635376), (27, 4, 3, 0.1817358434200287), (0, 0, 0, 0.17803028225898743), (9, 1, 3, 0.1695612519979477), (12, 2, 0, 0.16540952026844025)]
+  Q_loss=0.106287 | q_mean=0.625327 | epsilon=0.0200
+  td_error_mean=0.178039 | frac_clipped=0.066
+  fpn_norm_entropy=0.9184 | fpn_tau_std=0.2746
+  grad_total_pre=27.837502 | grad_total_post=9.999999 | clip_scale=0.359228 clip_percent=64.08%
+  backbone_pre=27.726274 (yolo=22.234657 tfm=16.564005) head_pre=2.486000
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87360] 05:53:11
+  real_reward_mean=0.5480
+  q_top5=[(6, 1, 0, 0.9799874424934387), (24, 4, 0, 0.13004867732524872), (10, 1, 4, 0.12681922316551208), (7, 1, 1, 0.12300820648670197), (34, 5, 4, 0.1193276047706604)]
+  Q_loss=0.334921 | q_mean=0.609568 | epsilon=0.0200
+  td_error_mean=0.239827 | frac_clipped=0.093
+  fpn_norm_entropy=0.9147 | fpn_tau_std=0.2739
+  grad_total_pre=64.695198 | grad_total_post=9.999999 | clip_scale=0.154571 clip_percent=84.54%
+  backbone_pre=63.868920 (yolo=59.243131 tfm=23.863997) head_pre=10.306774
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87370] 05:53:26
+  real_reward_mean=0.5355
+  q_top5=[(24, 4, 0, 1.045090675354004), (30, 5, 0, 0.7648996710777283), (23, 3, 5, 0.2546054720878601), (16, 2, 4, 0.23690910637378693), (3, 0, 3, 0.2342461496591568)]
+  Q_loss=0.167990 | q_mean=0.568994 | epsilon=0.0200
+  td_error_mean=0.254992 | frac_clipped=0.107
+  fpn_norm_entropy=0.9140 | fpn_tau_std=0.2736
+  grad_total_pre=74.049355 | grad_total_post=10.000000 | clip_scale=0.135045 clip_percent=86.50%
+  backbone_pre=74.014415 (yolo=69.565679 tfm=25.273505) head_pre=2.274369
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87380] 05:53:42
+  real_reward_mean=0.5355
+  q_top5=[(7, 1, 1, 1.0051333904266357), (10, 1, 4, 0.24427014589309692), (17, 2, 5, 0.2388986349105835), (5, 0, 5, 0.2208729088306427), (22, 3, 4, 0.20758424699306488)]
+  Q_loss=0.086866 | q_mean=0.650190 | epsilon=0.0200
+  td_error_mean=0.146616 | frac_clipped=0.051
+  fpn_norm_entropy=0.9177 | fpn_tau_std=0.2743
+  grad_total_pre=7.568994 | grad_total_post=7.568994 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=7.210806 (yolo=6.662349 tfm=2.758409) head_pre=2.300859
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87390] 05:54:00
+  real_reward_mean=0.5355
+  q_top5=[(29, 4, 5, 0.9961417317390442), (1, 0, 1, 0.27333810925483704), (19, 3, 1, 0.26500990986824036), (17, 2, 5, 0.24998162686824799), (9, 1, 3, 0.24629518389701843)]
+  Q_loss=0.322709 | q_mean=0.581969 | epsilon=0.0200
+  td_error_mean=0.242173 | frac_clipped=0.082
+  fpn_norm_entropy=0.9172 | fpn_tau_std=0.2742
+  grad_total_pre=88.508980 | grad_total_post=9.999999 | clip_scale=0.112983 clip_percent=88.70%
+  backbone_pre=87.942275 (yolo=78.391410 tfm=39.857628) head_pre=9.999731
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87400] 05:54:18
+  real_reward_mean=0.5405
+  q_top5=[(5, 0, 5, 1.0282666683197021), (27, 4, 3, 0.20593108236789703), (34, 5, 4, 0.20182666182518005), (8, 1, 2, 0.19920557737350464), (35, 5, 5, 0.19548183679580688)]
+  Q_loss=0.193784 | q_mean=0.369546 | epsilon=0.0200
+  td_error_mean=0.215512 | frac_clipped=0.072
+  fpn_norm_entropy=0.9117 | fpn_tau_std=0.2732
+  grad_total_pre=39.506519 | grad_total_post=10.000000 | clip_scale=0.253123 clip_percent=74.69%
+  backbone_pre=39.405192 (yolo=34.793252 tfm=18.498614) head_pre=2.827714
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.268053e-02 | weight_delta_prev_100=8.036995e-04 (ref_step=87300)
+---
+[Step 87410] 05:54:34
+  real_reward_mean=0.5355
+  q_top5=[(0, 0, 0, 1.0265913009643555), (13, 2, 1, 0.2534625232219696), (9, 1, 3, 0.24923013150691986), (2, 0, 2, 0.2472904920578003), (34, 5, 4, 0.24449218809604645)]
+  Q_loss=0.301731 | q_mean=0.500090 | epsilon=0.0200
+  td_error_mean=0.262286 | frac_clipped=0.107
+  fpn_norm_entropy=0.9186 | fpn_tau_std=0.2747
+  grad_total_pre=121.065033 | grad_total_post=10.000000 | clip_scale=0.082600 clip_percent=91.74%
+  backbone_pre=120.968230 (yolo=111.450888 tfm=47.032034) head_pre=4.840320
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87420] 05:54:55
+  real_reward_mean=0.5625
+  q_top5=[(5, 0, 5, 0.9767382144927979), (33, 5, 3, 0.21838267147541046), (11, 1, 5, 0.20641294121742249), (9, 1, 3, 0.20141202211380005), (35, 5, 5, 0.20065473020076752)]
+  Q_loss=0.214262 | q_mean=0.498658 | epsilon=0.0200
+  td_error_mean=0.250503 | frac_clipped=0.102
+  fpn_norm_entropy=0.9138 | fpn_tau_std=0.2738
+  grad_total_pre=40.472878 | grad_total_post=10.000000 | clip_scale=0.247079 clip_percent=75.29%
+  backbone_pre=40.366188 (yolo=37.336856 tfm=15.342371) head_pre=2.936793
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87430] 05:55:11
+  real_reward_mean=0.5625
+  q_top5=[(32, 5, 2, 1.0232466459274292), (33, 5, 3, 0.7617976665496826), (28, 4, 4, 0.2194230705499649), (1, 0, 1, 0.21087752282619476), (14, 2, 2, 0.20134390890598297)]
+  Q_loss=0.149630 | q_mean=0.519217 | epsilon=0.0200
+  td_error_mean=0.201107 | frac_clipped=0.104
+  fpn_norm_entropy=0.9143 | fpn_tau_std=0.2740
+  grad_total_pre=55.429665 | grad_total_post=10.000000 | clip_scale=0.180409 clip_percent=81.96%
+  backbone_pre=55.119982 (yolo=50.278677 tfm=22.589090) head_pre=5.851098
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87440] 05:55:26
+  real_reward_mean=0.5625
+  q_top5=[(5, 0, 5, 1.127633810043335), (11, 1, 5, 1.1029391288757324), (4, 0, 4, 1.1000932455062866), (30, 5, 0, 0.361384779214859), (19, 3, 1, 0.3296588063240051)]
+  Q_loss=0.151059 | q_mean=0.768805 | epsilon=0.0200
+  td_error_mean=0.186103 | frac_clipped=0.068
+  fpn_norm_entropy=0.9202 | fpn_tau_std=0.2754
+  grad_total_pre=83.425209 | grad_total_post=10.000000 | clip_scale=0.119868 clip_percent=88.01%
+  backbone_pre=82.927229 (yolo=77.960220 tfm=28.268876) head_pre=9.101667
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87450] 05:55:45
+  real_reward_mean=0.5675
+  q_top5=[(34, 5, 4, 0.7936557531356812), (22, 3, 4, -0.21418941020965576), (28, 4, 4, -0.22280582785606384), (6, 1, 0, -0.23214414715766907), (17, 2, 5, -0.2353697419166565)]
+  Q_loss=0.095303 | q_mean=0.474663 | epsilon=0.0200
+  td_error_mean=0.148229 | frac_clipped=0.050
+  fpn_norm_entropy=0.9158 | fpn_tau_std=0.2743
+  grad_total_pre=14.074200 | grad_total_post=9.999999 | clip_scale=0.710520 clip_percent=28.95%
+  backbone_pre=13.769740 (yolo=12.811081 tfm=5.047965) head_pre=2.911591
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87460] 05:56:00
+  real_reward_mean=0.5375
+  q_top5=[(35, 5, 5, 1.0464973449707031), (11, 1, 5, 0.3034406900405884), (16, 2, 4, 0.2855614423751831), (12, 2, 0, 0.2769874930381775), (8, 1, 2, 0.26062023639678955)]
+  Q_loss=0.203907 | q_mean=0.566728 | epsilon=0.0200
+  td_error_mean=0.286921 | frac_clipped=0.118
+  fpn_norm_entropy=0.9174 | fpn_tau_std=0.2742
+  grad_total_pre=37.906120 | grad_total_post=10.000000 | clip_scale=0.263810 clip_percent=73.62%
+  backbone_pre=37.860109 (yolo=30.949875 tfm=21.805805) head_pre=1.867158
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87470] 05:56:21
+  real_reward_mean=0.5305
+  q_top5=[(5, 0, 5, 1.0322532653808594), (35, 5, 5, 0.2465083748102188), (0, 0, 0, 0.23580288887023926), (33, 5, 3, 0.23452351987361908), (31, 5, 1, 0.2184246927499771)]
+  Q_loss=0.104398 | q_mean=0.636064 | epsilon=0.0200
+  td_error_mean=0.146973 | frac_clipped=0.046
+  fpn_norm_entropy=0.9179 | fpn_tau_std=0.2742
+  grad_total_pre=17.968037 | grad_total_post=9.999999 | clip_scale=0.556544 clip_percent=44.35%
+  backbone_pre=17.845615 (yolo=15.109245 tfm=9.496140) head_pre=2.093887
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87480] 05:56:39
+  real_reward_mean=0.5355
+  q_top5=[(11, 1, 5, 1.0367306470870972), (5, 0, 5, 1.0013552904129028), (25, 4, 1, 0.3381289839744568), (7, 1, 1, 0.30544936656951904), (13, 2, 1, 0.2906184792518616)]
+  Q_loss=0.131170 | q_mean=0.641587 | epsilon=0.0200
+  td_error_mean=0.177715 | frac_clipped=0.052
+  fpn_norm_entropy=0.9154 | fpn_tau_std=0.2739
+  grad_total_pre=10.580050 | grad_total_post=9.999999 | clip_scale=0.945175 clip_percent=5.48%
+  backbone_pre=9.800678 (yolo=8.811862 tfm=4.290033) head_pre=3.985494
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87490] 05:56:54
+  real_reward_mean=0.5305
+  q_top5=[(1, 0, 1, 0.9776048064231873), (7, 1, 1, 0.2730485796928406), (2, 0, 2, 0.2493448108434677), (31, 5, 1, 0.24902008473873138), (15, 2, 3, 0.24727317690849304)]
+  Q_loss=0.152651 | q_mean=0.585068 | epsilon=0.0200
+  td_error_mean=0.256332 | frac_clipped=0.090
+  fpn_norm_entropy=0.9173 | fpn_tau_std=0.2741
+  grad_total_pre=18.609760 | grad_total_post=9.999999 | clip_scale=0.537352 clip_percent=46.26%
+  backbone_pre=18.558678 (yolo=13.900813 tfm=12.296013) head_pre=1.377908
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87500] 05:57:10
+  real_reward_mean=0.5305
+  q_top5=[(3, 0, 3, 1.0479060411453247), (23, 3, 5, 0.16255523264408112), (6, 1, 0, 0.15502622723579407), (2, 0, 2, 0.15082044899463654), (35, 5, 5, 0.1407046914100647)]
+  Q_loss=0.143985 | q_mean=0.684489 | epsilon=0.0200
+  td_error_mean=0.213112 | frac_clipped=0.083
+  fpn_norm_entropy=0.9185 | fpn_tau_std=0.2745
+  grad_total_pre=70.640358 | grad_total_post=10.000001 | clip_scale=0.141562 clip_percent=85.84%
+  backbone_pre=70.590982 (yolo=64.891373 tfm=27.788423) head_pre=2.640908
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.273274e-02 | weight_delta_prev_100=7.218589e-04 (ref_step=87400)
+---
+[Step 87510] 05:57:28
+  real_reward_mean=0.5305
+  q_top5=[(5, 0, 5, 1.0175906419754028), (0, 0, 0, 0.291953980922699), (20, 3, 2, 0.24435880780220032), (3, 0, 3, 0.24218952655792236), (8, 1, 2, 0.23978674411773682)]
+  Q_loss=0.092226 | q_mean=0.702661 | epsilon=0.0200
+  td_error_mean=0.143523 | frac_clipped=0.049
+  fpn_norm_entropy=0.9195 | fpn_tau_std=0.2746
+  grad_total_pre=4.607914 | grad_total_post=4.607914 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=4.313083 (yolo=4.070321 tfm=1.426596) head_pre=1.621785
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87520] 05:57:47
+  real_reward_mean=0.5255
+  q_top5=[(5, 0, 5, 0.972900927066803), (20, 3, 2, 0.23434250056743622), (17, 2, 5, 0.22533845901489258), (3, 0, 3, 0.20970776677131653), (15, 2, 3, 0.20621269941329956)]
+  Q_loss=0.165627 | q_mean=0.695905 | epsilon=0.0200
+  td_error_mean=0.210033 | frac_clipped=0.074
+  fpn_norm_entropy=0.9159 | fpn_tau_std=0.2738
+  grad_total_pre=8.259297 | grad_total_post=8.259297 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=7.403526 (yolo=6.436845 tfm=3.657763) head_pre=3.661117
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87530] 05:58:02
+  real_reward_mean=0.5305
+  q_top5=[(5, 0, 5, 1.0161199569702148), (28, 4, 4, 0.3054467439651489), (32, 5, 2, 0.2643483877182007), (34, 5, 4, 0.2598073482513428), (23, 3, 5, 0.2506846785545349)]
+  Q_loss=0.060643 | q_mean=0.564279 | epsilon=0.0200
+  td_error_mean=0.145334 | frac_clipped=0.051
+  fpn_norm_entropy=0.9152 | fpn_tau_std=0.2738
+  grad_total_pre=1.829020 | grad_total_post=1.829020 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=1.684577 (yolo=1.463791 tfm=0.833736) head_pre=0.712399
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87540] 05:58:20
+  real_reward_mean=0.5305
+  q_top5=[(5, 0, 5, 1.0254781246185303), (9, 1, 3, 0.22603167593479156), (15, 2, 3, 0.21796755492687225), (26, 4, 2, 0.21031107008457184), (23, 3, 5, 0.2036917507648468)]
+  Q_loss=0.297746 | q_mean=0.671121 | epsilon=0.0200
+  td_error_mean=0.217404 | frac_clipped=0.080
+  fpn_norm_entropy=0.9159 | fpn_tau_std=0.2741
+  grad_total_pre=156.316299 | grad_total_post=10.000000 | clip_scale=0.063973 clip_percent=93.60%
+  backbone_pre=156.058986 (yolo=142.524572 tfm=63.570069) head_pre=8.965466
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87550] 05:58:41
+  real_reward_mean=0.5355
+  q_top5=[(4, 0, 4, 0.9456514716148376), (3, 0, 3, 0.17311564087867737), (5, 0, 5, 0.17079196870326996), (28, 4, 4, 0.16608265042304993), (32, 5, 2, 0.16061502695083618)]
+  Q_loss=0.143862 | q_mean=0.488163 | epsilon=0.0200
+  td_error_mean=0.218735 | frac_clipped=0.082
+  fpn_norm_entropy=0.9145 | fpn_tau_std=0.2738
+  grad_total_pre=11.225727 | grad_total_post=9.999999 | clip_scale=0.890811 clip_percent=10.92%
+  backbone_pre=9.739909 (yolo=8.169978 tfm=5.302573) head_pre=5.581320
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87560] 05:58:57
+  real_reward_mean=0.5605
+  q_top5=[(35, 5, 5, 0.9303431510925293), (4, 0, 4, 0.21505212783813477), (15, 2, 3, 0.19283580780029297), (2, 0, 2, 0.17035356163978577), (16, 2, 4, 0.1669401377439499)]
+  Q_loss=0.209042 | q_mean=0.565112 | epsilon=0.0200
+  td_error_mean=0.290231 | frac_clipped=0.118
+  fpn_norm_entropy=0.9166 | fpn_tau_std=0.2744
+  grad_total_pre=45.259998 | grad_total_post=9.999999 | clip_scale=0.220946 clip_percent=77.91%
+  backbone_pre=44.868378 (yolo=34.517364 tfm=28.665710) head_pre=5.941025
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87570] 05:59:15
+  real_reward_mean=0.5850
+  q_top5=[(31, 5, 1, 0.9807838797569275), (1, 0, 1, 0.245972141623497), (4, 0, 4, 0.22282369434833527), (11, 1, 5, 0.21356448531150818), (34, 5, 4, 0.20434720814228058)]
+  Q_loss=0.138772 | q_mean=0.571586 | epsilon=0.0200
+  td_error_mean=0.207938 | frac_clipped=0.055
+  fpn_norm_entropy=0.9169 | fpn_tau_std=0.2748
+  grad_total_pre=94.130371 | grad_total_post=10.000001 | clip_scale=0.106236 clip_percent=89.38%
+  backbone_pre=93.634641 (yolo=78.973891 tfm=50.304776) head_pre=9.647876
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87580] 05:59:30
+  real_reward_mean=0.5680
+  q_top5=[(31, 5, 1, 0.9456597566604614), (24, 4, 0, 0.23957088589668274), (33, 5, 3, 0.21553349494934082), (12, 2, 0, 0.19615276157855988), (6, 1, 0, 0.1957421898841858)]
+  Q_loss=0.324672 | q_mean=0.495049 | epsilon=0.0200
+  td_error_mean=0.262985 | frac_clipped=0.106
+  fpn_norm_entropy=0.9172 | fpn_tau_std=0.2747
+  grad_total_pre=146.807434 | grad_total_post=10.000000 | clip_scale=0.068116 clip_percent=93.19%
+  backbone_pre=146.736880 (yolo=115.652911 tfm=90.311217) head_pre=4.550783
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87590] 05:59:49
+  real_reward_mean=0.5680
+  q_top5=[(21, 3, 3, 1.968031644821167), (16, 2, 4, 1.954355001449585), (27, 4, 3, 1.9182720184326172), (15, 2, 3, 1.9134016036987305), (10, 1, 4, 1.897976040840149)]
+  Q_loss=0.118501 | q_mean=0.576037 | epsilon=0.0200
+  td_error_mean=0.207753 | frac_clipped=0.083
+  fpn_norm_entropy=0.9148 | fpn_tau_std=0.2741
+  grad_total_pre=21.787493 | grad_total_post=9.999999 | clip_scale=0.458979 clip_percent=54.10%
+  backbone_pre=21.545516 (yolo=19.819827 tfm=8.448889) head_pre=3.238136
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87600] 06:00:04
+  real_reward_mean=0.5630
+  q_top5=[(24, 4, 0, 1.0467593669891357), (22, 3, 4, 0.18318124115467072), (28, 4, 4, 0.17788511514663696), (9, 1, 3, 0.16358007490634918), (18, 3, 0, 0.16165682673454285)]
+  Q_loss=0.095540 | q_mean=0.583766 | epsilon=0.0200
+  td_error_mean=0.172030 | frac_clipped=0.067
+  fpn_norm_entropy=0.9175 | fpn_tau_std=0.2744
+  grad_total_pre=7.203952 | grad_total_post=7.203952 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=7.077005 (yolo=6.681532 tfm=2.332625) head_pre=1.346446
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.279082e-02 | weight_delta_prev_100=8.263336e-04 (ref_step=87500)
+---
+[Step 87610] 06:00:22
+  real_reward_mean=0.5680
+  q_top5=[(34, 5, 4, 1.1592098474502563), (35, 5, 5, 1.1568324565887451), (32, 5, 2, 0.33834707736968994), (9, 1, 3, 0.3254079818725586), (5, 0, 5, 0.3175877332687378)]
+  Q_loss=0.166833 | q_mean=0.661943 | epsilon=0.0200
+  td_error_mean=0.203978 | frac_clipped=0.058
+  fpn_norm_entropy=0.9224 | fpn_tau_std=0.2750
+  grad_total_pre=29.219378 | grad_total_post=9.999999 | clip_scale=0.342239 clip_percent=65.78%
+  backbone_pre=28.798051 (yolo=24.702933 tfm=14.801786) head_pre=4.944111
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87620] 06:00:38
+  real_reward_mean=0.5630
+  q_top5=[(24, 4, 0, 0.9660484790802002), (21, 3, 3, 0.27980220317840576), (22, 3, 4, 0.2657160460948944), (11, 1, 5, 0.2577469050884247), (32, 5, 2, 0.2573927938938141)]
+  Q_loss=0.226472 | q_mean=0.657916 | epsilon=0.0200
+  td_error_mean=0.210443 | frac_clipped=0.086
+  fpn_norm_entropy=0.9149 | fpn_tau_std=0.2734
+  grad_total_pre=91.191673 | grad_total_post=10.000000 | clip_scale=0.109659 clip_percent=89.03%
+  backbone_pre=91.017682 (yolo=79.823923 tfm=43.730536) head_pre=5.630590
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87630] 06:00:56
+  real_reward_mean=0.5505
+  q_top5=[(31, 5, 1, 1.0255118608474731), (30, 5, 0, 0.9549978971481323), (32, 5, 2, 0.5462123155593872), (14, 2, 2, 0.3207080364227295), (28, 4, 4, 0.2896338701248169)]
+  Q_loss=0.204729 | q_mean=0.563185 | epsilon=0.0200
+  td_error_mean=0.214187 | frac_clipped=0.075
+  fpn_norm_entropy=0.9168 | fpn_tau_std=0.2737
+  grad_total_pre=8.598007 | grad_total_post=8.598007 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=8.349200 (yolo=7.240048 tfm=4.158227) head_pre=2.053431
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87640] 06:01:14
+  real_reward_mean=0.5555
+  q_top5=[(3, 0, 3, 1.0255517959594727), (20, 3, 2, 0.1901284009218216), (35, 5, 5, 0.18608218431472778), (6, 1, 0, 0.17991477251052856), (33, 5, 3, 0.1541956514120102)]
+  Q_loss=0.153192 | q_mean=0.629895 | epsilon=0.0200
+  td_error_mean=0.213569 | frac_clipped=0.075
+  fpn_norm_entropy=0.9173 | fpn_tau_std=0.2740
+  grad_total_pre=79.998932 | grad_total_post=9.999999 | clip_scale=0.125002 clip_percent=87.50%
+  backbone_pre=79.370023 (yolo=61.685423 tfm=49.945061) head_pre=10.011380
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87650] 06:01:30
+  real_reward_mean=0.5455
+  q_top5=[(6, 1, 0, 1.013039231300354), (22, 3, 4, 0.2629443407058716), (16, 2, 4, 0.257992148399353), (17, 2, 5, 0.24828994274139404), (26, 4, 2, 0.2446841597557068)]
+  Q_loss=0.097628 | q_mean=0.625626 | epsilon=0.0200
+  td_error_mean=0.173695 | frac_clipped=0.049
+  fpn_norm_entropy=0.9168 | fpn_tau_std=0.2739
+  grad_total_pre=17.193130 | grad_total_post=9.999999 | clip_scale=0.581628 clip_percent=41.84%
+  backbone_pre=17.103996 (yolo=15.811036 tfm=6.523636) head_pre=1.748450
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87660] 06:01:48
+  real_reward_mean=0.5505
+  q_top5=[(5, 0, 5, 0.9697555899620056), (17, 2, 5, 0.25689995288848877), (15, 2, 3, 0.2542584240436554), (26, 4, 2, 0.24122153222560883), (1, 0, 1, 0.22786644101142883)]
+  Q_loss=0.203456 | q_mean=0.500281 | epsilon=0.0200
+  td_error_mean=0.258535 | frac_clipped=0.109
+  fpn_norm_entropy=0.9137 | fpn_tau_std=0.2735
+  grad_total_pre=61.222633 | grad_total_post=9.999999 | clip_scale=0.163338 clip_percent=83.67%
+  backbone_pre=60.412193 (yolo=53.497075 tfm=28.065923) head_pre=9.928613
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87670] 06:02:07
+  real_reward_mean=0.5505
+  q_top5=[(7, 1, 1, 1.1856420040130615), (4, 0, 4, 0.2707172930240631), (5, 0, 5, 0.24281582236289978), (23, 3, 5, 0.21971550583839417), (11, 1, 5, 0.21959318220615387)]
+  Q_loss=0.099455 | q_mean=0.653196 | epsilon=0.0200
+  td_error_mean=0.177655 | frac_clipped=0.060
+  fpn_norm_entropy=0.9184 | fpn_tau_std=0.2746
+  grad_total_pre=34.818836 | grad_total_post=10.000001 | clip_scale=0.287201 clip_percent=71.28%
+  backbone_pre=34.771632 (yolo=32.414700 tfm=12.583861) head_pre=1.812497
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87680] 06:02:28
+  real_reward_mean=0.5555
+  q_top5=[(2, 0, 2, 1.0096379518508911), (6, 1, 0, 0.3026787042617798), (17, 2, 5, 0.2694859504699707), (8, 1, 2, 0.25931811332702637), (22, 3, 4, 0.24095827341079712)]
+  Q_loss=0.203220 | q_mean=0.596387 | epsilon=0.0200
+  td_error_mean=0.204525 | frac_clipped=0.086
+  fpn_norm_entropy=0.9167 | fpn_tau_std=0.2743
+  grad_total_pre=6.993684 | grad_total_post=6.993684 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=6.532052 (yolo=5.950890 tfm=2.693439) head_pre=2.498783
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87690] 06:02:47
+  real_reward_mean=0.5435
+  q_top5=[(0, 0, 0, 0.9791151285171509), (7, 1, 1, 0.2054595947265625), (29, 4, 5, 0.2047167718410492), (12, 2, 0, 0.19685301184654236), (4, 0, 4, 0.19276033341884613)]
+  Q_loss=0.116082 | q_mean=0.614728 | epsilon=0.0200
+  td_error_mean=0.179893 | frac_clipped=0.071
+  fpn_norm_entropy=0.9183 | fpn_tau_std=0.2745
+  grad_total_pre=15.075940 | grad_total_post=9.999999 | clip_scale=0.663309 clip_percent=33.67%
+  backbone_pre=14.955099 (yolo=13.759975 tfm=5.858163) head_pre=1.904991
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87700] 06:03:00
+  real_reward_mean=0.5385
+  q_top5=[(1, 0, 1, 0.9756451845169067), (22, 3, 4, 0.2825636863708496), (9, 1, 3, 0.2139589786529541), (26, 4, 2, 0.20586831867694855), (27, 4, 3, 0.19517064094543457)]
+  Q_loss=0.198976 | q_mean=0.748688 | epsilon=0.0200
+  td_error_mean=0.250982 | frac_clipped=0.115
+  fpn_norm_entropy=0.9195 | fpn_tau_std=0.2748
+  grad_total_pre=22.297596 | grad_total_post=9.999999 | clip_scale=0.448479 clip_percent=55.15%
+  backbone_pre=22.258092 (yolo=19.503121 tfm=10.726179) head_pre=1.326703
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.284179e-02 | weight_delta_prev_100=7.177495e-04 (ref_step=87600)
+---
+[Step 87710] 06:03:18
+  real_reward_mean=0.5385
+  q_top5=[(18, 3, 0, 1.0381863117218018), (5, 0, 5, 0.5286705493927002), (6, 1, 0, 0.2830735743045807), (2, 0, 2, 0.2571152150630951), (14, 2, 2, 0.24706609547138214)]
+  Q_loss=0.084928 | q_mean=0.613393 | epsilon=0.0200
+  td_error_mean=0.136440 | frac_clipped=0.054
+  fpn_norm_entropy=0.9169 | fpn_tau_std=0.2742
+  grad_total_pre=7.853263 | grad_total_post=7.853264 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=7.442729 (yolo=6.775755 tfm=3.079507) head_pre=2.505899
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87720] 06:03:37
+  real_reward_mean=0.5435
+  q_top5=[(34, 5, 4, 0.996482253074646), (15, 2, 3, 0.1634834110736847), (4, 0, 4, 0.16018596291542053), (11, 1, 5, 0.15598535537719727), (8, 1, 2, 0.13597342371940613)]
+  Q_loss=0.200641 | q_mean=0.636750 | epsilon=0.0200
+  td_error_mean=0.188512 | frac_clipped=0.080
+  fpn_norm_entropy=0.9172 | fpn_tau_std=0.2741
+  grad_total_pre=14.342303 | grad_total_post=9.999999 | clip_scale=0.697238 clip_percent=30.28%
+  backbone_pre=14.055163 (yolo=12.995006 tfm=5.355130) head_pre=2.855533
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87730] 06:03:52
+  real_reward_mean=0.5390
+  q_top5=[(18, 3, 0, 1.135058045387268), (12, 2, 0, 0.2876291275024414), (31, 5, 1, 0.2845032811164856), (29, 4, 5, 0.2742888927459717), (34, 5, 4, 0.2704625725746155)]
+  Q_loss=0.360356 | q_mean=0.465514 | epsilon=0.0200
+  td_error_mean=0.258072 | frac_clipped=0.112
+  fpn_norm_entropy=0.9128 | fpn_tau_std=0.2731
+  grad_total_pre=102.408241 | grad_total_post=10.000000 | clip_scale=0.097648 clip_percent=90.24%
+  backbone_pre=101.762684 (yolo=84.999285 tfm=55.953244) head_pre=11.480584
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87740] 06:04:07
+  real_reward_mean=0.5340
+  q_top5=[(0, 0, 0, 1.002780556678772), (16, 2, 4, 0.27337151765823364), (3, 0, 3, 0.2421240657567978), (12, 2, 0, 0.23718754947185516), (7, 1, 1, 0.22602780163288116)]
+  Q_loss=0.219278 | q_mean=0.712583 | epsilon=0.0200
+  td_error_mean=0.214420 | frac_clipped=0.079
+  fpn_norm_entropy=0.9173 | fpn_tau_std=0.2741
+  grad_total_pre=32.861599 | grad_total_post=10.000001 | clip_scale=0.304307 clip_percent=69.57%
+  backbone_pre=31.102173 (yolo=27.455470 tfm=14.613087) head_pre=10.608473
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87750] 06:04:26
+  real_reward_mean=0.5170
+  q_top5=[(1, 0, 1, 0.9749219417572021), (20, 3, 2, 0.27519142627716064), (14, 2, 2, 0.22611430287361145), (27, 4, 3, 0.21825583279132843), (30, 5, 0, 0.21649055182933807)]
+  Q_loss=0.202606 | q_mean=0.607780 | epsilon=0.0200
+  td_error_mean=0.232931 | frac_clipped=0.098
+  fpn_norm_entropy=0.9157 | fpn_tau_std=0.2739
+  grad_total_pre=11.426806 | grad_total_post=9.999998 | clip_scale=0.875135 clip_percent=12.49%
+  backbone_pre=11.005031 (yolo=9.593593 tfm=5.392002) head_pre=3.075904
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87760] 06:04:41
+  real_reward_mean=0.5120
+  q_top5=[(0, 0, 0, 0.9784661531448364), (1, 0, 1, 0.17879419028759003), (17, 2, 5, 0.17171479761600494), (35, 5, 5, 0.16923627257347107), (27, 4, 3, 0.1631445437669754)]
+  Q_loss=0.159815 | q_mean=0.693474 | epsilon=0.0200
+  td_error_mean=0.230138 | frac_clipped=0.092
+  fpn_norm_entropy=0.9232 | fpn_tau_std=0.2753
+  grad_total_pre=6.627915 | grad_total_post=6.627915 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=6.380957 (yolo=6.027418 tfm=2.094478) head_pre=1.792386
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87770] 06:04:56
+  real_reward_mean=0.5120
+  q_top5=[(18, 3, 0, 1.04813814163208), (9, 1, 3, 0.28025227785110474), (6, 1, 0, 0.27150583267211914), (10, 1, 4, 0.2616918981075287), (32, 5, 2, 0.2598571479320526)]
+  Q_loss=0.190646 | q_mean=0.720437 | epsilon=0.0200
+  td_error_mean=0.235365 | frac_clipped=0.091
+  fpn_norm_entropy=0.9225 | fpn_tau_std=0.2752
+  grad_total_pre=46.751236 | grad_total_post=10.000000 | clip_scale=0.213898 clip_percent=78.61%
+  backbone_pre=46.149136 (yolo=40.694742 tfm=21.764206) head_pre=7.478984
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87780] 06:05:18
+  real_reward_mean=0.5240
+  q_top5=[(25, 4, 1, 1.0055723190307617), (19, 3, 1, 0.3834752142429352), (35, 5, 5, 0.2519700527191162), (29, 4, 5, 0.22901922464370728), (21, 3, 3, 0.2149110585451126)]
+  Q_loss=0.071543 | q_mean=0.436434 | epsilon=0.0200
+  td_error_mean=0.142302 | frac_clipped=0.058
+  fpn_norm_entropy=0.9149 | fpn_tau_std=0.2737
+  grad_total_pre=5.519853 | grad_total_post=5.519853 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=5.419433 (yolo=5.106694 tfm=1.814368) head_pre=1.048102
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87790] 06:05:33
+  real_reward_mean=0.5410
+  q_top5=[(24, 4, 0, 0.9799677133560181), (28, 4, 4, 0.23624558746814728), (9, 1, 3, 0.23451264202594757), (18, 3, 0, 0.2231673002243042), (17, 2, 5, 0.21900956332683563)]
+  Q_loss=0.109295 | q_mean=0.647238 | epsilon=0.0200
+  td_error_mean=0.174970 | frac_clipped=0.076
+  fpn_norm_entropy=0.9188 | fpn_tau_std=0.2747
+  grad_total_pre=24.219074 | grad_total_post=9.999999 | clip_scale=0.412898 clip_percent=58.71%
+  backbone_pre=24.139087 (yolo=20.762216 tfm=12.313647) head_pre=1.966754
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87800] 06:05:51
+  real_reward_mean=0.5460
+  q_top5=[(4, 0, 4, 1.0381126403808594), (19, 3, 1, 0.23369374871253967), (7, 1, 1, 0.23016196489334106), (8, 1, 2, 0.21469517052173615), (26, 4, 2, 0.2091405987739563)]
+  Q_loss=0.154052 | q_mean=0.685223 | epsilon=0.0200
+  td_error_mean=0.207720 | frac_clipped=0.080
+  fpn_norm_entropy=0.9194 | fpn_tau_std=0.2744
+  grad_total_pre=104.410942 | grad_total_post=10.000001 | clip_scale=0.095775 clip_percent=90.42%
+  backbone_pre=103.944020 (yolo=83.706462 tfm=61.624570) head_pre=9.863377
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.290187e-02 | weight_delta_prev_100=8.247062e-04 (ref_step=87700)
+---
+[Step 87810] 06:06:10
+  real_reward_mean=0.5460
+  q_top5=[(35, 5, 5, 0.9658806324005127), (34, 5, 4, 0.2770921587944031), (3, 0, 3, 0.2236855924129486), (15, 2, 3, 0.22009970247745514), (2, 0, 2, 0.1959073692560196)]
+  Q_loss=0.106009 | q_mean=0.629578 | epsilon=0.0200
+  td_error_mean=0.219564 | frac_clipped=0.092
+  fpn_norm_entropy=0.9173 | fpn_tau_std=0.2741
+  grad_total_pre=11.926499 | grad_total_post=10.000000 | clip_scale=0.838469 clip_percent=16.15%
+  backbone_pre=11.807490 (yolo=11.384694 tfm=3.131385) head_pre=1.680644
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87820] 06:06:28
+  real_reward_mean=0.5335
+  q_top5=[(30, 5, 0, 1.0881987810134888), (20, 3, 2, -0.37797456979751587), (26, 4, 2, -0.430789589881897), (3, 0, 3, -0.44434624910354614), (25, 4, 1, -0.46725547313690186)]
+  Q_loss=0.133980 | q_mean=0.621117 | epsilon=0.0200
+  td_error_mean=0.147360 | frac_clipped=0.052
+  fpn_norm_entropy=0.9146 | fpn_tau_std=0.2734
+  grad_total_pre=17.718691 | grad_total_post=9.999999 | clip_scale=0.564376 clip_percent=43.56%
+  backbone_pre=17.323327 (yolo=16.397755 tfm=5.586708) head_pre=3.722143
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87830] 06:06:43
+  real_reward_mean=0.5455
+  q_top5=[(31, 5, 1, 1.0459277629852295), (30, 5, 0, 1.0237294435501099), (5, 0, 5, 0.38834714889526367), (21, 3, 3, 0.3439158499240875), (32, 5, 2, 0.33262214064598083)]
+  Q_loss=0.145526 | q_mean=0.659614 | epsilon=0.0200
+  td_error_mean=0.165429 | frac_clipped=0.067
+  fpn_norm_entropy=0.9158 | fpn_tau_std=0.2737
+  grad_total_pre=52.651966 | grad_total_post=10.000001 | clip_scale=0.189926 clip_percent=81.01%
+  backbone_pre=52.562402 (yolo=48.569301 tfm=20.095500) head_pre=3.069758
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87840] 06:07:00
+  real_reward_mean=0.5505
+  q_top5=[(5, 0, 5, 1.0011911392211914), (8, 1, 2, 0.2286790907382965), (1, 0, 1, 0.211684450507164), (18, 3, 0, 0.21035036444664001), (6, 1, 0, 0.20744435489177704)]
+  Q_loss=0.108514 | q_mean=0.514496 | epsilon=0.0200
+  td_error_mean=0.150891 | frac_clipped=0.056
+  fpn_norm_entropy=0.9137 | fpn_tau_std=0.2732
+  grad_total_pre=69.583519 | grad_total_post=10.000000 | clip_scale=0.143712 clip_percent=85.63%
+  backbone_pre=68.552613 (yolo=60.703525 tfm=31.851888) head_pre=11.933370
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87850] 06:07:18
+  real_reward_mean=0.5675
+  q_top5=[(35, 5, 5, 1.049534559249878), (7, 1, 1, 0.12508007884025574), (25, 4, 1, 0.10210347920656204), (19, 3, 1, 0.0965663269162178), (26, 4, 2, 0.07944999635219574)]
+  Q_loss=0.093497 | q_mean=0.609409 | epsilon=0.0200
+  td_error_mean=0.127033 | frac_clipped=0.049
+  fpn_norm_entropy=0.9150 | fpn_tau_std=0.2734
+  grad_total_pre=57.399128 | grad_total_post=10.000001 | clip_scale=0.174219 clip_percent=82.58%
+  backbone_pre=57.267167 (yolo=49.188373 tfm=29.326309) head_pre=3.889942
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87860] 06:07:37
+  real_reward_mean=0.5725
+  q_top5=[(30, 5, 0, 0.9896552562713623), (9, 1, 3, 0.23298726975917816), (10, 1, 4, 0.1985105723142624), (16, 2, 4, 0.18098589777946472), (22, 3, 4, 0.1707630157470703)]
+  Q_loss=0.180652 | q_mean=0.517684 | epsilon=0.0200
+  td_error_mean=0.165742 | frac_clipped=0.043
+  fpn_norm_entropy=0.9135 | fpn_tau_std=0.2734
+  grad_total_pre=29.129023 | grad_total_post=10.000001 | clip_scale=0.343300 clip_percent=65.67%
+  backbone_pre=28.901862 (yolo=24.963038 tfm=14.565863) head_pre=3.630758
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87870] 06:07:55
+  real_reward_mean=0.5310
+  q_top5=[(6, 1, 0, 1.0473750829696655), (0, 0, 0, 1.005239486694336), (15, 2, 3, 0.32720863819122314), (3, 0, 3, 0.2915549874305725), (9, 1, 3, 0.28602010011672974)]
+  Q_loss=0.246885 | q_mean=0.594689 | epsilon=0.0200
+  td_error_mean=0.222694 | frac_clipped=0.099
+  fpn_norm_entropy=0.9139 | fpn_tau_std=0.2737
+  grad_total_pre=38.606670 | grad_total_post=10.000000 | clip_scale=0.259023 clip_percent=74.10%
+  backbone_pre=37.598707 (yolo=34.977904 tfm=13.791627) head_pre=8.764255
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87880] 06:08:13
+  real_reward_mean=0.5260
+  q_top5=[(35, 5, 5, 0.9974374175071716), (4, 0, 4, 0.34097880125045776), (22, 3, 4, 0.26814502477645874), (33, 5, 3, 0.2609878480434418), (9, 1, 3, 0.2597797214984894)]
+  Q_loss=0.113127 | q_mean=0.552548 | epsilon=0.0200
+  td_error_mean=0.169293 | frac_clipped=0.064
+  fpn_norm_entropy=0.9118 | fpn_tau_std=0.2732
+  grad_total_pre=4.511161 | grad_total_post=4.511161 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=4.466364 (yolo=4.232270 tfm=1.426990) head_pre=0.634164
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87890] 06:08:32
+  real_reward_mean=0.5260
+  q_top5=[(3, 0, 3, 1.0749880075454712), (27, 4, 3, 0.1771436333656311), (25, 4, 1, 0.16218885779380798), (21, 3, 3, 0.1551406979560852), (8, 1, 2, 0.1323542296886444)]
+  Q_loss=0.116124 | q_mean=0.565031 | epsilon=0.0200
+  td_error_mean=0.168396 | frac_clipped=0.073
+  fpn_norm_entropy=0.9168 | fpn_tau_std=0.2743
+  grad_total_pre=9.766303 | grad_total_post=9.766304 | clip_scale=1.000000 clip_percent=0.00%
+  backbone_pre=9.688866 (yolo=8.315801 tfm=4.972080) head_pre=1.227417
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87900] 06:08:53
+  real_reward_mean=0.5360
+  q_top5=[(18, 3, 0, 1.0282188653945923), (5, 0, 5, 0.18691499531269073), (9, 1, 3, 0.1789747178554535), (12, 2, 0, 0.16390326619148254), (10, 1, 4, 0.15756377577781677)]
+  Q_loss=0.116488 | q_mean=0.527081 | epsilon=0.0200
+  td_error_mean=0.157538 | frac_clipped=0.065
+  fpn_norm_entropy=0.9147 | fpn_tau_std=0.2735
+  grad_total_pre=11.250232 | grad_total_post=9.999999 | clip_scale=0.888871 clip_percent=11.11%
+  backbone_pre=10.878902 (yolo=9.799406 tfm=4.724633) head_pre=2.866564
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=1.295139e-02 | weight_delta_prev_100=7.200032e-04 (ref_step=87800)
+---
+[Step 87910] 06:09:08
+  real_reward_mean=0.5190
+  q_top5=[(30, 5, 0, 0.9787300825119019), (8, 1, 2, 0.267943799495697), (24, 4, 0, 0.2505013048648834), (2, 0, 2, 0.24440079927444458), (17, 2, 5, 0.24115431308746338)]
+  Q_loss=0.247750 | q_mean=0.581480 | epsilon=0.0200
+  td_error_mean=0.189161 | frac_clipped=0.101
+  fpn_norm_entropy=0.9129 | fpn_tau_std=0.2738
+  grad_total_pre=70.246788 | grad_total_post=10.000000 | clip_scale=0.142355 clip_percent=85.76%
+  backbone_pre=70.005995 (yolo=65.440357 tfm=24.867631) head_pre=5.811350
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87920] 06:09:27
+  real_reward_mean=0.5140
+  q_top5=[(0, 0, 0, 1.0368824005126953), (1, 0, 1, 1.016896367073059), (10, 1, 4, 0.24679884314537048), (5, 0, 5, 0.2336455136537552), (28, 4, 4, 0.217749685049057)]
+  Q_loss=0.259583 | q_mean=0.566577 | epsilon=0.0200
+  td_error_mean=0.248780 | frac_clipped=0.118
+  fpn_norm_entropy=0.9138 | fpn_tau_std=0.2738
+  grad_total_pre=43.240116 | grad_total_post=10.000001 | clip_scale=0.231267 clip_percent=76.87%
+  backbone_pre=43.199807 (yolo=38.217447 tfm=20.140756) head_pre=1.866626
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87930] 06:09:39
+  real_reward_mean=0.4965
+  q_top5=[(18, 3, 0, 1.0385205745697021), (25, 4, 1, 0.2682163417339325), (27, 4, 3, 0.25350597500801086), (19, 3, 1, 0.2462124526500702), (28, 4, 4, 0.24408632516860962)]
+  Q_loss=0.146906 | q_mean=0.644087 | epsilon=0.0200
+  td_error_mean=0.205910 | frac_clipped=0.090
+  fpn_norm_entropy=0.9166 | fpn_tau_std=0.2744
+  grad_total_pre=29.663786 | grad_total_post=9.999999 | clip_scale=0.337111 clip_percent=66.29%
+  backbone_pre=29.169665 (yolo=26.849136 tfm=11.401460) head_pre=5.391737
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87940] 06:09:59
+  real_reward_mean=0.4965
+  q_top5=[(30, 5, 0, 1.0220119953155518), (3, 0, 3, 0.26264655590057373), (28, 4, 4, 0.2568618655204773), (34, 5, 4, 0.24843120574951172), (27, 4, 3, 0.23279553651809692)]
+  Q_loss=0.124927 | q_mean=0.751488 | epsilon=0.0200
+  td_error_mean=0.148326 | frac_clipped=0.056
+  fpn_norm_entropy=0.9207 | fpn_tau_std=0.2752
+  grad_total_pre=10.824930 | grad_total_post=9.999999 | clip_scale=0.923793 clip_percent=7.62%
+  backbone_pre=10.287674 (yolo=9.148052 tfm=4.706312) head_pre=3.367919
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 87950] 06:10:15
+  real_reward_mean=0.4840
+  q_top5=[(5, 0, 5, 1.0154681205749512), (30, 5, 0, 0.18657153844833374), (6, 1, 0, 0.18378756940364838), (10, 1, 4, 0.18365707993507385), (7, 1, 1, 0.17725186049938202)]
+  Q_loss=0.133453 | q_mean=0.684674 | epsilon=0.0200
+  td_error_mean=0.192588 | frac_clipped=0.080
+  fpn_norm_entropy=0.9223 | fpn_tau_std=0.2756
+  grad_total_pre=82.476967 | grad_total_post=10.000000 | clip_scale=0.121246 clip_percent=87.88%
+  backbone_pre=81.753629 (yolo=75.723532 tfm=30.815623) head_pre=10.899249
+  yolo_update=ON | yolo_nan_grad=0
+---
+
+--- hour rollover at 2026-06-07T06:10:16.528621 ---

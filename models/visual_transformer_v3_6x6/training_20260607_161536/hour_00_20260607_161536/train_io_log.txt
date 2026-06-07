@@ -1,0 +1,116 @@
+
+============================================================
+Session started: 2026-06-07T16:15:36.079137
+Hour 00 started: 2026-06-07T16:15:36.080874
+Encoder dims: [64, 64, 64, 64, 64]
+Path: models\visual_transformer_v3_6x6\training_20260607_161536\hour_00_20260607_161536\train_io_log.txt
+============================================================
+2026-06-07T16:15:41.597021 [V3 CHECKPOINT] Loaded backbone: models\visual_transformer_v3_6x6\backbone.pth
+2026-06-07T16:15:41.607442 [V3 CHECKPOINT] Loaded FQF-Network: models\visual_transformer_v3_6x6\fqf_network.pth
+2026-06-07T16:15:41.617883 [V3 CHECKPOINT] Loaded FQF-Target: models\visual_transformer_v3_6x6\fqf_target.pth
+2026-06-07T16:15:41.653004 [V3 CHECKPOINT] Loaded training_history: models\visual_transformer_v3_6x6\training_history.pth
+2026-06-07T16:15:41.653273 [V3 CHECKPOINT] Loaded optimizer (models\visual_transformer_v3_6x6\optimizer_state.pth): total_it=106662, episode=16878, epsilon=0.0200, total_episodes=16878
+2026-06-07T16:15:42.494341 [V3 CHECKPOINT] Loaded 512 replay buffer entries
+2026-06-07T16:15:42.601336 [V3 CHECKPOINT] dropout latch ON (p=0.1, threshold=0.4) — resume: training_history win_rate already above threshold
+2026-06-07T16:15:42.601460 [V3 CHECKPOINT] YOLO update latch ON (resume: training_history win_rate already above threshold)
+[Step 106670] 16:29:31
+  real_reward_mean=0.5340
+  q_top5=[(0, 0, 0, 1.0837217569351196), (10, 1, 4, 0.36134302616119385), (23, 3, 5, 0.34078967571258545), (15, 2, 3, 0.3334807753562927), (28, 4, 4, 0.33249276876449585)]
+  Q_loss=0.135816 | q_mean=0.599603 | epsilon=0.0200
+  td_error_mean=0.284274 | frac_clipped=0.141
+  fpn_norm_entropy=0.9131 | fpn_tau_std=0.2731
+  grad_total_pre=12.648032 | grad_total_post=9.999999 | clip_scale=0.790637 clip_percent=20.94%
+  backbone_pre=12.533078 (yolo=10.364500 tfm=7.046645) head_pre=1.701371
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 106680] 16:29:49
+  real_reward_mean=0.5460
+  q_top5=[(21, 3, 3, 2.1075212955474854), (22, 3, 4, 2.0964112281799316), (23, 3, 5, 2.0683398246765137), (17, 2, 5, 2.0588083267211914), (29, 4, 5, 2.027433395385742)]
+  Q_loss=0.474153 | q_mean=0.812078 | epsilon=0.0200
+  td_error_mean=0.398381 | frac_clipped=0.157
+  fpn_norm_entropy=0.9158 | fpn_tau_std=0.2738
+  grad_total_pre=40.410538 | grad_total_post=10.000000 | clip_scale=0.247460 clip_percent=75.25%
+  backbone_pre=39.838654 (yolo=33.161219 tfm=22.078312) head_pre=6.774456
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 106690] 16:30:06
+  real_reward_mean=0.5410
+  q_top5=[(30, 5, 0, 1.0275349617004395), (28, 4, 4, -0.6842014193534851), (27, 4, 3, -0.7169488668441772), (31, 5, 1, -0.7191661596298218), (25, 4, 1, -0.734660267829895)]
+  Q_loss=0.282525 | q_mean=0.889255 | epsilon=0.0200
+  td_error_mean=0.450056 | frac_clipped=0.213
+  fpn_norm_entropy=0.9178 | fpn_tau_std=0.2743
+  grad_total_pre=37.336437 | grad_total_post=10.000000 | clip_scale=0.267835 clip_percent=73.22%
+  backbone_pre=36.558904 (yolo=27.708023 tfm=23.849926) head_pre=7.579975
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 106700] 16:30:34
+  real_reward_mean=0.5460
+  q_top5=[(6, 1, 0, 1.1495611667633057), (13, 2, 1, -0.5785995721817017), (24, 4, 0, -0.6463528275489807), (30, 5, 0, -0.6513134241104126), (0, 0, 0, -0.658865749835968)]
+  Q_loss=0.197098 | q_mean=0.798616 | epsilon=0.0200
+  td_error_mean=0.243609 | frac_clipped=0.115
+  fpn_norm_entropy=0.9190 | fpn_tau_std=0.2743
+  grad_total_pre=13.476784 | grad_total_post=9.999999 | clip_scale=0.742017 clip_percent=25.80%
+  backbone_pre=12.852551 (yolo=11.768691 tfm=5.165847) head_pre=4.054087
+  yolo_update=ON | yolo_nan_grad=0
+  weight_delta_init=9.669621e-06 | weight_delta_prev_38=9.669621e-06 (ref_step=106662)
+---
+[Step 106710] 16:30:54
+  real_reward_mean=0.5460
+  q_top5=[(35, 5, 5, 1.064732551574707), (22, 3, 4, 0.3180944621562958), (11, 1, 5, 0.3146711587905884), (27, 4, 3, 0.3101702928543091), (33, 5, 3, 0.29934078454971313)]
+  Q_loss=0.291683 | q_mean=0.824456 | epsilon=0.0200
+  td_error_mean=0.316192 | frac_clipped=0.131
+  fpn_norm_entropy=0.9154 | fpn_tau_std=0.2737
+  grad_total_pre=19.548759 | grad_total_post=9.999999 | clip_scale=0.511541 clip_percent=48.85%
+  backbone_pre=18.582344 (yolo=15.246620 tfm=10.622810) head_pre=6.070456
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 106720] 16:31:12
+  real_reward_mean=0.5340
+  q_top5=[(11, 1, 5, 0.9653016924858093), (5, 0, 5, 0.3037041425704956), (34, 5, 4, 0.27029162645339966), (27, 4, 3, 0.2547832429409027), (9, 1, 3, 0.23832978308200836)]
+  Q_loss=0.290821 | q_mean=0.705008 | epsilon=0.0200
+  td_error_mean=0.319430 | frac_clipped=0.123
+  fpn_norm_entropy=0.9163 | fpn_tau_std=0.2738
+  grad_total_pre=37.259281 | grad_total_post=10.000001 | clip_scale=0.268390 clip_percent=73.16%
+  backbone_pre=37.077035 (yolo=34.586225 tfm=13.360374) head_pre=3.680698
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 106730] 16:31:36
+  real_reward_mean=0.5215
+  q_top5=[(5, 0, 5, 0.9780718088150024), (23, 3, 5, 0.21786034107208252), (21, 3, 3, 0.2100427746772766), (22, 3, 4, 0.19564230740070343), (29, 4, 5, 0.19052207469940186)]
+  Q_loss=0.235818 | q_mean=0.715846 | epsilon=0.0200
+  td_error_mean=0.322935 | frac_clipped=0.126
+  fpn_norm_entropy=0.9176 | fpn_tau_std=0.2741
+  grad_total_pre=65.968559 | grad_total_post=10.000000 | clip_scale=0.151587 clip_percent=84.84%
+  backbone_pre=65.927835 (yolo=59.439987 tfm=28.519596) head_pre=2.317633
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 106740] 16:32:01
+  real_reward_mean=0.5435
+  q_top5=[(24, 4, 0, 0.9649418592453003), (22, 3, 4, 0.2991204857826233), (27, 4, 3, 0.2771974802017212), (21, 3, 3, 0.26506662368774414), (26, 4, 2, 0.2620024085044861)]
+  Q_loss=0.371093 | q_mean=0.929215 | epsilon=0.0200
+  td_error_mean=0.418904 | frac_clipped=0.171
+  fpn_norm_entropy=0.9205 | fpn_tau_std=0.2747
+  grad_total_pre=36.631886 | grad_total_post=10.000000 | clip_scale=0.272986 clip_percent=72.70%
+  backbone_pre=36.145922 (yolo=32.798909 tfm=15.190762) head_pre=5.947040
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 106750] 16:32:19
+  real_reward_mean=0.5485
+  q_top5=[(3, 0, 3, 0.9995172619819641), (35, 5, 5, 0.21695825457572937), (5, 0, 5, 0.18856407701969147), (21, 3, 3, 0.18790417909622192), (26, 4, 2, 0.18707981705665588)]
+  Q_loss=0.171965 | q_mean=0.761835 | epsilon=0.0200
+  td_error_mean=0.277022 | frac_clipped=0.119
+  fpn_norm_entropy=0.9166 | fpn_tau_std=0.2739
+  grad_total_pre=55.876617 | grad_total_post=10.000001 | clip_scale=0.178966 clip_percent=82.10%
+  backbone_pre=55.842728 (yolo=48.266497 tfm=28.084793) head_pre=1.945788
+  yolo_update=ON | yolo_nan_grad=0
+---
+[Step 106760] 16:32:41
+  real_reward_mean=0.5605
+  q_top5=[(6, 1, 0, 0.9575304985046387), (17, 2, 5, 0.26149222254753113), (23, 3, 5, 0.24919702112674713), (3, 0, 3, 0.23524969816207886), (16, 2, 4, 0.23205488920211792)]
+  Q_loss=0.226682 | q_mean=0.733954 | epsilon=0.0200
+  td_error_mean=0.262526 | frac_clipped=0.121
+  fpn_norm_entropy=0.9147 | fpn_tau_std=0.2736
+  grad_total_pre=41.887730 | grad_total_post=10.000001 | clip_scale=0.238733 clip_percent=76.13%
+  backbone_pre=41.076484 (yolo=37.940512 tfm=15.741507) head_pre=8.203933
+  yolo_update=ON | yolo_nan_grad=0
+---

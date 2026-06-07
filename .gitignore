@@ -3,7 +3,7 @@
 # model
 runs*
 rl_models*
-models*
+# models*
 .ultralytics/
 Ultralytics/
 
