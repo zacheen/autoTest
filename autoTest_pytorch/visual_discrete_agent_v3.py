@@ -186,7 +186,7 @@ DROPOUT_LATCH_WR_THRESHOLD = 0.4
 N_STEP = 1
 GRAD_CLIP_NORM = 10.0   # Match TransformerDiscreteAgent; keep 10.0 after token_adapter + encoder became trainable.
 TRAIN_EVERY_N_STEPS = 1
-TARGET_UPDATE_FREQ = 200
+TARGET_UPDATE_FREQ = 400
 SAVE_EVERY_N_EPISODES = 500
 # Throttle names match stage1 for the same behavior.
 # DIAGNOSTIC_LOG_EVERY: gate for io_log + batched .item() + ~22 TB scalars.
@@ -417,9 +417,24 @@ class VisualAgentV3(VisualAgentCommonMixin):
         #     LR_BACKBONE_PRETRAINED to protect pretrained attention from noisy RL grads.
         #   - Stage 1 missing: those params are random init, pretrained_prefixes empty.
         # token_adapter is always random init and uses the fresh LR group.
-        pretrained_prefixes: tuple[str, ...] = (
-            ("encoder.", "decoder.", "query_tokens") if self._stage1_loaded else ()
-        )
+        #
+        # pretrained_prefixes decides whether encoder/decoder/query_tokens get their
+        # own protected low-LR "backbone_pretrained" group. That choice changes the
+        # optimizer's param-group COUNT (4 with the group, 3 without), and
+        # optimizer.load_state_dict() refuses a checkpoint whose group count differs,
+        # silently dropping a resume into a from-scratch run.
+        #
+        # On a fresh run the choice follows the Stage 1 warm-start (protect the
+        # weights we just loaded). On resume it must instead match the layout saved
+        # in optimizer_state.pth: the Stage 1 files are a one-time warm-start source
+        # that may be moved/deleted after the first session, so their on-disk
+        # presence must NOT silently change the group layout and break resume.
+        V3_PRETRAINED_PREFIXES = ("encoder.", "decoder.", "query_tokens")
+        resume_prefixes = self._pretrained_prefixes_from_optimizer_ckpt(V3_PRETRAINED_PREFIXES)
+        if resume_prefixes is not None:
+            pretrained_prefixes: tuple[str, ...] = resume_prefixes
+        else:
+            pretrained_prefixes = V3_PRETRAINED_PREFIXES if self._stage1_loaded else ()
         self.optimizer = build_fqf_optimizer(
             self.backbone,
             self.q_network,
@@ -1570,6 +1585,43 @@ class VisualAgentV3(VisualAgentCommonMixin):
             torch.save(qtarget_sd,  archive / "fqf_target.pth")
         except Exception as exc:
             print(f"[V3] WARN: archive snapshot write failed: {exc}")
+
+    def _pretrained_prefixes_from_optimizer_ckpt(
+        self, v3_prefixes: tuple[str, ...]
+    ) -> tuple[str, ...] | None:
+        """Resume layout source of truth: the saved optimizer's param groups.
+
+        Returns the pretrained_prefixes that reproduce the saved optimizer's
+        param-group layout, or None when there is no checkpoint to resume from
+        (so the caller falls back to the Stage 1 warm-start decision).
+
+        The optimizer param-group layout must match the saved state_dict exactly or
+        load_state_dict raises "different number of parameter groups". The only knob
+        that changes the layout is whether encoder/decoder/query_tokens were split
+        into the "backbone_pretrained" group, so we detect that group by name in the
+        save and return the matching prefixes (present -> v3_prefixes, absent -> ()).
+        Reading it here decouples the layout from whether the Stage 1 files still
+        exist on disk this session.
+
+        Called before the optimizer is built (so we can build the matching layout),
+        which is why it reads the checkpoint directly rather than reusing
+        _load_optimizer_state. The small extra startup-only read is acceptable.
+        """
+        opt_path = self._optimizer_state_path()
+        if not opt_path.exists():
+            return None
+        try:
+            saved = torch.load(opt_path, map_location="cpu", weights_only=False)
+            group_names = [g.get("name") for g in saved["optimizer"]["param_groups"]]
+        except Exception as exc:
+            # Unreadable layout: defer to the Stage 1 based decision and let the
+            # later _load_optimizer_state surface the real load error.
+            print(
+                f"{self.log_prefix} WARN: could not read optimizer param_groups for"
+                f" resume layout ({opt_path}): {exc} — falling back to Stage 1 decision"
+            )
+            return None
+        return v3_prefixes if "backbone_pretrained" in group_names else ()
 
     def try_load_model(self) -> None:
         # V3 own checkpoints. These run AFTER Stage 1 warm-start; a success here
