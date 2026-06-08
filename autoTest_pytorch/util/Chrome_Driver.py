@@ -8,6 +8,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 import os
 import sys
 import time
+import glob
 # Same X-less guard as util/Click — see comment there. 
   # pyautogui here is only touched on the non-headless paths (window focus + F11 fullscreen)
   # headless path uses a fixed CDP viewport and never queries the screen.
@@ -42,6 +43,39 @@ DEVICE_SCALE_FACTOR = 1.25
 # Override per-run via AUTOTEST_HEADLESS_VIEWPORT="WxH".
 HEADLESS_VIEWPORT = "1920x1080"
 
+def _resolve_chromedriver():
+    """Return a Service for chromedriver.
+
+    Try online first: ChromeDriverManager().install() reaches Chrome-for-Testing
+    to pick the version matching the installed Chrome, downloads it, and caches it
+    under ~/.wdm. When offline that network call raises (ConnectionError), so we
+    fall back to the newest chromedriver.exe already sitting in the ~/.wdm cache —
+    i.e. whatever a previous online run downloaded. No manual file placement needed;
+    just run online once to populate the cache.
+    """
+    try:
+        return Service(ChromeDriverManager().install())
+    except Exception as e:
+        cache_root = os.path.join(os.path.expanduser("~"), ".wdm")
+        candidates = glob.glob(
+            os.path.join(cache_root, "**", "chromedriver.exe"), recursive=True
+        )
+        if candidates:
+            # Pick the most recently downloaded driver in the cache.
+            local = max(candidates, key=os.path.getmtime)
+            print(f"[Chrome_Driver] online driver resolution failed ({e!r}); "
+                  f"falling back to cached driver: {local}")
+            return Service(local)
+        print("=" * 60)
+        print(f"[ERROR] Could not resolve chromedriver online ({e!r}) and no "
+              f"cached driver was found under {cache_root}.")
+        print("Fix: connect to the internet once so webdriver_manager can "
+              "download and cache the matching chromedriver, then offline runs "
+              "will reuse it automatically.")
+        print("=" * 60)
+        raise
+
+
 class Chrome_Driver:
     def __init__(self, game_env):
         """Open browser, log in, and wire the driver into the session."""
@@ -73,7 +107,7 @@ class Chrome_Driver:
         }
         options.add_experimental_option("prefs", prefs)
 
-        service = Service(ChromeDriverManager().install())
+        service = _resolve_chromedriver()
         self.driver = webdriver.Chrome(service=service, options=options)
         self.game_env = game_env
 
