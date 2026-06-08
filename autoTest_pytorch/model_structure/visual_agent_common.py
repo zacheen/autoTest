@@ -138,6 +138,13 @@ class VisualAgentCommonMixin:
             "episode_count": self.episode_count,
         }
         payload.update(self.epsilon_controller.state_dict())
+        # V3 persists its monotone YOLO update latch so the unfreeze decision is
+        # inherited across resumes: a from-scratch random-init run trains YOLO from
+        # step 0, and a Stage 1 warm-start that has crossed the win-rate threshold
+        # stays unfrozen even if win_rate later dips. Guarded so v1/v2 agents that
+        # have no latch are unaffected.
+        if hasattr(self, "_yolo_update_latched"):
+            payload["yolo_update_latched"] = bool(self._yolo_update_latched)
         torch.save(payload, self._optimizer_state_path())
 
         # TrainingHistory uses an independent file, decoupled from optimizer state.
@@ -154,6 +161,10 @@ class VisualAgentCommonMixin:
             state = torch.load(opt_path, map_location=self.device, weights_only=False)
             self.optimizer.load_state_dict(state["optimizer"])
             self.total_it = state.get("total_it", 0)
+            # Inherited YOLO update latch (V3). None when the key is absent (v1/v2
+            # agents, or checkpoints saved before the latch was persisted), which
+            # tells the agent's __init__ to fall back to its fresh-start decision.
+            self._loaded_yolo_update_latched = state.get("yolo_update_latched", None)
             # episode_count is no longer set directly. It delegates to
             # training_history.total_episodes, restored from its own .pth file.
             # Ignore the legacy "episode_count" key in optimizer state.

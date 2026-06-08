@@ -616,12 +616,37 @@ class VisualAgentV3(VisualAgentCommonMixin):
             self._latch_dropout_on(reason="resume: training_history win_rate already above threshold")
 
         # ── YOLO update latch ───────────────────────────────────────────────
-        # YOLO grads flow + log every step, but are zeroed before optimizer.step()
-        # until _yolo_latch_should_engage() is satisfied (win_rate threshold + a full
-        # 100-episode window). Same not-saved, re-evaluated-on-resume design as the
-        # dropout latch above.
+        # Gates whether YOLO weight updates are applied. While OFF, YOLO grads still
+        # flow + log every step but are zeroed before optimizer.step(), protecting the
+        # pretrained vision backbone from noisy early RL gradients. Monotone one-way
+        # switch (OFF -> ON, never back), and — unlike the dropout latch above — its
+        # state is persisted so the unfreeze decision is inherited across resumes.
+        #
+        # Initial value, in precedence order:
+        #   1. Resume: inherit the persisted latch from the previous run (loaded with
+        #      the optimizer state). Keeps the one-way guarantee even if win_rate later
+        #      dips below threshold.
+        #   2. Fresh from-scratch random init (no Stage 1 warm-start, so
+        #      pretrained_prefixes is empty): nothing pretrained to protect, so the
+        #      latch starts ON and YOLO trains from step 0.
+        #   3. Fresh Stage 1 warm-start: latch OFF; train_step engages it once
+        #      win_rate(100) crosses the threshold (engaged here too if already above,
+        #      e.g. a Stage 1 lineage resumed from a checkpoint with no persisted latch).
+        inherited_latch = getattr(self, "_loaded_yolo_update_latched", None)
         self._yolo_update_latched = False
-        if self._yolo_latch_should_engage(start_win_rate):
+        if inherited_latch is not None:
+            self._yolo_update_latched = bool(inherited_latch)
+            if self._yolo_update_latched:
+                self.checkpoint_logger.warn(
+                    "YOLO update latch ON (inherited from previous run's checkpoint)"
+                )
+        elif not pretrained_prefixes:
+            self._yolo_update_latched = True
+            self.checkpoint_logger.warn(
+                "YOLO update latch ON (random init: no Stage 1 warm-start — YOLO trains from step 0)"
+            )
+
+        if not self._yolo_update_latched and self._yolo_latch_should_engage(start_win_rate):
             self._yolo_update_latched = True
             self.checkpoint_logger.warn(
                 "YOLO update latch ON (resume: training_history win_rate already above threshold)"
@@ -661,7 +686,8 @@ class VisualAgentV3(VisualAgentCommonMixin):
                 extra_sections={
                     # YOLO update latch state at session start: the step-0 value of the
                     # latch that gates YOLO weight updates, plus the win_rate that decided
-                    # it (the latch is not saved across resumes). Mid-run the transition is
+                    # it. The latch is persisted and inherited across resumes (random init
+                    # starts ON; a crossed Stage 1 run stays ON). Mid-run the transition is
                     # visible via TB grad_post/yolo.
                     "yolo_update_latch": {
                         "active_at_start": self._yolo_update_latched,
