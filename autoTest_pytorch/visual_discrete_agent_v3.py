@@ -183,7 +183,7 @@ DECODER_DROPOUT    = 0.1
 DROPOUT_LATCH_WR_THRESHOLD = 0.4
 
 # ── training hyper-params ────────────────────────────────────────────
-N_STEP = 1
+N_STEP = 3
 GRAD_CLIP_NORM = 10.0   # Match TransformerDiscreteAgent; keep 10.0 after token_adapter + encoder became trainable.
 TRAIN_EVERY_N_STEPS = 1
 TARGET_UPDATE_FREQ = 400
@@ -224,7 +224,7 @@ LR_WARMUP_START_FACTOR  = 0.0
 LR_RESUME_WARMUP_STEPS  = 2000  # Extra warmup on every restart, including first run.
 
 # ── replay buffer ────────────────────────────────────────────────────
-BUFFER_CAPACITY = 2048
+BUFFER_CAPACITY = 4096
 SAVE_CAPACITY   = 512
 MINIMUM_DATA_SIZE = min(BUFFER_CAPACITY, SAVE_CAPACITY*4)-1  # below this amount, won't start training
 PENDING_SAMPLE_RATIO = 0.10
