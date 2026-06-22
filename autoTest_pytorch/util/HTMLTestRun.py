@@ -133,12 +133,12 @@ class Template_mixin(object):
     """
 
     STATUS = {
-    0: '通过',
-    1: '失败',
-    2: '错误',
+    0: 'Passed',
+    1: 'Failed',
+    2: 'Error',
     }
 
-    DEFAULT_TITLE = '测试报告'
+    DEFAULT_TITLE = 'Test Report'
     DEFAULT_DESCRIPTION = ''
     DEFAULT_TESTER='QA'
 
@@ -195,12 +195,12 @@ function showCase(level) {
 	//console.log(detail_class.length)
 	if (level == 3) {
 		for (var i = 0; i < detail_class.length; i++){
-			detail_class[i].innerHTML="收起"
+			detail_class[i].innerHTML="Collapse"
 		}
 	}
 	else{
 			for (var i = 0; i < detail_class.length; i++){
-			detail_class[i].innerHTML="详细"
+			detail_class[i].innerHTML="Details"
 		}
 	}
 }
@@ -227,11 +227,11 @@ function showClassDetail(cid, count) {
         // Fix collapse toggle and update detail text --Findyou
         if (toHide) {
             document.getElementById(tid).className = 'hiddenRow';
-            document.getElementById(cid).innerText = "详细"
+            document.getElementById(cid).innerText = "Details"
         }
         else {
             document.getElementById(tid).className = '';
-            document.getElementById(cid).innerText = "收起"
+            document.getElementById(cid).innerText = "Collapse"
         }
     }
 }
@@ -308,10 +308,10 @@ table       { font-size: 100%; }
     # Localized and styled by Findyou.
     REPORT_TMPL = """
 <p id='show_detail_line'>
-<a class="btn btn-primary" href='javascript:showCase(0)'>概要{ %(passrate)s }</a>
-<a class="btn btn-danger" href='javascript:showCase(1)'>失败{ %(fail)s }</a>
-<a class="btn btn-success" href='javascript:showCase(2)'>通过{ %(Pass)s }</a>
-<a class="btn btn-info" href='javascript:showCase(3)'>所有{ %(count)s }</a>
+<a class="btn btn-primary" href='javascript:showCase(0)'>Summary { %(passrate)s }</a>
+<a class="btn btn-danger" href='javascript:showCase(1)'>Failed { %(fail)s }</a>
+<a class="btn btn-success" href='javascript:showCase(2)'>Passed { %(Pass)s }</a>
+<a class="btn btn-info" href='javascript:showCase(3)'>All { %(count)s }</a>
 </p>
 <table id='result_table' class="table table-condensed table-bordered table-hover">
 <colgroup>
@@ -323,22 +323,22 @@ table       { font-size: 100%; }
 <col align='right' />
 </colgroup>
 <tr id='header_row' class="text-center success" style="font-weight: bold;font-size: 14px;">
-    <td>用例集/测试用例</td>
-    <td>总计</td>
-    <td>通过</td>
-    <td>失败</td>
-    <td>错误</td>
-    <td>详细</td>
-    <td>截图</td>
+    <td>Test Suite / Test Case</td>
+    <td>Total</td>
+    <td>Passed</td>
+    <td>Failed</td>
+    <td>Error</td>
+    <td>Details</td>
+    <td>Screenshot</td>
 </tr>
 %(test_list)s
 <tr id='total_row' class="text-center active">
-    <td>总计</td>
+    <td>Total</td>
     <td>%(count)s</td>
     <td>%(Pass)s</td>
     <td>%(fail)s</td>
     <td>%(error)s</td>
-    <td>通过率：%(passrate)s</td>
+    <td>Pass Rate: %(passrate)s</td>
     <td>&nbsp;</td>
 </tr>
 </table>
@@ -351,7 +351,7 @@ table       { font-size: 100%; }
     <td class="text-center">%(Pass)s</td>
     <td class="text-center">%(fail)s</td>
     <td class="text-center">%(error)s</td>
-    <td class="text-center"><a href="javascript:showClassDetail('%(cid)s',%(count)s)" class="detail" id='%(cid)s'>详细</a></td>
+    <td class="text-center"><a href="javascript:showClassDetail('%(cid)s',%(count)s)" class="detail" id='%(cid)s'>Details</a></td>
     <td>&nbsp;</td>
 </tr>
 """ # variables: (style, desc, count, Pass, fail, error, cid)
@@ -486,7 +486,7 @@ class _TestResult(TestResult):
         _, _exc_str = self.errors[-1]
         output = self.complete_output()
         # Also print errors to cmd in case the HTML report is incomplete.
-        print("unittest 輸出的 error : \n"+str(_exc_str))
+        print("unittest error output:\n"+str(_exc_str))
         self.result.append((2, test, output, _exc_str))
         if self.verbosity > 1:
             sys.stderr.write('E  ')
@@ -566,20 +566,20 @@ class HTMLTestRunner(Template_mixin):
         startTime = str(self.startTime)[:19]
         duration = str(self.stopTime - self.startTime)
         status = []
-        status.append('共 %s' % (result.success_count + result.failure_count + result.error_count))
-        if result.success_count: status.append('通过 %s'    % result.success_count)
-        if result.failure_count: status.append('失败 %s' % result.failure_count)
-        if result.error_count:   status.append('错误 %s'   % result.error_count  )
+        status.append('Total %s' % (result.success_count + result.failure_count + result.error_count))
+        if result.success_count: status.append('Passed %s'    % result.success_count)
+        if result.failure_count: status.append('Failed %s' % result.failure_count)
+        if result.error_count:   status.append('Error %s'   % result.error_count  )
         if status:
-            status = '，'.join(status)
+            status = ', '.join(status)
             self.passrate = str("%.2f%%" % (float(result.success_count) / float(result.success_count + result.failure_count + result.error_count) * 100))
         else:
             status = 'none'
         return [
-            ('测试人员', self.tester),
-            ('开始时间',startTime),
-            ('合计耗时',duration),
-            ('测试结果',status + "，通过率= "+self.passrate),
+            ('Tester', self.tester),
+            ('Start Time',startTime),
+            ('Duration',duration),
+            ('Test Result',status + ", Pass Rate= "+self.passrate),
         ]
 
 
@@ -704,7 +704,7 @@ class HTMLTestRunner(Template_mixin):
             desc = desc,
             script = script,
             status = self.STATUS[n],
-            screenshot = "./testpic/"+ name + "_"+ self.file_create_time + '.png',
+            screenshot = "./testpic/"+ name + ("_"+ self.file_create_time if self.file_create_time else "") + '.png',
         )
         rows.append(row)
         if not has_output:
