@@ -1410,7 +1410,7 @@ class VisualAgentV3(VisualAgentCommonMixin):
         # return None silently skips caller logging.
         return {"Q_loss": loss_value, "q_mean": q_mean}
 
-    def maybe_train_step(self, force: bool = False):
+    def train_step_on_schedule(self, force: bool = False):
         self.pending_train_steps += 1
         if self.pending_train_steps < self.train_every_n_steps and not force:
             return None

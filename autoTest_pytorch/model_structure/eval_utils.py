@@ -6,6 +6,8 @@ import datetime
 import time
 from typing import Callable
 
+from model_structure.history import History
+
 
 def should_run_eval(
     episode: int,
@@ -105,3 +107,52 @@ def log_eval_metrics(
         f"Invalid Rate: {avg_invalid_rate:.2%}"
         f"{suffix}"
     )
+
+
+class EvalBatch:
+    """One fixed-policy eval batch: countdown + timing, with per-episode outcomes
+    tracked by a composed History (window=None → whole-batch mean).
+
+    A single instance is shared across the per-round TestCase instances; while
+    ``active`` the current main-loop round is an eval episode. ``arm`` starts a
+    batch, ``record`` logs one finished episode (and consumes one countdown
+    slot), ``finished`` signals the batch end, and ``averages`` returns the
+    aggregate for ``log_eval_metrics``.
+    """
+
+    def __init__(self) -> None:
+        self.countdown = 0
+        self.size = 0
+        self.started_at: float | None = None
+        self.seconds_since_last = 0.0
+        self.history = History(max_capacity=1)  # placeholder; replaced by arm()
+
+    @property
+    def active(self) -> bool:
+        return self.countdown > 0
+
+    @property
+    def index(self) -> int:
+        """Episodes recorded so far in the current batch."""
+        return self.history.total_episodes
+
+    def arm(self, num_episodes: int, *, started_at: float, seconds_since_last: float) -> None:
+        self.countdown = self.size = num_episodes
+        self.started_at = started_at
+        self.seconds_since_last = seconds_since_last
+        self.history = History(max_capacity=num_episodes)
+
+    def record(self, *, reward: float, is_win: bool, steps: int, invalid_rate: float) -> None:
+        self.history.record(is_win, total_reward=reward, steps=steps, invalid_rate=invalid_rate)
+        self.countdown -= 1
+
+    def finished(self) -> bool:
+        return self.countdown <= 0
+
+    def averages(self) -> dict:
+        return {
+            "avg_reward": self.history.avg_reward(window=None),
+            "win_rate": self.history.win_rate(window=None),
+            "avg_steps": self.history.avg_steps(window=None),
+            "avg_invalid_rate": self.history.avg_invalid_rate(window=None),
+        }

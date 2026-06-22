@@ -71,11 +71,7 @@ class VisualAgentCommonMixin:
         next_state: torch.Tensor | None,
         reward: float,
         done: bool,
-        *,
-        source: str = "train",
     ) -> None:
-        if source not in ("train", "eval"):
-            raise ValueError(f"source must be 'train' or 'eval', got {source!r}")
         # Record raw rewards into training_history.step_rewards for the
         # train/real_reward_mean rolling metric. v2 / v3 share this mixin, so
         # neither agent keeps its own recent_real_rewards deque.
@@ -86,7 +82,6 @@ class VisualAgentCommonMixin:
             "next_state": self._to_storage_state(next_state),
             "reward": float(reward),
             "done": bool(done),
-            "source": source,
         }
         self.n_step_buffer.append(transition)
 

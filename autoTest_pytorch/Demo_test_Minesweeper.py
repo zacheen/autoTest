@@ -1,7 +1,7 @@
 ﻿import unittest
 import os
 from contextlib import nullcontext
-from threading import Thread, Event
+from threading import Thread
 import datetime
 import random
 import sys
@@ -39,6 +39,7 @@ from Minesweeper_web_client import MinesweeperWebClient
 
 from Minesweeper.Minesweeper_manager import Minesweeper_manager
 from model_structure.eval_utils import (
+    EvalBatch,
     finish_eval_timing,
     should_run_eval,
     start_eval_timing,
@@ -50,8 +51,6 @@ from visual_discrete_agent_v3 import MINIMUM_DATA_SIZE, get_agent
 EVAL_INTERVAL = 200
 EVAL_EPISODES = 30
 EVAL_OFFSET = 50
-EVAL_MAX_STEPS_PER_EPISODE = 200
-EVAL_STEP_WAIT_SECONDS = 0.1
 RESUME_PREFILL_EVAL_EPISODES = 300
 
 
@@ -131,6 +130,14 @@ class Game_test_case(unittest.TestCase) :
     _last_eval_started_at = None
     _resume_eval_checked = False
 
+    # Fixed-policy eval runs as main-loop rounds (each eval episode is its own
+    # round → its own HTML report). This single shared EvalBatch holds the
+    # current batch's countdown + accumulators (a composed History); while
+    # _eval.active the current round is an eval episode. Armed by
+    # _start_eval_batch_on_schedule at the end of a training round. Class-level so it
+    # survives the fresh TestCase instance created per round.
+    _eval = EvalBatch()
+
     @classmethod
     def setUpClass(self):
         # Per-game init values.
@@ -165,6 +172,12 @@ class Game_test_case(unittest.TestCase) :
         # take screenshot for html report
         Tool_Main.compare_sim(glo_var, "", sys._getframe().f_code.co_name)
 
+        # An eval round is any round while a batch is armed (see EvalBatch).
+        if Game_test_case._eval.active:
+            print_to_output(
+                f"[EVAL ROUND] {Game_test_case._eval.index + 1}/{Game_test_case._eval.size}"
+            )
+
     def test_click_middle(self):
         global glo_var
         glo_var.state.set_record_time()
@@ -182,7 +195,6 @@ class Game_test_case(unittest.TestCase) :
 
     def decide_next_step_and_play(self, game_status):
         Tool_Main.glo_var.state.set_record_time()  # glo_var.state.set_record_time() is a thin delegate to state
-        # looping until find a position that is in the game_region
         while True :
             check_pause()
             current_screenshot = self.capture_grid_state(game_status)
@@ -252,21 +264,22 @@ class Game_test_case(unittest.TestCase) :
             for row in board
         )
 
-    def update_model(self, game_status):
-        state = game_status.current_pic
-        action = game_status.action
-        next_state = game_status.next_state
-        reward = game_status.reward
+    def _store_transition(self, game_status):
+        """Store one (s, a, s', r, done) tuple. Never takes a gradient step."""
         done = bool(game_status.game_over)
         game_status.agent.store_transition(
-            state,
-            action,
-            next_state if not done else None,
-            reward,
+            game_status.current_pic,
+            game_status.action,
+            game_status.next_state if not done else None,
+            game_status.reward,
             done,
         )
 
-        loss_info = game_status.agent.maybe_train_step(force=done)
+    def _train_on_schedule(self, game_status):
+        """Trigger a gradient step if the buffer size and schedule allow it.
+        Forces a step on the terminal transition (``game_status.game_over``) so
+        the last transition of an episode is always trained on."""
+        loss_info = game_status.agent.train_step_on_schedule(force=bool(game_status.game_over))
         if loss_info:
             if 'critic_loss' in loss_info and 'actor_loss' in loss_info:
                 print(f"Loss - Critic: {loss_info['critic_loss']:.4f}, Actor: {loss_info['actor_loss']:.4f}")
@@ -275,12 +288,14 @@ class Game_test_case(unittest.TestCase) :
             else:
                 print(f"Train metrics: {loss_info}")
 
+    def update_model(self, game_status):
+        self._store_transition(game_status)
+        self._train_on_schedule(game_status)
+
     class Game_status():
         def __init__(self):
             # regions (left, top, width, height)
             grid_region = (745, 361, 432, 434) # the size of the screen
-            # region limitation [(st_x,st_1,len_n,len_y), have to be inside or outside]
-            self.game_region = [((1, 31, 1919, 987), True), ((713, 32, 498, 45), False)]
             
             self.agent = get_agent(grid_region)
             self.agent.reset_episode()
@@ -325,10 +340,11 @@ class Game_test_case(unittest.TestCase) :
                 return 0.0
             return self.total_reward / self.reward_count
 
-    def maybe_run_eval(self, agent):
+    def _start_eval_batch_on_schedule(self, agent):
+        """At the end of a training episode, decide whether a fixed-policy eval
+        batch is due. If so, arm the eval countdown so the following rounds run
+        as eval episodes (each its own report); the batch is NOT run inline."""
         episode = agent.episode_count
-        eval_episodes = None
-
         if agent.total_it > 0 and not Game_test_case._resume_eval_checked:
             Game_test_case._resume_eval_checked = True
             training_data_size = agent.replay_buffer.training_size()
@@ -340,8 +356,7 @@ class Game_test_case(unittest.TestCase) :
             print(
                 f"[V3 EVAL] Resume eval: replay "
                 f"{agent.replay_buffer.size()} + pending {agent.replay_buffer.pending_size()}"
-                f"/{MINIMUM_DATA_SIZE}, "
-                f"episodes={eval_episodes}"
+                f"/{MINIMUM_DATA_SIZE}, episodes={eval_episodes}"
             )
         elif should_run_eval(
             episode,
@@ -357,91 +372,83 @@ class Game_test_case(unittest.TestCase) :
         else:
             return
 
-        eval_started_at, seconds_since_last_eval = start_eval_timing(
-            Game_test_case._last_eval_started_at
+        # Both trigger branches above fall through here to arm the batch.
+        started_at, seconds_since_last = start_eval_timing(Game_test_case._last_eval_started_at)
+        Game_test_case._last_eval_started_at = started_at
+        Game_test_case._eval.arm(
+            eval_episodes, started_at=started_at, seconds_since_last=seconds_since_last
         )
-        Game_test_case._last_eval_started_at = eval_started_at
-        eval_stats = self.run_fixed_policy_evaluation(agent, eval_episodes)
-        duration_seconds = finish_eval_timing(eval_started_at)
 
+    def _finish_eval_batch(self, agent):
+        """Emit aggregate fixed-policy eval metrics (TensorBoard/CSV, NOT an HTML
+        report) once the eval countdown reaches 0."""
+        duration_seconds = finish_eval_timing(Game_test_case._eval.started_at)
+        averages = Game_test_case._eval.averages()
         agent.log_eval_metrics(
-            avg_reward=eval_stats["avg_reward"],
-            win_rate=eval_stats["win_rate"],
-            avg_steps=eval_stats["avg_steps"],
-            avg_invalid_rate=eval_stats["avg_invalid_rate"],
-            seconds_since_last_eval=seconds_since_last_eval,
+            avg_reward=averages["avg_reward"],
+            win_rate=averages["win_rate"],
+            avg_steps=averages["avg_steps"],
+            avg_invalid_rate=averages["avg_invalid_rate"],
+            seconds_since_last_eval=Game_test_case._eval.seconds_since_last,
             duration_seconds=duration_seconds,
         )
 
-    def run_fixed_policy_evaluation(self, agent, num_episodes):
-        rewards = []
-        wins = []
-        steps = []
-        invalid_rates = []
+    def _play_episode(self, game_status, *, is_eval):
+        """Play one full episode; shared by training and fixed-policy eval.
 
-        policy_context = (
-            agent.fixed_policy_mode()
-            if hasattr(agent, "fixed_policy_mode")
-            else nullcontext()
-        )
-        with policy_context:
-            for eval_idx in range(1, num_episodes + 1):
-                stats = self.run_eval_episode(agent, store_data=True)
-                rewards.append(stats["reward"])
-                wins.append(1 if stats["is_win"] else 0)
-                steps.append(stats["steps"])
-                invalid_rates.append(stats["invalid_rate"])
-                print(
-                    f"[V3 EVAL] {eval_idx:>2}/{num_episodes}: "
-                    f"{'WIN ' if stats['is_win'] else 'LOSE'} | "
-                    f"reward={stats['reward']:.3f} | "
-                    f"steps={stats['steps']} | "
-                    f"invalid={stats['invalid_rate']:.2%}"
-                )
+        ``is_eval`` gates only the differences between the two modes:
+          - exploration noise (off for eval),
+          - whether a gradient step is taken (eval stores transitions but does
+            not train),
+          - max steps per episode,
+          - which debug frame is logged (action frame vs lose frame),
+          - the one-time UI settle before the first capture (training only).
 
-        return {
-            "avg_reward": sum(rewards) / max(len(rewards), 1),
-            "win_rate": sum(wins) / max(len(wins), 1),
-            "avg_steps": sum(steps) / max(len(steps), 1),
-            "avg_invalid_rate": sum(invalid_rates) / max(len(invalid_rates), 1),
-        }
+        The agent's eval-mode switches (epsilon=0, BN/.eval()) are applied by the
+        caller via ``agent.fixed_policy_mode()``. Returns per-episode stats;
+        ``timed_out`` is True when the step budget was hit before game over.
+        """
+        global glo_var
+        agent = game_status.agent
 
-    def run_eval_episode(self, agent, *, store_data=True):
-        if not WEB_API.start_new_game():
-            raise RuntimeError("[V3 EVAL] Failed to start eval game")
-
-        game_status = Game_test_case.Game_status()
-        game_status.agent = agent
-        game_status.noise = False
         game_status.server_state = WEB_API.get_game_state()
-        agent.reset_episode()
 
-        done = False
-        while not done and game_status.step_count < EVAL_MAX_STEPS_PER_EPISODE:
+        # Both training and eval run through the suite (test_click_middle begins
+        # the game), so neither starts its own game here. Let the board finish
+        # rendering before the first capture.
+        time.sleep(1)
+
+        while not game_status.game_over and game_status.step_count < game_status.max_steps:
             check_pause()
+            glo_var.state.set_record_time()
             current_screenshot = self.capture_grid_state(game_status)
-            action, log_info = agent.select_action(current_screenshot, add_noise=False)
+            action, log_info = agent.select_action(
+                current_screenshot,
+                add_noise=not is_eval,
+            )
             game_status.update_state(current_screenshot, action)
+            game_status.log_info = log_info
+
             row, col = agent.action_to_grid(action)
+            step_prefix = f"Step {game_status.step_count}: action={action} -> ({row},{col})"
             game_status.click_attempt_count += 1
 
             api_result = WEB_API.click_cell_with_state(row, col)
             if not api_result or not api_result.get("ok"):
+                print_to_output(f"{step_prefix} -> API action failed")
                 game_status.reward = MINESWEEPER_REWARD_CONFIG.invalid_click
                 game_status.invalid_click_count += 1
                 game_status.record_reward(game_status.reward)
                 agent.block_action_for_state(current_screenshot, action)
-                if store_data:
-                    agent.store_transition(
-                        current_screenshot,
-                        action,
-                        current_screenshot,
-                        game_status.reward,
-                        False,
-                        source="eval",
+                game_status.next_state = current_screenshot
+                self._store_transition(game_status)
+                if not is_eval:
+                    self._train_on_schedule(game_status)
+                    agent.log_action_image(
+                        current_screenshot, log_info, game_status.step_count,
+                        reward=game_status.reward,
                     )
                 game_status.step_count += 1
-                time.sleep(EVAL_STEP_WAIT_SECONDS)
                 continue
 
             next_server_state = api_result.get("data")
@@ -455,53 +462,54 @@ class Game_test_case(unittest.TestCase) :
             if server_status == "lost":
                 game_status.reward = MINESWEEPER_REWARD_CONFIG.lose
                 game_status.game_over = 1
-                done = True
                 game_status.next_state = None
-                # Record the frame the agent saw before the fatal click (clicked
-                # cell highlighted + top-5 Q) so we can tell a genuinely
-                # undecidable board apart from a logic problem.
-                agent.log_lose_image(
-                    current_screenshot,
-                    log_info,
-                    game_status.step_count,
-                    reward=game_status.reward,
-                )
+                outcome = "lose"
+                if is_eval:
+                    # Record the frame the agent saw before the fatal click
+                    # (clicked cell highlighted + top-5 Q) so we can tell a
+                    # genuinely undecidable board from a logic problem.
+                    agent.log_lose_image(
+                        current_screenshot, log_info, game_status.step_count,
+                        reward=game_status.reward,
+                    )
             elif server_status == "won":
                 game_status.reward = MINESWEEPER_REWARD_CONFIG.win
                 game_status.game_over = 1
                 game_status.won = True
-                done = True
                 game_status.next_state = None
+                outcome = "win"
             elif board_changed:
                 game_status.reward = MINESWEEPER_REWARD_CONFIG.valid_click
                 game_status.next_state = self.capture_grid_state(game_status)
+                outcome = "valid click"
             else:
                 game_status.reward = MINESWEEPER_REWARD_CONFIG.invalid_click
                 game_status.invalid_click_count += 1
                 agent.block_action_for_state(current_screenshot, action)
                 game_status.next_state = current_screenshot
+                outcome = "invalid click"
+            print_to_output(f"{step_prefix} -> {outcome}")
 
             game_status.record_reward(game_status.reward)
-            if store_data:
-                agent.store_transition(
-                    current_screenshot,
-                    action,
-                    game_status.next_state,
-                    game_status.reward,
-                    bool(game_status.game_over),
-                    source="eval",
-                )
+            self._store_transition(game_status)
+            # Training-only: eval never trains, and logs terminal frames via
+            # log_lose_image (above) instead of per-step action frames.
+            if not is_eval:
+                self._train_on_schedule(game_status)
+                agent.log_action_image(current_screenshot, log_info, game_status.step_count)
             game_status.step_count += 1
-            time.sleep(EVAL_STEP_WAIT_SECONDS)
 
         return {
             "reward": game_status.total_reward,
             "steps": game_status.step_count,
             "is_win": game_status.won,
             "invalid_rate": game_status.invalid_click_rate(),
+            "timed_out": not game_status.game_over and game_status.step_count >= game_status.max_steps,
         }
 
     def test_RL(self):
+        # Legacy screenshot-diff loop; NOT in the suite (see main loop) — kept
+        # for reference only.
         global glo_var
         glo_var.state.set_record_time()
         UI_waiting_time = 1
@@ -519,7 +527,7 @@ class Game_test_case(unittest.TestCase) :
                     reward_mean=game_status.average_reward(),
                 )
                 game_status.agent.on_episode_end()
-                self.maybe_run_eval(game_status.agent)
+                self._start_eval_batch_on_schedule(game_status.agent)
                 self.assertTrue(True, "game_over(really finish the game)")
                 break
             elif glo_var.state.fail_playing :
@@ -583,92 +591,55 @@ class Game_test_case(unittest.TestCase) :
                     self.decide_next_step_and_play(game_status)
 
     def test_RL_server(self):
-        """RL training loop driven by server state instead of screenshot diffing.
-
-        Flow per step:
-          1. capture screenshot → YOLO/policy → choose action
-          2. POST /click via WEB_API → receive next server_state
-          3. classify reward based on server_state["status"] + board diff
-          4. capture next screenshot for replay buffer
-          5. agent.maybe_train_step()
-        """
+        """One main-loop round of RL play, driven by server state. The round's
+        mode is read from ``Game_test_case._eval.active``: eval plays the fixed
+        policy and feeds the eval batch; training logs metrics and may arm the
+        next batch. Both modes detect a step-budget timeout and signal the suite
+        to restart. Each eval episode is its own round → its own HTML report."""
         global glo_var
-        glo_var.state.set_record_time()
-        UI_waiting_time = 1
         game_status = Game_test_case.Game_status()
-        game_status.noise = True
-        game_status.server_state = WEB_API.get_game_state()
-        time.sleep(UI_waiting_time)
-        self.decide_next_step_and_play(game_status)
-        time.sleep(UI_waiting_time)
+        agent = game_status.agent
+        is_eval = Game_test_case._eval.active
 
-        while True:
-            check_pause()
-            time.sleep(0.1)
-            if game_status.game_over:
-                game_status.agent.log_episode_metrics(
-                    win=game_status.won,
-                    invalid_click_rate=game_status.invalid_click_rate(),
-                    reward_mean=game_status.average_reward(),
-                )
-                game_status.agent.on_episode_end()
-                self.maybe_run_eval(game_status.agent)
-                self.assertTrue(True, "game_over(really finish the game)")
-                break
-            elif glo_var.state.fail_playing:
-                game_status.agent.log_episode_metrics(
-                    win=False,
-                    invalid_click_rate=game_status.invalid_click_rate(),
-                    reward_mean=game_status.average_reward(),
-                )
-                game_status.agent.on_episode_end()
-                self.assertTrue(False, "time_out(reach max steps)")
-                break
+        # Eval plays the fixed policy (epsilon=0, BN/.eval()); training doesn't.
+        policy_ctx = agent.fixed_policy_mode() if is_eval else nullcontext()
+        with policy_ctx:
+            stats = self._play_episode(game_status, is_eval=is_eval)
 
-            if game_status.pending_server_state is None:
-                continue
+        # Per-episode bookkeeping (runs even on a timeout — the episode happened).
+        if is_eval:
+            Game_test_case._eval.record(
+                reward=stats["reward"], is_win=stats["is_win"],
+                steps=stats["steps"], invalid_rate=stats["invalid_rate"],
+            )
+            print_to_output(
+                f"[V3 EVAL] {Game_test_case._eval.index:>2}/{Game_test_case._eval.size}: "
+                f"{'WIN ' if stats['is_win'] else 'LOSE'} | "
+                f"reward={stats['reward']:.3f} | "
+                f"steps={stats['steps']} | "
+                f"invalid={stats['invalid_rate']:.2%}"
+            )
+            if Game_test_case._eval.finished():
+                self._finish_eval_batch(agent)
+        else:
+            agent.log_episode_metrics(
+                win=stats["is_win"],
+                invalid_click_rate=stats["invalid_rate"],
+                reward_mean=game_status.average_reward(),
+            )
+            agent.on_episode_end()
 
-            game_status.step_count += 1
-            game_status.server_state = game_status.pending_server_state
-            game_status.pending_server_state = None
-            board_changed = game_status.pending_board_changed
-            game_status.pending_board_changed = False
-
-            server_status = game_status.server_state.get("status")
-            if server_status == "lost":
-                game_status.reward = MINESWEEPER_REWARD_CONFIG.lose
-                game_status.game_over = 1
-                print("lose")
-            elif server_status == "won":
-                game_status.reward = MINESWEEPER_REWARD_CONFIG.win
-                game_status.game_over = 1
-                game_status.won = True
-                print("win")
-            elif board_changed:
-                game_status.reward = MINESWEEPER_REWARD_CONFIG.valid_click
-                print("valid click")
-            else:
-                game_status.reward = MINESWEEPER_REWARD_CONFIG.invalid_click
-                game_status.invalid_click_count += 1
-                print("invalid click")
-
-            game_status.record_reward(game_status.reward)
-
-            if board_changed:
-                if not game_status.game_over:
-                    game_status.next_state = self.capture_grid_state(game_status)
-                else:
-                    game_status.next_state = None
-            else:
-                if game_status.current_pic is not None and game_status.action is not None:
-                    game_status.agent.block_action_for_state(game_status.current_pic, game_status.action)
-                game_status.next_state = game_status.current_pic
-
-            self.update_model(game_status)
-            if game_status.step_count > game_status.max_steps:
-                glo_var.state.fail_playing = True
-            elif not game_status.game_over:
-                self.decide_next_step_and_play(game_status)
+        if stats["timed_out"]:
+            glo_var.state.fail_playing = True
+            self.assertTrue(False, "time_out(reach max steps)")
+        else:
+            if not is_eval:
+                # Training only: a clean finish may arm the next eval batch.
+                self._start_eval_batch_on_schedule(agent)
+            self.assertTrue(
+                True,
+                "eval episode done" if is_eval else "game_over(really finish the game)",
+            )
 
     def test_wait_result(self):
         global glo_var
@@ -768,8 +739,11 @@ if __name__=="__main__" :
             during_gameing.addTest(Game_test_case("test_new_game"))
 
             glo_var.state.file_create_time = time.strftime("%Y-%m-%d-%H_%M_%S",time.localtime(time.time()))
-            fp=open(f"./testreport/Report-{glo_var.state.file_create_time}(playing_game) ({round_count} round).html",'wb')
-            runner=HTMLTestRun.HTMLTestRunner(stream=fp,title=GAME_NAME,description=u'Report for playing game:', file_create_time = glo_var.state.file_create_time)
+            is_eval_report = Game_test_case._eval.active
+            mode_tag = "eval" if is_eval_report else "playing_game"
+            report_desc = u'Report for eval episode:' if is_eval_report else u'Report for playing game:'
+            fp=open(f"./testreport/Report-{glo_var.state.file_create_time}({mode_tag}) ({round_count} round).html",'wb')
+            runner=HTMLTestRun.HTMLTestRunner(stream=fp,title=GAME_NAME,description=report_desc, file_create_time = glo_var.state.file_create_time)
             # start to run the test cases
             runner.run(during_gameing)
             fp.close()
